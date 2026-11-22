@@ -151,13 +151,12 @@ d=l.hs_vision_open()
 print(bool(d))
 l.hs_vision_close(ctypes.c_void_p(d))'
 
-# Loads a musl build in the Home Assistant image of its platform, if there is one.
+# Loads a musl build in the Home Assistant image of its platform. Home Assistant publishes both platforms, so a
+# failed pull stops the script.
 smoke_musl() {
   local platform=$1 so=$2 out
-  if ! docker pull -q --platform "$platform" "$HA_IMAGE" >/dev/null 2>&1; then
-    echo "no Home Assistant image for $platform: smoke skipped" >&2
-    return 0
-  fi
+  docker pull -q --platform "$platform" "$HA_IMAGE" >/dev/null ||
+    die "could not pull $HA_IMAGE for $platform, so the library cannot be loaded in Home Assistant"
   out=$(docker run -i --rm --platform "$platform" --entrypoint sh -e SMOKE="$SMOKE" "$HA_IMAGE" \
     -c 'cat > /tmp/libhs_vision.so && python3 -c "$SMOKE" /tmp/libhs_vision.so' <"$so")
   echo "smoke in $HA_IMAGE ($platform): $(echo "$out" | tr '\n' ' ')" >&2
