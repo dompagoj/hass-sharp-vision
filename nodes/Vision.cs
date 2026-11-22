@@ -112,11 +112,16 @@ public sealed unsafe class VisionDetector : IDisposable
                 lock (gate)
                 {
                     if (detector == 0) throw new ObjectDisposedException(nameof(VisionDetector), "The vision detector has been closed");
-                    var count = faces
-                        ? exports.Faces(detector, rgb, width, height, width * 3, inputSize, (float)minScore, found, MaxResults)
-                        : exports.People(detector, rgb, width, height, width * 3, inputSize, (float)minScore, found, MaxResults);
-                    if (count < 0) throw new InvalidOperationException($"{(faces ? "Face" : "Person")} detection failed: {exports.LastError()}");
-                    return Math.Min(count, MaxResults);
+                    try
+                    {
+                        var count = faces
+                            ? exports.Faces(detector, rgb, width, height, width * 3, inputSize, (float)minScore, found, MaxResults)
+                            : exports.People(detector, rgb, width, height, width * 3, inputSize, (float)minScore, found, MaxResults);
+                        if (count < 0) throw new InvalidOperationException($"{(faces ? "Face" : "Person")} detection failed: {exports.LastError()}");
+                        return Math.Min(count, MaxResults);
+                    }
+                    // The lock roots the Lock, not this: without this, the finalizer could close the detector mid-call.
+                    finally { GC.KeepAlive(this); }
                 }
         }
         finally

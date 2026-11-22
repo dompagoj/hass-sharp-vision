@@ -146,6 +146,8 @@ static class VisionTests
         readonly string directory = Path.Combine(Path.GetTempPath(), "vision-tests-" + Guid.NewGuid().ToString("N"));
         readonly List<string> logs = [];
         readonly List<IDisposable> owned = [];
+        // Guards logs and owned, which the setup's callbacks write from any thread.
+        readonly Lock gate = new();
 
         public Loaded(string source)
         {
@@ -164,16 +166,16 @@ static class VisionTests
             var assembly = context.LoadFromStream(image);
             vision = assembly.GetType("NodeLib.Vision", true)!;
             detection = assembly.GetType("NodeLib.FaceDetection", true)!;
-            Files = new SharpFiles(directory, line => { lock (logs) logs.Add(line); }, () => new NoReceiving());
-            Setups = new NodeSetupContext(Files, (line, _) => { lock (logs) logs.Add(line); }, CancellationToken.None, disposable => { lock (owned) owned.Add(disposable); });
+            Files = new SharpFiles(directory, line => { lock (gate) logs.Add(line); }, () => new NoReceiving());
+            Setups = new NodeSetupContext(Files, (line, _) => { lock (gate) logs.Add(line); }, CancellationToken.None, disposable => { lock (gate) owned.Add(disposable); });
         }
 
         public SharpFiles Files { get; }
         public NodeSetupContext Setups { get; }
         /// <summary>The directory the files are downloaded into.</summary>
         public string Directory => directory;
-        public string[] Logs() { lock (logs) return [.. logs]; }
-        public IDisposable[] Owned() { lock (owned) return [.. owned]; }
+        public string[] Logs() { lock (gate) return [.. logs]; }
+        public IDisposable[] Owned() { lock (gate) return [.. owned]; }
         /// <summary>Whether the context has loaded the native library.</summary>
         public bool LoadedLibrary => vision.GetField("loaded", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null) != null;
 
