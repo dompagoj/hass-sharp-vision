@@ -1,0 +1,39 @@
+hs_vision
+=========
+
+hs_vision is part of HassSharp, which is MIT-licensed (the repository's LICENSE). The library embeds models and
+links code that are not HassSharp's own, and its tests use a photo that is not HassSharp's own.
+
+Models
+------
+
+face_detection_yunet_2023mar.onnx (YuNet), in model/ and embedded in the library
+  Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>
+  MIT License; the licence is model/LICENSE-yunet, copied verbatim from
+  https://huggingface.co/opencv/face_detection_yunet/raw/main/LICENSE
+  Source: https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx
+  232,589 bytes, SHA-256 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4, unmodified.
+
+Linked code
+-----------
+
+The library statically links tract (https://github.com/sonos/tract), which is MIT OR Apache-2.0, and the crates it
+depends on. Each of them is available under the MIT or the Apache-2.0 licence (some also under others, such as the
+Unlicense), except foldhash, which is Zlib-licensed. The crates and their licences are listed by
+
+  cargo tree -e normal --format '{p} {l}'
+
+run in this directory. That list also shows the procedural macros (such as derive-new and zerocopy-derive) and what
+they use (such as unicode-ident, which is also under Unicode-3.0); those run while the library is built and are not
+linked into it. `cargo tree -e normal,no-proc-macro` lists only what is linked.
+
+Test fixtures
+-------------
+
+tests/fixtures/group.jpg
+  "Smiling Bangladeshi men" by Steve Evans, from Wikimedia Commons:
+  https://commons.wikimedia.org/wiki/File:Smiling_Bangladeshi_men.jpg
+  Licensed under the Creative Commons Attribution 2.0 Generic licence (CC BY 2.0):
+  https://creativecommons.org/licenses/by/2.0/
+  Changed: downscaled from 1080×720 to 640×426 (sips -Z 640 -s formatOptions 85). It is used only by the tests and
+  is not part of the library.

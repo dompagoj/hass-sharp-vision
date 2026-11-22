@@ -1,0 +1,23 @@
+[package]
+name = "hs_vision"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Face and person detection for HassSharp: YuNet and YOLOX-nano on tract, behind a small C ABI"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tract-onnx = "=0.23.10"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# A panic in an export is caught and returned as an error, which needs unwinding.
+panic = "unwind"
