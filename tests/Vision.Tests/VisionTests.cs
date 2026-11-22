@@ -60,7 +60,7 @@ static class VisionTests
     }
 
     /// <summary><c>nodes/Vision.cs</c> as committed.</summary>
-    static string Committed() => File.ReadAllText(Path.Combine(Root, "nodes", "Vision.cs"));
+    internal static string Committed() => File.ReadAllText(Path.Combine(Root, "nodes", "Vision.cs"));
 
     /// <summary>
     /// <c>Vision.cs</c> with its <c>Source</c> set to <paramref name="source"/> and its pinned table to
@@ -139,7 +139,7 @@ static class VisionTests
     /// with the global usings, the framework's references and unsafe code) and loaded into a collectible context, with
     /// files under a temporary directory and a setup context whose <c>Own</c> collects into <see cref="Owned"/>.
     /// </summary>
-    sealed class Loaded : IAsyncDisposable
+    internal sealed class Loaded : IAsyncDisposable
     {
         readonly ScriptLoadContext context = new();
         readonly Type vision, detection;
@@ -210,8 +210,8 @@ static class VisionTests
         }
     }
 
-    static object[] Items(object list) => [.. (IEnumerable<object>)list];
-    static float Get(object item, string property) => (float)item.GetType().GetProperty(property)!.GetValue(item)!;
+    internal static object[] Items(object list) => [.. (IEnumerable<object>)list];
+    internal static float Get(object item, string property) => (float)item.GetType().GetProperty(property)!.GetValue(item)!;
 
     static T Throws<T>(Action action, string what) where T : Exception
     {
@@ -292,7 +292,7 @@ static class VisionTests
     }
 
     /// <summary>A <see cref="Loaded"/> of <see cref="LocalSource"/> on a server of its own, set up: its detector is the one it owns.</summary>
-    sealed class SetUp : IAsyncDisposable
+    internal sealed class SetUp : IAsyncDisposable
     {
         public required LoopbackServer Server { get; init; }
         public required Loaded Vision { get; init; }
@@ -317,7 +317,7 @@ static class VisionTests
 
     static SharpImage Photo(string name) => SharpImage.Load(File.ReadAllBytes(Fixture(name)));
 
-    static bool Greenish(ReadOnlySpan<byte> rgb, int at) => rgb[at + 1] >= 120 && rgb[at + 1] >= rgb[at] + 60 && rgb[at + 1] >= rgb[at + 2] + 60;
+    internal static bool Greenish(ReadOnlySpan<byte> rgb, int at) => rgb[at + 1] >= 120 && rgb[at + 1] >= rgb[at] + 60 && rgb[at + 1] >= rgb[at + 2] + 60;
 
     static async Task FindsTheFacesOfTheFixture()
     {
