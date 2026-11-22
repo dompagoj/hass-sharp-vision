@@ -37,6 +37,9 @@ run in this directory. That list also shows the procedural macros (such as deriv
 they use (such as unicode-ident, which is also under Unicode-3.0); those run while the library is built and are not
 linked into it. `cargo tree -e normal,no-proc-macro` lists only what is linked.
 
+THIRD-PARTY-LICENSES has the full licence texts of the linked crates and of both models; every release carries it
+beside the binaries.
+
 Test fixtures
 -------------
 

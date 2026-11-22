@@ -1,0 +1,22 @@
+Third-party licences of libhs_vision
+====================================
+
+libhs_vision-<rid>.so, the hs_vision library of hass-sharp-vision, statically links the Rust crates named below
+and embeds two models. cargo-about made this list from Cargo.lock for the library's four Linux targets. Each licence
+text is given once, followed by the crates and versions it covers; texts that differ only in their copyright lines
+stay apart, because those lines go with the binary. The list also names the procedural macros and the crates they
+use (such as serde_derive, syn and unicode-ident), which run while the library is built and are not linked into it;
+`cargo tree -e normal,no-proc-macro` in native/ lists only what is linked. The models' licences come last.
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+================================================================================
+
+{{{text}}}
+
+{{/each}}

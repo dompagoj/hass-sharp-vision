@@ -1,0 +1,19 @@
+# cargo-about's configuration for native/build.sh --licenses, which writes THIRD-PARTY-LICENSES.
+# The licences the linked crates use; a crate under several of them is reported under the first one it allows.
+accepted = ["MIT", "Apache-2.0", "Zlib"]
+# The library's four Linux targets (build.sh's RIDs).
+targets = [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# hs_vision itself (publish = false) is hass-sharp-vision's own, under its MIT LICENSE.
+private = { ignore = true }
+
+# unicode-ident is used by procedural macros (through proc-macro2 and syn), which run while the library is built and
+# are not linked into it. cargo-about cannot leave procedural macros out, so it lists them and needs this licence.
+[unicode-ident]
+accepted = ["Unicode-3.0"]
