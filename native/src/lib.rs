@@ -77,7 +77,7 @@ fn set_last_error(message: Option<String>) {
     let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = message);
 }
 
-fn panic_message(panic: &(dyn Any + Send)) -> &str {
+pub(crate) fn panic_message(panic: &(dyn Any + Send)) -> &str {
     if let Some(s) = panic.downcast_ref::<&str>() {
         s
     } else if let Some(s) = panic.downcast_ref::<String>() {

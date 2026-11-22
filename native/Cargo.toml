@@ -9,14 +9,17 @@ description = "Face and person detection for HassSharp: YuNet and YOLOX-nano on 
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-tract-onnx = "=0.23.10"
+# Without its default transformers feature, which neither model needs: 0.4 to 0.8 MiB smaller.
+tract-onnx = { version = "=0.23.10", default-features = false }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [profile.release]
+# Speed over size: "z" saves about 6 MiB but makes a call at 640 80 % slower and its first plan twice as slow; "s" saves
+# 4 MiB for 37 %.
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
 strip = true
 # A panic in an export is caught and returned as an error, which needs unwinding.

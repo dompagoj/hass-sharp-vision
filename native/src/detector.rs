@@ -2,12 +2,13 @@
 
 use std::collections::VecDeque;
 use std::io::Cursor;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tract_onnx::prelude::*;
 
 use crate::nms::best;
-use crate::{yolox, yunet, Face, Person};
+use crate::{panic_message, yolox, yunet, Face, Person};
 
 /// The plans kept per model, one per padded input shape; the oldest is dropped for a new one.
 pub const PLANS_KEPT: usize = 4;
@@ -221,16 +222,32 @@ impl Model {
 
 struct State {
     faces: Model,
-    /// YOLOX, parsed by the first people call; a failure is kept, so that it is not parsed again.
+    /// YOLOX, parsed by the first people call; a failure or a panic is kept, so that it is not parsed again.
     people: Option<Result<Model, String>>,
+}
+
+/// Parses the embedded YOLOX.
+fn parse_yolox() -> TractResult<Model> {
+    Model::parse(YOLOX, &[yolox::OUTPUT])
+}
+
+/// The person model from `parse`, or why it could not load, a panic included.
+fn load_people(parse: fn() -> TractResult<Model>) -> Result<Model, String> {
+    match catch_unwind(AssertUnwindSafe(parse)) {
+        Ok(parsed) => parsed.map_err(|e| format!("the person model could not load: {e:#}")),
+        Err(panic) => Err(format!(
+            "the person model could not load: internal error: {}",
+            panic_message(&*panic)
+        )),
+    }
 }
 
 /// The models behind one handle. Their parsing, plans and runs are behind one lock, so concurrent calls run them
 /// one at a time; each call prepares its input and decodes its outputs outside it.
 pub struct Detector {
     state: Mutex<State>,
-    /// The person model's ONNX, which a test replaces with one that cannot load.
-    yolox: &'static [u8],
+    /// Parses the person model; a test replaces it with one that fails or panics.
+    parse_people: fn() -> TractResult<Model>,
 }
 
 // The ABI lets any thread call a detector.
@@ -249,7 +266,7 @@ impl Detector {
                 faces,
                 people: None,
             }),
-            yolox: YOLOX,
+            parse_people: parse_yolox,
         })
     }
 
@@ -327,10 +344,7 @@ impl Detector {
         let mut state = self.state();
         let model = state
             .people
-            .get_or_insert_with(|| {
-                Model::parse(self.yolox, &[yolox::OUTPUT])
-                    .map_err(|e| format!("the person model could not load: {e:#}"))
-            })
+            .get_or_insert_with(|| load_people(self.parse_people))
             .as_mut()
             .map_err(|e| e.clone())?;
         let plan = model.plan(lb.pw, lb.ph).map_err(|e| {
@@ -411,10 +425,11 @@ mod tests {
         assert!((bx - 1.0 / lb.scale).abs() < 1e-4 && (by - 720.0 / 213.0).abs() < 1e-4);
     }
 
-    #[test]
-    fn a_person_model_that_cannot_load_fails_every_people_call() {
+    /// The first people call's error with `parse` as the person model's parser, checking that it is kept: with the
+    /// real parser put back, the next call gives the same error and the model stays unloaded, and faces still work.
+    fn people_fail_for_good(parse: fn() -> TractResult<Model>) -> String {
         let mut det = Detector::open().unwrap();
-        det.yolox = b"not a model";
+        det.parse_people = parse;
         let rgb = [0u8; 64 * 64 * 3];
         let picture = Picture {
             rgb: &rgb,
@@ -429,11 +444,26 @@ mod tests {
         );
         assert!(!det.people_model_loaded());
         // Kept: even the real model is not parsed again.
-        det.yolox = YOLOX;
-        assert_eq!(det.people(&picture, 64, 0.45), Err(first));
+        det.parse_people = parse_yolox;
+        assert_eq!(det.people(&picture, 64, 0.45), Err(first.clone()));
         assert!(!det.people_model_loaded());
         // Faces are unaffected.
         assert_eq!(det.faces(&picture, 64, 0.7), Ok(vec![]));
+        first
+    }
+
+    #[test]
+    fn a_person_model_that_cannot_load_fails_every_people_call() {
+        people_fail_for_good(|| Model::parse(b"not a model", &[yolox::OUTPUT]));
+    }
+
+    #[test]
+    fn a_panic_parsing_the_person_model_fails_every_people_call() {
+        let error = people_fail_for_good(|| panic!("parser {}", "broke"));
+        assert_eq!(
+            error,
+            "the person model could not load: internal error: parser broke"
+        );
     }
 
     #[test]
