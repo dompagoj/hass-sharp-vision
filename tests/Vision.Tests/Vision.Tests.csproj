@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net11.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <!-- HassSharp gives its internals to this name only (custom_components/hass_sharp/HassSharp/RuntimeTestAccess.cs),
+             and these tests need them. The name is borrowed until hass-sharp has a test kit for library authors. -->
+        <AssemblyName>HassSharp.RuntimeTests</AssemblyName>
+        <!-- The hass-sharp checkout to build against: -p:HassSharpRoot=/path/to/hass-sharp, or HASS_SHARP_ROOT. -->
+        <HassSharpRoot Condition="'$(HassSharpRoot)' == ''">$(HASS_SHARP_ROOT)</HassSharpRoot>
+        <HassSharpProject>$(HassSharpRoot)/custom_components/hass_sharp/HassSharp/HassSharp.csproj</HassSharpProject>
+    </PropertyGroup>
+
+    <Target Name="RequireHassSharpRoot" BeforeTargets="PrepareForBuild;CollectPackageReferences;_GenerateRestoreProjectSpec;Restore">
+        <Error Condition="'$(HassSharpRoot)' == '' Or !Exists('$(HassSharpProject)')"
+               Text="Set HassSharpRoot to a hass-sharp checkout: dotnet run --project tests/Vision.Tests -p:HassSharpRoot=/path/to/hass-sharp" />
+    </Target>
+
+    <ItemGroup>
+        <ProjectReference Include="$(HassSharpProject)" />
+        <!-- Every file of hass-sharp's runtime suite, Program.cs too: its runner then finds this project's [RuntimeSuite]s. -->
+        <Compile Include="$(HassSharpRoot)/tests/Runtime/**/*.cs" Exclude="$(HassSharpRoot)/tests/Runtime/bin/**;$(HassSharpRoot)/tests/Runtime/obj/**" Link="HassSharp/%(RecursiveDir)%(Filename)%(Extension)" />
+        <None Include="$(HassSharpRoot)/tests/fixtures/*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+            <_Parameter1>VisionRoot</_Parameter1>
+            <_Parameter2>$(MSBuildThisFileDirectory)../../</_Parameter2>
+        </AssemblyAttribute>
+        <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+            <_Parameter1>HassSharpRoot</_Parameter1>
+            <_Parameter2>$(HassSharpRoot)</_Parameter2>
+        </AssemblyAttribute>
+    </ItemGroup>
+
+</Project>
