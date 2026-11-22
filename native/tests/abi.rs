@@ -147,6 +147,11 @@ fn face_is_60_bytes() {
 
 #[test]
 fn close_null_is_a_no_op() {
+    let p = Picture::black(8, 8);
+    assert_eq!(
+        faces_on(ptr::null_mut(), &p, 64, 0.5, 4),
+        Err("no detector".to_string())
+    );
     unsafe { hs_vision_close(ptr::null_mut()) };
     assert_eq!(last_error(), None);
 }
@@ -288,6 +293,36 @@ fn stride_padding_changes_nothing() {
             det.faces(&padded, size, 0.7, 64).unwrap()
         );
     }
+}
+
+#[test]
+fn a_picture_lent_without_slack_after_its_last_row_reads() {
+    let det = Open::new();
+    let p = Picture::group();
+    let padded = p.padded(16);
+    // Exactly (h − 1) · stride + w · 3 bytes: the last row has no gap after it.
+    let exact = padded.stride * (padded.height - 1) + padded.width * 3;
+    let lent = Picture {
+        rgb: padded.rgb[..exact].to_vec(),
+        ..padded
+    };
+    assert_eq!(lent.rgb.len(), exact);
+    assert_eq!(lent.rgb.capacity(), exact);
+    assert_eq!(
+        det.faces(&lent, 640, 0.7, 64).unwrap(),
+        det.faces(&p, 640, 0.7, 64).unwrap()
+    );
+}
+
+#[test]
+fn every_anchor_at_min_score_0_stays_bounded() {
+    // At 1280 and min_score 0 every one of the 33,600 anchors is a candidate: the 5000 best go to NMS.
+    let det = Open::new();
+    let p = Picture::group();
+    let faces = det.faces(&p, 1280, 0.0, 64).unwrap();
+    assert!(!faces.is_empty() && faces.len() <= 64);
+    assert!(faces.windows(2).all(|a| a[0].score >= a[1].score));
+    assert_eq!(det.faces(&p, 1280, 0.0, 0).unwrap(), vec![]);
 }
 
 #[test]

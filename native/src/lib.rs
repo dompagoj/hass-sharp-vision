@@ -112,7 +112,9 @@ unsafe fn picture<'a>(
     }
     let (width, height, stride) = (width as usize, height as usize, stride as usize);
     let len = (height as u64 - 1) * stride as u64 + width as u64 * 3;
-    let len = usize::try_from(len).map_err(|_| "the picture does not fit in memory".to_string())?;
+    // A slice may span at most isize::MAX bytes, which a 32-bit target can reach.
+    let len = isize::try_from(len).map_err(|_| "the picture does not fit in memory".to_string())?
+        as usize;
     // SAFETY: the caller lends `len` bytes at `rgb`, which is not null.
     let rgb = unsafe { std::slice::from_raw_parts(rgb, len) };
     Ok(Picture {

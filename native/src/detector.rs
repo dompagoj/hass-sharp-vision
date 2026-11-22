@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tract_onnx::prelude::*;
 
-use crate::nms::nms;
+use crate::nms::best;
 use crate::{yunet, Face};
 
 /// The plans kept per model, one per padded input shape; the oldest is dropped for a new one.
@@ -26,7 +26,8 @@ pub struct Picture<'a> {
 }
 
 /// Where a picture goes in the network input: resized to `dw` × `dh` at the top-left of a `pw` × `ph` input
-/// (multiples of 32), `scale` input pixels to one picture pixel.
+/// (multiples of 32), about `scale` input pixels to one picture pixel. Results map back by [`Letterbox::back`],
+/// each axis by its own ratio, because rounding `dw` and `dh` can make the axes differ (8192×8 at 64 is 64×1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Letterbox {
     pub dw: usize,
@@ -34,6 +35,29 @@ pub struct Letterbox {
     pub pw: usize,
     pub ph: usize,
     pub scale: f32,
+}
+
+impl Letterbox {
+    /// The picture pixels per input pixel along x and along y, for the `width` × `height` picture it was made for.
+    pub fn back(&self, width: usize, height: usize) -> (f32, f32) {
+        (
+            width as f32 / self.dw as f32,
+            height as f32 / self.dh as f32,
+        )
+    }
+}
+
+/// A face found in the network input, in the picture's pixels by [`Letterbox::back`]'s factors.
+pub fn to_picture(mut face: Face, (bx, by): (f32, f32)) -> Face {
+    face.x *= bx;
+    face.y *= by;
+    face.w *= bx;
+    face.h *= by;
+    for k in face.landmarks.chunks_mut(2) {
+        k[0] *= bx;
+        k[1] *= by;
+    }
+    face
 }
 
 /// The multiple of 32 at or above `v`, and at least 32.
@@ -91,7 +115,14 @@ pub fn fill(
     pad: f32,
 ) -> Tensor {
     let plane = lb.pw * lb.ph;
-    let mut data = vec![pad; 3 * plane];
+    // Written in place, so the input is not copied once more into a tensor.
+    let mut tensor =
+        Tensor::zero::<f32>(&[1, 3, lb.ph, lb.pw]).expect("an f32 tensor of the input's shape");
+    let mut view = tensor
+        .try_as_plain_ram_mut()
+        .expect("a new tensor is in plain memory");
+    let data = view.as_slice_mut::<f32>().expect("the tensor holds f32");
+    data.fill(pad);
     let (xs, ys) = (taps(width, lb.dw), taps(height, lb.dh));
     for (ty, row_taps) in ys.iter().enumerate() {
         for (tx, col_taps) in xs.iter().enumerate() {
@@ -112,7 +143,7 @@ pub fn fill(
             data[2 * plane + o] = px[0];
         }
     }
-    Tensor::from_shape(&[1, 3, lb.ph, lb.pw], &data).expect("the data is 3 planes of the input")
+    tensor
 }
 
 pub type Plan = Arc<TypedRunnableModel>;
@@ -238,17 +269,9 @@ impl Detector {
             }
             *view = values;
         }
-        let mut faces = nms(yunet::decode(&views, lb.pw, lb.ph, min_score), FACE_IOU);
-        for f in &mut faces {
-            f.x /= lb.scale;
-            f.y /= lb.scale;
-            f.w /= lb.scale;
-            f.h /= lb.scale;
-            for v in &mut f.landmarks {
-                *v /= lb.scale;
-            }
-        }
-        Ok(faces)
+        let back = lb.back(picture.width, picture.height);
+        let faces = best(yunet::decode(&views, lb.pw, lb.ph, min_score), FACE_IOU);
+        Ok(faces.into_iter().map(|f| to_picture(f, back)).collect())
     }
 
     /// How many face plans are kept.
@@ -260,6 +283,36 @@ impl Detector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn results_map_back_per_axis() {
+        // 8192×8 at 64: the width shrinks 128 times but the height, rounded up to one row, only 8 times.
+        let lb = letterbox(8192, 8, 64);
+        assert_eq!((lb.dw, lb.dh), (64, 1));
+        let back = lb.back(8192, 8);
+        assert_eq!(back, (128.0, 8.0));
+        let mut landmarks = [0.0; 10];
+        landmarks.copy_from_slice(&[8.0, 0.5, 56.0, 0.5, 32.0, 0.5, 16.0, 1.0, 48.0, 1.0]);
+        let in_input = Face {
+            x: 0.0,
+            y: 0.0,
+            w: 64.0,
+            h: 1.0,
+            score: 0.9,
+            landmarks,
+        };
+        let f = to_picture(in_input, back);
+        assert_eq!([f.x, f.y, f.w, f.h, f.score], [0.0, 0.0, 8192.0, 8.0, 0.9]);
+        assert!(f
+            .landmarks
+            .chunks(2)
+            .all(|k| (0.0..=8192.0).contains(&k[0]) && (0.0..=8.0).contains(&k[1])));
+        assert_eq!(&f.landmarks[..4], &[1024.0, 4.0, 7168.0, 4.0]);
+        // Elsewhere each axis maps back by its own rounded side: 1080×720 at 320 is 320×213.
+        let lb = letterbox(1080, 720, 320);
+        let (bx, by) = lb.back(1080, 720);
+        assert!((bx - 1.0 / lb.scale).abs() < 1e-4 && (by - 720.0 / 213.0).abs() < 1e-4);
+    }
 
     #[test]
     fn letterbox_keeps_the_aspect() {
