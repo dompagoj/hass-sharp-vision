@@ -1,0 +1,130 @@
+name: Release
+
+# A v<version> tag, once every test of ci.yaml passes, builds libhs_vision-<rid>.so for each Linux runtime on a runner of
+# its own architecture and publishes them, with their SHA256SUMS and the NOTICE and licence texts, as the release of that
+# tag. This is the only place binaries are published; they are never committed. A version is released once: a rebuild is
+# a new version, and nothing uploads to an existing release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yaml
+
+  check:
+    name: Tag and version
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the crate's version and is not released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("native/Cargo.toml", "rb"))["package"]["version"])')
+          tag=$GITHUB_REF_NAME
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::The tag is $tag but native/Cargo.toml is $version"
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>view.err; then
+            echo "::error::$tag is already released: a rebuild is a new version"
+            exit 1
+          fi
+          # Any other failure than a missing release (the network, the token) stops the release too.
+          if ! grep -q 'release not found' view.err; then
+            cat view.err >&2
+            echo "::error::Could not tell whether $tag is released"
+            exit 1
+          fi
+          echo "$tag is not released yet"
+
+  build:
+    name: Build ${{ matrix.rid }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each RID on a runner of its own architecture, so that no build or smoke is emulated (Ruling 27).
+        include:
+          - rid: linux-musl-x64
+            runner: ubuntu-24.04
+          - rid: linux-x64
+            runner: ubuntu-24.04
+          - rid: linux-musl-arm64
+            runner: ubuntu-24.04-arm
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, check and load
+        # --out is relative to the working directory, the checkout: the library is dist/libhs_vision-<rid>.so.
+        run: ./native/build.sh --out dist ${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hs_vision-${{ matrix.rid }}
+          path: dist/libhs_vision-${{ matrix.rid }}.so
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only this job writes, with the built-in GITHUB_TOKEN; no other secret is used.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hs_vision-*
+          merge-multiple: true
+          path: dist
+      - name: Check the libraries and write SHA256SUMS
+        # One library for each of the four RIDs and nothing else, summed in file-name order (LC_ALL=C), as build.sh does.
+        run: |
+          rids="linux-musl-arm64 linux-musl-x64 linux-arm64 linux-x64"
+          files=""
+          missing=""
+          for rid in $rids; do
+            file="libhs_vision-$rid.so"
+            if [ -f "dist/$file" ]; then files="$files $file"; else missing="$missing $file"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::The release needs a library for each RID, and these are missing:$missing"
+            exit 1
+          fi
+          for path in dist/*; do
+            case " $files " in
+              *" ${path#dist/} "*) ;;
+              *) echo "::error::dist has ${path#dist/}, which is not one of the libraries to release"; exit 1 ;;
+            esac
+          done
+          # shellcheck disable=SC2046,SC2086 # file names without spaces, one per word
+          (cd dist && sha256sum $(printf '%s\n' $files | LC_ALL=C sort)) >dist/SHA256SUMS
+          cat dist/SHA256SUMS
+      - name: Compare with native/SHA256SUMS
+        run: |
+          if cmp -s dist/SHA256SUMS native/SHA256SUMS; then
+            echo "::notice::The release's checksums equal native/SHA256SUMS"
+          else
+            diff -u native/SHA256SUMS dist/SHA256SUMS || true
+            echo "::notice::The release's checksums differ from native/SHA256SUMS: pin them in Vision.cs next"
+          fi
+      - name: Create the release
+        # --verify-tag: the release is of the pushed tag and never creates one. A release that exists already fails here.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          gh release create "$GITHUB_REF_NAME" dist/*.so dist/SHA256SUMS native/NOTICE native/THIRD-PARTY-LICENSES \
+            --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "hs_vision $version for HassSharp: libhs_vision-<rid>.so for each Linux runtime, their SHA256SUMS, and the NOTICE and licence texts they ship with."

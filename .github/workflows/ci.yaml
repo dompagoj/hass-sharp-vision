@@ -1,0 +1,100 @@
+name: CI
+
+# Tests the hs_vision crate, its musl build (built, checked and loaded in Home Assistant by native/build.sh), the licence
+# texts and the pins in nodes/Vision.cs, then the C# node libraries against a pinned hass-sharp commit. release.yaml runs
+# this workflow first and publishes only if it passes. Binaries are published only by release.yaml, as release assets,
+# and never committed: the library this workflow builds is thrown away with the runner.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The hass-sharp commit the C# tests build against: a 40-hex sha, never a branch, so that a hass-sharp change cannot
+  # break this repository's CI without a commit here (Ruling 25). It is none until a hass-sharp commit with [NodeSetup]
+  # and the fake ffmpeg's still= is on GitHub; while it is none the csharp job only says that the C# tests are off.
+  HASS_SHARP_REF: none
+
+jobs:
+  native:
+    name: Native library (cargo test, musl build, pins)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Rust toolchain
+        # The toolchain native/rust-toolchain.toml names. rustup 1.28 and later install it only when asked.
+        working-directory: native
+        run: |
+          rustup toolchain install
+          rustup show
+      - name: Crate tests
+        working-directory: native
+        run: cargo test --release --locked
+      - name: musl build
+        # Docker on the runner, native x64: the build in rust:alpine, its NEEDED check and a load in Home Assistant's image.
+        run: ./native/build.sh linux-musl-x64
+      - name: Licence texts are current
+        run: |
+          ./native/build.sh --licenses
+          git diff --exit-code -- native/THIRD-PARTY-LICENSES
+      - name: Pins
+        # With HS_VISION_CHECK_RELEASE=1 the release's SHA256SUMS is compared with native/SHA256SUMS too, once released.
+        env:
+          HS_VISION_CHECK_RELEASE: '1'
+        run: python -m unittest discover -s tests -v
+
+  csharp:
+    name: C# node libraries (against hass-sharp)
+    runs-on: ubuntu-latest
+    steps:
+      - name: C# tests are off
+        if: env.HASS_SHARP_REF == 'none'
+        run: |
+          echo "::notice::The C# tests are off: HASS_SHARP_REF is none until a hass-sharp commit with [NodeSetup] is on GitHub"
+      - uses: actions/checkout@v4
+        if: env.HASS_SHARP_REF != 'none'
+      - uses: actions/checkout@v4
+        if: env.HASS_SHARP_REF != 'none'
+        with:
+          repository: dompagoj/hass-sharp
+          ref: ${{ env.HASS_SHARP_REF }}
+          path: .hass-sharp
+      - uses: actions/setup-dotnet@v4
+        if: env.HASS_SHARP_REF != 'none'
+        with:
+          dotnet-version: '11.0.x'
+      - uses: actions/setup-python@v5
+        # The fake ffmpeg of hass-sharp's runtime suite is a Python script.
+        if: env.HASS_SHARP_REF != 'none'
+        with:
+          python-version: '3.14'
+      - name: Install libjpeg-turbo
+        # hass-sharp's picture code decodes and encodes with the system's libturbojpeg, as Home Assistant's image has it.
+        # The package is libturbojpeg0 on Debian and current Ubuntu, libturbojpeg on Ubuntu 24.04 and earlier.
+        if: env.HASS_SHARP_REF != 'none'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libturbojpeg0 || sudo apt-get install -y --no-install-recommends libturbojpeg
+      - name: Build the library
+        # The host build, native/target/release/libhs_vision.so, which the tests load for linux-x64.
+        if: env.HASS_SHARP_REF != 'none'
+        working-directory: native
+        run: |
+          rustup toolchain install
+          rustup show
+          cargo build --release --locked --lib
+      - name: C# tests
+        # With HS_VISION_REQUIRE_LIBRARY=1 a missing library fails the tests that need it instead of skipping them.
+        if: env.HASS_SHARP_REF != 'none'
+        env:
+          HS_VISION_REQUIRE_LIBRARY: '1'
+        run: >-
+          dotnet run --project tests/Vision.Tests --disable-build-servers
+          -p:HassSharpRoot=${{ github.workspace }}/.hass-sharp -- --vision --people-detector
