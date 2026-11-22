@@ -16,7 +16,7 @@ face_detection_yunet_2023mar.onnx (YuNet), in model/ and embedded in the library
   232,589 bytes, SHA-256 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4, unmodified.
 
 yolox_nano.onnx (YOLOX-nano), in model/ and embedded in the library
-  Copyright (c) 2021–2022 Megvii Inc.
+  Copyright 2021 Megvii, Base Detection
   Apache License 2.0; the licence is model/LICENSE-yolox, copied verbatim from
   https://raw.githubusercontent.com/Megvii-BaseDetection/YOLOX/0.1.1rc0/LICENSE
   YOLOX's repository has no NOTICE file of its own, so there is none to reproduce here.
@@ -37,8 +37,13 @@ run in this directory. That list also shows the procedural macros (such as deriv
 they use (such as unicode-ident, which is also under Unicode-3.0); those run while the library is built and are not
 linked into it. `cargo tree -e normal,no-proc-macro` lists only what is linked.
 
-THIRD-PARTY-LICENSES has the full licence texts of the linked crates and of both models; every release carries it
-beside the binaries.
+The library is built with Rust 1.99.1 and statically links Rust's standard library (std, core, alloc and the crates
+they bundle, such as hashbrown, compiler_builtins, gimli, addr2line and miniz_oxide), which is MIT OR Apache-2.0
+except for the parts the Rust project's COPYRIGHT file names under other permissive licences:
+https://github.com/rust-lang/rust/blob/master/COPYRIGHT, with LICENSE-MIT and LICENSE-APACHE beside it.
+
+THIRD-PARTY-LICENSES has the full licence texts of the linked crates and of both models, and names the standard
+library; every release carries it beside the binaries.
 
 Test fixtures
 -------------

@@ -17,3 +17,44 @@ private = { ignore = true }
 # are not linked into it. cargo-about cannot leave procedural macros out, so it lists them and needs this licence.
 [unicode-ident]
 accepted = ["Unicode-3.0"]
+
+# Four crates whose licence cargo-about cannot read from what they publish, so that it would print the licence's
+# template text with "<year> <copyright holders>" in place of their copyright. Each clarification names the file that
+# holds the crate's own notice and its SHA-256: when the file changes, cargo-about refuses the clarification.
+
+# libm's LICENSE.txt has the MIT and Apache-2.0 texts in one file, then the copyrights of libm and of musl libc, whose
+# maths code it derives from. The whole file is its licence text.
+[libm.clarify]
+license = "MIT"
+
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+# anymap3 publishes only COPYING, its copyright and the three licences it offers by name (it is used under MIT). Its
+# repository has no other licence file. about.hbs follows COPYING with the MIT terms it names.
+[anymap3.clarify]
+license = "MIT"
+
+[[anymap3.clarify.files]]
+path = "COPYING"
+checksum = "cce3eaac7d45535f0c5421e1a7330933e816265e766f4a94f20442de9da548df"
+
+# nom-language publishes no licence file; its repository's is nom's LICENSE, fetched at the commit it was published
+# from (its .cargo_vcs_info.json).
+[nom-language.clarify]
+license = "MIT"
+
+[[nom-language.clarify.git]]
+path = "LICENSE"
+checksum = "4dbda04344456f09a7a588140455413a9ac59b6b26a1ef7cdf9c800c012d87f0"
+
+# tract-extra publishes no licence file; its repository's MIT text, as the other tract crates publish it, is fetched
+# at the commit it was published from. tract's MIT text has no copyright line of its own.
+[tract-extra.clarify]
+license = "MIT OR Apache-2.0"
+
+[[tract-extra.clarify.git]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"

@@ -6,7 +6,8 @@ and embeds two models. cargo-about made this list from Cargo.lock for the librar
 text is given once, followed by the crates and versions it covers; texts that differ only in their copyright lines
 stay apart, because those lines go with the binary. The list also names the procedural macros and the crates they
 use (such as serde_derive, syn and unicode-ident), which run while the library is built and are not linked into it;
-`cargo tree -e normal,no-proc-macro` in native/ lists only what is linked. The models' licences come last.
+`cargo tree -e normal,no-proc-macro` in native/ lists only what is linked. The Rust standard library, which the
+library also links, follows the crates, and the models' licences come last.
 
 {{#each licenses}}
 ================================================================================
@@ -18,5 +19,40 @@ Used by:
 ================================================================================
 
 {{{text}}}
+{{#if (and (eq id "MIT") (eq source_path "COPYING"))}}
+
+COPYING names the MIT License without its text. These are its terms, under the copyright COPYING gives:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
+{{/if}}
 
 {{/each}}
+================================================================================
+The Rust standard library
+Used by:
+  std, core, alloc and the crates they bundle, of Rust 1.99.1
+================================================================================
+
+The library is built with Rust 1.99.1 and statically links its standard library: std, core and alloc, and the
+crates they bundle, such as hashbrown, compiler_builtins, gimli, addr2line, object, miniz_oxide, adler2,
+rustc-demangle, memchr, cfg-if, libc, std_detect, unwind and panic_unwind. They are licensed under
+"MIT OR Apache-2.0", the Rust project's own licence, except for the parts that the Rust project's COPYRIGHT file
+names under other permissive licences. The texts are in the Rust project's repository:
+
+  https://github.com/rust-lang/rust/blob/master/COPYRIGHT
+  https://github.com/rust-lang/rust/blob/master/LICENSE-MIT
+  https://github.com/rust-lang/rust/blob/master/LICENSE-APACHE
+

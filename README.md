@@ -16,6 +16,10 @@ once from this repository's releases, checks it by its SHA-256 and keeps it with
 
 ## Install
 
+The files need a HassSharp newer than 0.0.48-beta: they use `[NodeSetup]`, `NodeSetupContext` and `DrawCircle`, and
+the last seen sensors need its fix for timestamp sensors. Until that HassSharp is released, these are only on
+hass-sharp's branch `face-detection-and-external-import`, which is not on GitHub yet.
+
 1. In HassSharp's panel, open **Node libraries** and choose **Add file**. Name it `Vision.cs`, paste in
    [`nodes/Vision.cs`](nodes/Vision.cs) and save it. Detect faces needs only this file.
 2. Add another file, `PeopleDetector.cs`, with [`nodes/PeopleDetector.cs`](nodes/PeopleDetector.cs). It uses
@@ -28,7 +32,9 @@ once from this repository's releases, checks it by its SHA-256 and keeps it with
 
    choose its camera, and save the definition.
 
-For now the files are pasted in by hand.
+For now the files are pasted in by hand. To update, paste both files from `main` in again and save them. A new
+library is downloaded into a folder of its own checksum, and the one loaded before stays loaded until Home Assistant
+restarts.
 
 ## People detector
 
@@ -161,16 +167,24 @@ They check that the table in `Vision.cs` is `native/SHA256SUMS` and that its `So
 
 ## Releasing
 
-1. Set the new version in `native/Cargo.toml`.
-2. The owner tags the commit `v<version>` and pushes the tag.
-3. `release.yaml` runs every test of `ci.yaml`, checks that the tag is the crate's version and is not released yet,
-   builds each RID on a runner of its own architecture, and creates the release with the four libraries,
-   `SHA256SUMS`, `NOTICE` and `THIRD-PARTY-LICENSES`.
-4. Copy the release's `SHA256SUMS` into `native/SHA256SUMS`, and set `Vision.cs`'s `Source` to the release's
-   download address and its pinned table (between `// pinned:begin` and `// pinned:end`) to the release's checksums.
+A change to `nodes/Vision.cs` or `nodes/PeopleDetector.cs` alone needs no release: users copy the files from `main`.
+A change to the library is released as a new version:
 
-A release is never uploaded to again: a rebuild is a new version. The first release is `v1.0.0`, which is not
-released yet.
+1. Set the new version in `native/Cargo.toml`, and in `Cargo.lock` with `cargo update -p hs_vision --offline` in
+   `native/`. If a dependency changed, run `native/build.sh --licenses` too.
+2. Run `native/build.sh` for all four RIDs and copy `native/dist/SHA256SUMS` into `native/SHA256SUMS`. In `Vision.cs`,
+   set `Source` to `https://github.com/dompagoj/hass-sharp-vision/releases/download/v<version>/` and the pinned table
+   (between `// pinned:begin` and `// pinned:end`) to those checksums. In both node files, set the version in the first
+   line's comment. `python3 -m unittest discover -s tests` checks all of these. Commit, push, and wait for CI to pass.
+3. The owner tags that commit `v<version>` and pushes the tag.
+4. `release.yaml` runs every test of `ci.yaml`, checks that the tag is the crate's version and is not released yet,
+   builds each RID on a runner of its own architecture, and creates the release with the four libraries,
+   `SHA256SUMS`, `NOTICE` and `THIRD-PARTY-LICENSES`. It compares the release's `SHA256SUMS` with
+   `native/SHA256SUMS` and says whether they differ.
+5. If they differ, copy the release's `SHA256SUMS` into `native/SHA256SUMS` and its checksums into `Vision.cs`'s
+   table, and commit that: until then, a library downloaded from the release fails `Vision.cs`'s checksum check.
+
+A release is never uploaded to again: a rebuild is a new version.
 
 ## Licence
 

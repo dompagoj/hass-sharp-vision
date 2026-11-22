@@ -102,6 +102,8 @@ cd /src
 RUSTFLAGS="-C target-feature=-crt-static" cargo build --release --locked --lib
 so=target/release/libhs_vision.so
 needed=$(readelf -d "$so" | sed -n "s/.*(NEEDED).*\[\(.*\)\]/\1/p")
+# A musl build needs libc.musl at least: no NEEDED at all means readelf read nothing, which would pass the loop.
+[ -n "$needed" ] || { echo "readelf found no NEEDED entries in $so, so what it needs cannot be checked"; exit 1; }
 echo "NEEDED:" $needed
 for lib in $needed; do
   case $lib in
@@ -130,8 +132,12 @@ tar -xf - -C /src
 cd /src
 cargo build --release --locked --lib
 so=target/release/libhs_vision.so
-echo "NEEDED:" $(readelf -d "$so" | sed -n "s/.*(NEEDED).*\[\(.*\)\]/\1/p")
+needed=$(readelf -d "$so" | sed -n "s/.*(NEEDED).*\[\(.*\)\]/\1/p")
+[ -n "$needed" ] || { echo "readelf found no NEEDED entries in $so, so what it needs cannot be checked"; exit 1; }
+echo "NEEDED:" $needed
 newest=$(objdump -T "$so" | grep -o "GLIBC_[0-9][0-9.]*" | sed "s/^GLIBC_//" | sort -u -V | tail -n 1)
+# A glibc build uses versioned glibc symbols: none at all means objdump read nothing, which would pass the comparison.
+[ -n "$newest" ] || { echo "objdump found no GLIBC_ symbol versions in $so, so the newest cannot be checked"; exit 1; }
 echo "newest glibc symbol version: GLIBC_$newest"
 if [ "$(printf "%s\n%s\n" "$newest" "$GLIBC_MAX" | sort -V | tail -n 1)" != "$GLIBC_MAX" ]; then
   echo "GLIBC_$newest is newer than GLIBC_$GLIBC_MAX"

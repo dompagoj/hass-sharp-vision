@@ -1,5 +1,6 @@
 """The pins in nodes/Vision.cs follow native/: its checksum table is native/SHA256SUMS and its download URL is the
-release of the crate's version. With HS_VISION_CHECK_RELEASE=1 (CI), the release's own SHA256SUMS is compared too."""
+release of the crate's version, and the first line of each node file names that version. With
+HS_VISION_CHECK_RELEASE=1 (CI), the release's own SHA256SUMS is compared too."""
 
 import os
 import re
@@ -11,11 +12,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VISION = ROOT / "nodes" / "Vision.cs"
+PEOPLE_DETECTOR = ROOT / "nodes" / "PeopleDetector.cs"
 SUMS = ROOT / "native" / "SHA256SUMS"
 CARGO = ROOT / "native" / "Cargo.toml"
 
 SOURCE = re.compile(r'^\s*const string Source = "([^"]*)";\s*$', re.MULTILINE)
 RELEASE = re.compile(r"^https://github\.com/dompagoj/hass-sharp-vision/releases/download/v(\d+\.\d+\.\d+)/$")
+HEADER = re.compile(r"^// hass-sharp-vision (\d+\.\d+\.\d+), from https://github\.com/dompagoj/hass-sharp-vision$")
 ENTRY = re.compile(r'^\s*\["([^"]+)"\] = "([0-9a-f]{64})",\s*$')
 
 
@@ -24,6 +27,15 @@ def source() -> str:
     if len(found) != 1:
         raise AssertionError(f"Vision.cs has {len(found)} lines of the form const string Source = \"...\"; not 1")
     return found[0]
+
+
+def header(path: Path) -> str:
+    """The version the first line of a node file names."""
+    first = path.read_text(encoding="utf-8").split("\n", 1)[0]
+    match = HEADER.match(first)
+    if not match:
+        raise AssertionError(f"the first line of {path.name} is not // hass-sharp-vision <version>, from <repository>: {first!r}")
+    return match.group(1)
 
 
 def table() -> list[tuple[str, str]]:
@@ -67,6 +79,11 @@ class PinsTest(unittest.TestCase):
         match = RELEASE.match(url)
         self.assertIsNotNone(match, f"Source is not a hass-sharp-vision release download URL: {url}")
         self.assertEqual(match.group(1), version())
+
+    def test_node_files_name_this_version(self):
+        for path in (VISION, PEOPLE_DETECTOR):
+            with self.subTest(path.name):
+                self.assertEqual(header(path), version())
 
     @unittest.skipUnless(os.environ.get("HS_VISION_CHECK_RELEASE") == "1", "the release is compared only with HS_VISION_CHECK_RELEASE=1")
     def test_release_matches(self):

@@ -1,3 +1,4 @@
+// hass-sharp-vision 1.0.0, from https://github.com/dompagoj/hass-sharp-vision
 using System.Globalization;
 using System.Runtime.InteropServices;
 
