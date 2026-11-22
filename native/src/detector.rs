@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use tract_onnx::prelude::*;
 
 use crate::nms::best;
-use crate::{yunet, Face};
+use crate::{yolox, yunet, Face, Person};
 
 /// The plans kept per model, one per padded input shape; the oldest is dropped for a new one.
 pub const PLANS_KEPT: usize = 4;
@@ -15,7 +15,11 @@ pub const PLANS_KEPT: usize = 4;
 /// YuNet's boxes overlapping by more than this are one face.
 pub const FACE_IOU: f32 = 0.3;
 
+/// YOLOX pads with grey, as it was trained.
+pub const PERSON_PAD: f32 = 114.0;
+
 static YUNET: &[u8] = include_bytes!("../model/face_detection_yunet_2023mar.onnx");
+static YOLOX: &[u8] = include_bytes!("../model/yolox_nano.onnx");
 
 /// A picture as the caller lends it: RGB8 rows `stride` bytes apart.
 pub struct Picture<'a> {
@@ -47,17 +51,39 @@ impl Letterbox {
     }
 }
 
-/// A face found in the network input, in the picture's pixels by [`Letterbox::back`]'s factors.
-pub fn to_picture(mut face: Face, (bx, by): (f32, f32)) -> Face {
-    face.x *= bx;
-    face.y *= by;
-    face.w *= bx;
-    face.h *= by;
-    for k in face.landmarks.chunks_mut(2) {
-        k[0] *= bx;
-        k[1] *= by;
+/// Something found in the network input, which scales into the picture's pixels.
+pub trait Scale {
+    /// Scaled by `bx` along x and `by` along y.
+    fn scale(self, bx: f32, by: f32) -> Self;
+}
+
+impl Scale for Face {
+    fn scale(mut self, bx: f32, by: f32) -> Face {
+        self.x *= bx;
+        self.y *= by;
+        self.w *= bx;
+        self.h *= by;
+        for k in self.landmarks.chunks_mut(2) {
+            k[0] *= bx;
+            k[1] *= by;
+        }
+        self
     }
-    face
+}
+
+impl Scale for Person {
+    fn scale(mut self, bx: f32, by: f32) -> Person {
+        self.x *= bx;
+        self.y *= by;
+        self.w *= bx;
+        self.h *= by;
+        self
+    }
+}
+
+/// A face or person found in the network input, in the picture's pixels by [`Letterbox::back`]'s factors.
+pub fn to_picture<T: Scale>(found: T, (bx, by): (f32, f32)) -> T {
+    found.scale(bx, by)
 }
 
 /// The multiple of 32 at or above `v`, and at least 32.
@@ -195,12 +221,16 @@ impl Model {
 
 struct State {
     faces: Model,
+    /// YOLOX, parsed by the first people call; a failure is kept, so that it is not parsed again.
+    people: Option<Result<Model, String>>,
 }
 
-/// The models behind one handle. Their plans and runs are behind one lock, so concurrent calls run them one at a
-/// time; each call prepares its input and decodes its outputs outside it.
+/// The models behind one handle. Their parsing, plans and runs are behind one lock, so concurrent calls run them
+/// one at a time; each call prepares its input and decodes its outputs outside it.
 pub struct Detector {
     state: Mutex<State>,
+    /// The person model's ONNX, which a test replaces with one that cannot load.
+    yolox: &'static [u8],
 }
 
 // The ABI lets any thread call a detector.
@@ -210,12 +240,16 @@ const _: fn() = || {
 };
 
 impl Detector {
-    /// Parses YuNet.
+    /// Parses YuNet. YOLOX waits for the first people call.
     pub fn open() -> Result<Detector, String> {
         let faces = Model::parse(YUNET, &yunet::OUTPUTS)
             .map_err(|e| format!("the face model could not load: {e:#}"))?;
         Ok(Detector {
-            state: Mutex::new(State { faces }),
+            state: Mutex::new(State {
+                faces,
+                people: None,
+            }),
+            yolox: YOLOX,
         })
     }
 
@@ -274,6 +308,57 @@ impl Detector {
         Ok(faces.into_iter().map(|f| to_picture(f, back)).collect())
     }
 
+    /// The people in a picture scoring at least `min_score`, the best first, in the picture's pixels.
+    pub fn people(
+        &self,
+        picture: &Picture,
+        input_size: usize,
+        min_score: f32,
+    ) -> Result<Vec<Person>, String> {
+        let lb = letterbox(picture.width, picture.height, input_size);
+        let input = fill(
+            picture.rgb,
+            picture.width,
+            picture.height,
+            picture.stride,
+            &lb,
+            PERSON_PAD,
+        );
+        let mut state = self.state();
+        let model = state
+            .people
+            .get_or_insert_with(|| {
+                Model::parse(self.yolox, &[yolox::OUTPUT])
+                    .map_err(|e| format!("the person model could not load: {e:#}"))
+            })
+            .as_mut()
+            .map_err(|e| e.clone())?;
+        let plan = model.plan(lb.pw, lb.ph).map_err(|e| {
+            format!(
+                "the person model could not be planned for {}×{}: {e:#}",
+                lb.pw, lb.ph
+            )
+        })?;
+        let outs = plan
+            .run(tvec!(input.into()))
+            .map_err(|e| format!("the person model failed: {e:#}"))?;
+        drop(state);
+        let values = outs
+            .first()
+            .ok_or("the person model gave no output")?
+            .try_as_plain_ram()
+            .and_then(|plain| plain.as_slice::<f32>())
+            .map_err(|e| format!("the person model gave an unreadable output: {e:#}"))?;
+        let back = lb.back(picture.width, picture.height);
+        let people = yolox::people(values, lb.pw, lb.ph, min_score)?;
+        Ok(people.into_iter().map(|p| to_picture(p, back)).collect())
+    }
+
+    /// Whether the person model has been parsed, which the first people call does.
+    pub fn people_model_loaded(&self) -> bool {
+        matches!(self.state().people, Some(Ok(_)))
+    }
+
     /// How many face plans are kept.
     pub fn face_plans(&self) -> usize {
         self.state().faces.plans()
@@ -308,10 +393,47 @@ mod tests {
             .chunks(2)
             .all(|k| (0.0..=8192.0).contains(&k[0]) && (0.0..=8.0).contains(&k[1])));
         assert_eq!(&f.landmarks[..4], &[1024.0, 4.0, 7168.0, 4.0]);
+        let person = Person {
+            x: 16.0,
+            y: 0.5,
+            w: 32.0,
+            h: 0.5,
+            score: 0.6,
+        };
+        let p = to_picture(person, back);
+        assert_eq!(
+            [p.x, p.y, p.w, p.h, p.score],
+            [2048.0, 4.0, 4096.0, 4.0, 0.6]
+        );
         // Elsewhere each axis maps back by its own rounded side: 1080×720 at 320 is 320×213.
         let lb = letterbox(1080, 720, 320);
         let (bx, by) = lb.back(1080, 720);
         assert!((bx - 1.0 / lb.scale).abs() < 1e-4 && (by - 720.0 / 213.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_person_model_that_cannot_load_fails_every_people_call() {
+        let mut det = Detector::open().unwrap();
+        det.yolox = b"not a model";
+        let rgb = [0u8; 64 * 64 * 3];
+        let picture = Picture {
+            rgb: &rgb,
+            width: 64,
+            height: 64,
+            stride: 192,
+        };
+        let first = det.people(&picture, 64, 0.45).unwrap_err();
+        assert!(
+            first.starts_with("the person model could not load: "),
+            "{first}"
+        );
+        assert!(!det.people_model_loaded());
+        // Kept: even the real model is not parsed again.
+        det.yolox = YOLOX;
+        assert_eq!(det.people(&picture, 64, 0.45), Err(first));
+        assert!(!det.people_model_loaded());
+        // Faces are unaffected.
+        assert_eq!(det.faces(&picture, 64, 0.7), Ok(vec![]));
     }
 
     #[test]

@@ -2,7 +2,7 @@ hs_vision
 =========
 
 hs_vision is part of HassSharp, which is MIT-licensed (the repository's LICENSE). The library embeds models and
-links code that are not HassSharp's own, and its tests use a photo that is not HassSharp's own.
+links code that are not HassSharp's own, and its tests use photos that are not HassSharp's own.
 
 Models
 ------
@@ -13,6 +13,15 @@ face_detection_yunet_2023mar.onnx (YuNet), in model/ and embedded in the library
   https://huggingface.co/opencv/face_detection_yunet/raw/main/LICENSE
   Source: https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx
   232,589 bytes, SHA-256 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4, unmodified.
+
+yolox_nano.onnx (YOLOX-nano), in model/ and embedded in the library
+  Copyright (c) 2021–2022 Megvii Inc.
+  Apache License 2.0; the licence is model/LICENSE-yolox, copied verbatim from
+  https://raw.githubusercontent.com/Megvii-BaseDetection/YOLOX/0.1.1rc0/LICENSE
+  YOLOX's repository has no NOTICE file of its own, so there is none to reproduce here.
+  Source: the YOLOX 0.1.1rc0 release,
+  https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx
+  3,659,407 bytes, SHA-256 c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d, unmodified.
 
 Linked code
 -----------
@@ -36,4 +45,12 @@ tests/fixtures/group.jpg
   Licensed under the Creative Commons Attribution 2.0 Generic licence (CC BY 2.0):
   https://creativecommons.org/licenses/by/2.0/
   Changed: downscaled from 1080×720 to 640×426 (sips -Z 640 -s formatOptions 85). It is used only by the tests and
+  is not part of the library.
+
+tests/fixtures/street.jpg
+  "Pedestrians Walking South on Eighth Avenue Near West 31st Street, New York City.jpg", from Wikimedia Commons:
+  https://commons.wikimedia.org/wiki/File:Pedestrians_Walking_South_on_Eighth_Avenue_Near_West_31st_Street,_New_York_City.jpg
+  Dedicated to the public domain under CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/), which asks
+  for no attribution; it is named here as a courtesy.
+  Changed: downscaled from 1280×1707 to 480×640 (sips -Z 640 -s formatOptions 85). It is used only by the tests and
   is not part of the library.

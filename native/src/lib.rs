@@ -1,4 +1,4 @@
-//! hs_vision: face detection with YuNet on tract, behind a small C ABI.
+//! hs_vision: face detection with YuNet and person detection with YOLOX-nano on tract, behind a small C ABI.
 //!
 //! ABI version 1. Every export catches panics, which come back as an error, and records why a call failed in a
 //! thread-local error that `hs_vision_last_error` reads.
@@ -11,6 +11,7 @@ use std::ptr;
 
 pub mod detector;
 pub mod nms;
+pub mod yolox;
 pub mod yunet;
 
 pub use detector::Detector;
@@ -36,6 +37,27 @@ pub struct Face {
 }
 
 impl nms::Boxed for Face {
+    fn rect(&self) -> [f32; 4] {
+        [self.x, self.y, self.w, self.h]
+    }
+
+    fn score(&self) -> f32 {
+        self.score
+    }
+}
+
+/// A person, in the input picture's pixels: their box and its score (0–1).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Person {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub score: f32,
+}
+
+impl nms::Boxed for Person {
     fn rect(&self) -> [f32; 4] {
         [self.x, self.y, self.w, self.h]
     }
@@ -194,6 +216,40 @@ pub unsafe extern "C" fn hs_vision_faces(
         let faces = det.faces(&picture, input_size as usize, min_score)?;
         // SAFETY: `out` has room for `max_faces` faces, and is not null unless that is 0.
         Ok(unsafe { write_out(&faces, out, max_faces as usize) })
+    })
+}
+
+/// Finds the people in a `width` × `height` RGB8 picture whose rows are `stride` bytes apart, letterboxed so that
+/// its long side is `input_size`. Writes those scoring at least `min_score`, at most `max_people` and the best first,
+/// to `out`, and gives how many it wrote, or −1 with the error set. The first call parses the person model, which
+/// the detector keeps; when it cannot load, this and every later call give −1.
+///
+/// # Safety
+/// `det` is null or a detector from `hs_vision_open` that is not closed. `rgb` is null or points to the picture,
+/// and `out` is null or has room for `max_people` people.
+#[no_mangle]
+pub unsafe extern "C" fn hs_vision_people(
+    det: *mut Detector,
+    rgb: *const u8,
+    width: i32,
+    height: i32,
+    stride: i32,
+    input_size: i32,
+    min_score: f32,
+    out: *mut Person,
+    max_people: i32,
+) -> i32 {
+    export(-1, || {
+        // SAFETY: a non-null `det` is a live detector, which serialises its own calls.
+        let det = unsafe { det.as_ref() }.ok_or("no detector")?;
+        // SAFETY: the caller lends the picture for this call.
+        let picture = unsafe { picture(rgb, width, height, stride, input_size, min_score) }?;
+        if max_people < 0 || (max_people > 0 && out.is_null()) {
+            return Err("no room for people".into());
+        }
+        let people = det.people(&picture, input_size as usize, min_score)?;
+        // SAFETY: `out` has room for `max_people` people, and is not null unless that is 0.
+        Ok(unsafe { write_out(&people, out, max_people as usize) })
     })
 }
 

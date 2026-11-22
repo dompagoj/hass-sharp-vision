@@ -19,6 +19,20 @@ const NO_FACE: Face = Face {
 const N640: usize = 8;
 const N320: usize = 7;
 
+const NO_PERSON: Person = Person {
+    x: 0.0,
+    y: 0.0,
+    w: 0.0,
+    h: 0.0,
+    score: 0.0,
+};
+
+/// The people found at 416 with `min_score` 0.45: in the street photo, all four walking away from the camera, two
+/// near and two far; in the group photo, seven of the eight men, all but the one cut off at the right edge (0.39).
+/// The C# tests (Tasks 9 and 10) assert the same counts.
+const P416_STREET: usize = 4;
+const P416_GROUP: usize = 7;
+
 struct Picture {
     rgb: Vec<u8>,
     width: usize,
@@ -28,11 +42,16 @@ struct Picture {
 
 impl Picture {
     fn group() -> Picture {
-        let bytes = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/group.jpg"
-        ))
-        .unwrap();
+        Picture::fixture("group.jpg")
+    }
+
+    fn street() -> Picture {
+        Picture::fixture("street.jpg")
+    }
+
+    fn fixture(name: &str) -> Picture {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        let bytes = std::fs::read(path).unwrap();
         let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
         let (width, height) = (img.width() as usize, img.height() as usize);
         Picture {
@@ -87,6 +106,20 @@ impl Open {
     ) -> Result<Vec<Face>, String> {
         faces_on(self.0, p, input_size, min_score, max_faces)
     }
+
+    fn people(
+        &self,
+        p: &Picture,
+        input_size: i32,
+        min_score: f32,
+        max_people: usize,
+    ) -> Result<Vec<Person>, String> {
+        people_on(self.0, p, input_size, min_score, max_people)
+    }
+
+    fn detector(&self) -> &Detector {
+        unsafe { &*self.0 }
+    }
 }
 
 impl Drop for Open {
@@ -95,6 +128,10 @@ impl Drop for Open {
     }
 }
 
+/// An export that finds things of type `T`: `hs_vision_faces` or `hs_vision_people`.
+type Find<T> =
+    unsafe extern "C" fn(*mut Detector, *const u8, i32, i32, i32, i32, f32, *mut T, i32) -> i32;
+
 fn faces_on(
     det: *mut Detector,
     p: &Picture,
@@ -102,9 +139,47 @@ fn faces_on(
     min_score: f32,
     max_faces: usize,
 ) -> Result<Vec<Face>, String> {
-    let mut out = vec![NO_FACE; max_faces];
+    find_on(
+        hs_vision_faces,
+        NO_FACE,
+        det,
+        p,
+        input_size,
+        min_score,
+        max_faces,
+    )
+}
+
+fn people_on(
+    det: *mut Detector,
+    p: &Picture,
+    input_size: i32,
+    min_score: f32,
+    max_people: usize,
+) -> Result<Vec<Person>, String> {
+    find_on(
+        hs_vision_people,
+        NO_PERSON,
+        det,
+        p,
+        input_size,
+        min_score,
+        max_people,
+    )
+}
+
+fn find_on<T: Copy>(
+    find: Find<T>,
+    none: T,
+    det: *mut Detector,
+    p: &Picture,
+    input_size: i32,
+    min_score: f32,
+    max: usize,
+) -> Result<Vec<T>, String> {
+    let mut out = vec![none; max];
     let n = unsafe {
-        hs_vision_faces(
+        find(
             det,
             p.rgb.as_ptr(),
             p.width as i32,
@@ -113,14 +188,14 @@ fn faces_on(
             input_size,
             min_score,
             out.as_mut_ptr(),
-            max_faces as i32,
+            max as i32,
         )
     };
     if n < 0 {
         return Err(last_error().expect("−1 without an error"));
     }
     assert_eq!(last_error(), None, "a call that succeeded left an error");
-    assert!(n as usize <= max_faces);
+    assert!(n as usize <= max);
     out.truncate(n as usize);
     Ok(out)
 }
@@ -146,10 +221,20 @@ fn face_is_60_bytes() {
 }
 
 #[test]
+fn person_is_20_bytes() {
+    assert_eq!(std::mem::size_of::<Person>(), 20);
+    assert_eq!(std::mem::align_of::<Person>(), 4);
+}
+
+#[test]
 fn close_null_is_a_no_op() {
     let p = Picture::black(8, 8);
     assert_eq!(
         faces_on(ptr::null_mut(), &p, 64, 0.5, 4),
+        Err("no detector".to_string())
+    );
+    assert_eq!(
+        people_on(ptr::null_mut(), &p, 64, 0.5, 4),
         Err("no detector".to_string())
     );
     unsafe { hs_vision_close(ptr::null_mut()) };
@@ -158,9 +243,19 @@ fn close_null_is_a_no_op() {
 
 #[test]
 fn refusals_set_the_error_and_a_valid_call_clears_it() {
+    refusals(hs_vision_faces, NO_FACE, "no room for faces");
+}
+
+#[test]
+fn people_refusals() {
+    refusals(hs_vision_people, NO_PERSON, "no room for people");
+}
+
+/// Each of a find export's refusals, then a valid call that clears the error, on a black 64×48 picture.
+fn refusals<T: Copy>(find: Find<T>, none: T, no_room: &str) {
     let det = Open::new();
     let p = Picture::black(64, 48);
-    let mut out = [NO_FACE; 4];
+    let mut out = [none; 4];
     let call = |det: *mut Detector,
                 rgb: *const u8,
                 w: i32,
@@ -168,9 +263,9 @@ fn refusals_set_the_error_and_a_valid_call_clears_it() {
                 stride: i32,
                 size: i32,
                 min: f32,
-                out: *mut Face,
+                out: *mut T,
                 max: i32| {
-        let n = unsafe { hs_vision_faces(det, rgb, w, h, stride, size, min, out, max) };
+        let n = unsafe { find(det, rgb, w, h, stride, size, min, out, max) };
         (n, last_error())
     };
     let rgb = p.rgb.as_ptr();
@@ -212,13 +307,10 @@ fn refusals_set_the_error_and_a_valid_call_clears_it() {
             "the minimum score is from 0 to 1",
         );
     }
-    refused(
-        call(det.0, rgb, 64, 48, 192, 64, 0.5, o, -1),
-        "no room for faces",
-    );
+    refused(call(det.0, rgb, 64, 48, 192, 64, 0.5, o, -1), no_room);
     refused(
         call(det.0, rgb, 64, 48, 192, 64, 0.5, ptr::null_mut(), 1),
-        "no room for faces",
+        no_room,
     );
     // No room and no faces asked for is fine, as are the ends of every range.
     assert_eq!(
@@ -342,6 +434,13 @@ fn blank_finds_nothing() {
 }
 
 #[test]
+fn blank_finds_no_people() {
+    let det = Open::new();
+    let p = Picture::black(640, 480);
+    assert_eq!(det.people(&p, 416, 0.45, 64).unwrap(), vec![]);
+}
+
+#[test]
 fn tiny_and_extreme_sizes_find_nothing() {
     let det = Open::new();
     for (w, h) in [(1, 1), (20, 20), (8192, 8), (8, 8192)] {
@@ -352,8 +451,122 @@ fn tiny_and_extreme_sizes_find_nothing() {
                 Ok(vec![]),
                 "{w}×{h} at {size}"
             );
+            assert_eq!(
+                det.people(&p, size, 0.45, 64),
+                Ok(vec![]),
+                "people, {w}×{h} at {size}"
+            );
         }
     }
+}
+
+/// Every person's box lies in the picture grown by 5 % on each side, and scores at least 0.45; the best come first.
+fn assert_people_fit(people: &[Person], p: &Picture) {
+    let (w, h) = (p.width as f32, p.height as f32);
+    for q in people {
+        assert!(q.score >= 0.45 && q.score <= 1.0, "{q:?}");
+        assert!(q.w > 0.0 && q.h > 0.0, "{q:?}");
+        assert!(q.x >= -0.05 * w && q.y >= -0.05 * h, "{q:?}");
+        assert!(q.x + q.w <= 1.05 * w && q.y + q.h <= 1.05 * h, "{q:?}");
+    }
+    assert!(
+        people.windows(2).all(|a| a[0].score >= a[1].score),
+        "not sorted"
+    );
+}
+
+#[test]
+fn the_person_model_loads_on_first_use() {
+    let det = Open::new();
+    assert!(!det.detector().people_model_loaded());
+    let p = Picture::group();
+    assert!(!det.faces(&p, 320, 0.7, 64).unwrap().is_empty());
+    assert!(!det.detector().people_model_loaded());
+    det.people(&p, 416, 0.45, 64).unwrap();
+    assert!(det.detector().people_model_loaded());
+}
+
+#[test]
+fn finds_people_seen_from_behind_in_the_street_photo() {
+    let det = Open::new();
+    let p = Picture::street();
+    assert_eq!((p.width, p.height), (480, 640));
+    let people = det.people(&p, 416, 0.45, 64).unwrap();
+    eprintln!("street at 416: {people:?}");
+    assert!(people.len() >= 4, "{} people", people.len());
+    assert_eq!(people.len(), P416_STREET);
+    assert_people_fit(&people, &p);
+}
+
+#[test]
+fn finds_people_in_the_group_photo() {
+    let det = Open::new();
+    let p = Picture::group();
+    let people = det.people(&p, 416, 0.45, 64).unwrap();
+    eprintln!("group at 416: {people:?}");
+    assert!(people.len() >= 6, "{} people", people.len());
+    assert_eq!(people.len(), P416_GROUP);
+    assert_people_fit(&people, &p);
+}
+
+#[test]
+fn max_people_caps_and_keeps_the_best() {
+    let det = Open::new();
+    let p = Picture::group();
+    let all = det.people(&p, 416, 0.45, 64).unwrap();
+    assert!(all.len() > 2);
+    assert_eq!(det.people(&p, 416, 0.45, 2).unwrap(), all[..2]);
+    assert_eq!(det.people(&p, 416, 0.45, 0).unwrap(), vec![]);
+}
+
+#[test]
+fn every_anchor_at_min_score_0_finds_people_bounded() {
+    // At 1280 and min_score 0 every one of the 33,600 anchors is a candidate: the 5000 best go to NMS.
+    let det = Open::new();
+    let p = Picture::street();
+    let people = det.people(&p, 1280, 0.0, 64).unwrap();
+    assert!(!people.is_empty() && people.len() <= 64);
+    assert!(people.windows(2).all(|a| a[0].score >= a[1].score));
+}
+
+#[test]
+fn concurrent_faces_and_people_agree() {
+    let det = Open::new();
+    let p = Picture::group();
+    let faces = det.faces(&p, 320, 0.7, 64).unwrap();
+    let people = det.people(&p, 416, 0.45, 64).unwrap();
+    assert!(!faces.is_empty() && !people.is_empty());
+    let shared = det.0 as usize;
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            let (p, faces, people) = (&p, &faces, &people);
+            s.spawn(move || {
+                for i in 0..10 {
+                    let det = shared as *mut Detector;
+                    // Half the threads start with people, so faces and people calls interleave.
+                    if (i + t) % 2 == 0 {
+                        assert_eq!(&faces_on(det, p, 320, 0.7, 64).unwrap(), faces);
+                    } else {
+                        assert_eq!(&people_on(det, p, 416, 0.45, 64).unwrap(), people);
+                    }
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn a_new_detector_finds_people_on_another_thread_first() {
+    // The first people call, which parses the model, may come from any thread, and a later one from another.
+    let det = Open::new();
+    let p = Picture::street();
+    let shared = det.0 as usize;
+    let first = std::thread::scope(|s| {
+        s.spawn(|| people_on(shared as *mut Detector, &p, 416, 0.45, 64).unwrap())
+            .join()
+            .unwrap()
+    });
+    assert_eq!(det.people(&p, 416, 0.45, 64).unwrap(), first);
 }
 
 #[test]
