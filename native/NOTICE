@@ -1,8 +1,9 @@
 hs_vision
 =========
 
-hs_vision is part of HassSharp, which is MIT-licensed (the repository's LICENSE). The library embeds models and
-links code that are not HassSharp's own, and its tests use photos that are not HassSharp's own.
+hs_vision is part of hass-sharp-vision (https://github.com/dompagoj/hass-sharp-vision), which is MIT-licensed
+(the repository's LICENSE). The library embeds models and links code that are not hass-sharp-vision's own, and its
+tests use photos that are not hass-sharp-vision's own.
 
 Models
 ------

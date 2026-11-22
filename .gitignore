@@ -1,0 +1,7 @@
+native/target/
+native/dist/
+tests/**/bin/
+tests/**/obj/
+__pycache__/
+.DS_Store
+.hass-sharp/
