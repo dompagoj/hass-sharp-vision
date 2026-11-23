@@ -32,7 +32,9 @@ them yet: until one does, they are only on hass-sharp's branch `face-detection-a
    **Camera**, save it, and turn it on.
 
 To update, run **Add external** again: a file you already have starts unchecked, and checking it offers to overwrite
-it. Overwriting **Front door people** keeps the camera you picked.
+it. Overwriting **Front door people** keeps the camera you picked and the other values you typed into the **Front door**
+device, such as **Check every** or **Face score**, whether or not the new file sets them; a setting whose type changed
+takes the file's.
 
 A HassSharp without **Add external** takes the files pasted in by hand:
 

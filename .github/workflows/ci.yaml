@@ -20,7 +20,7 @@ env:
   # Add external imports hass_sharp.toml with (the node library import operation and external.py), now on hass-sharp's
   # branch face-detection-and-external-import; once HassSharp releases them it moves to the commit of that release's
   # tag. none turns the C# tests off, and the csharp job then only says so; any other value fails the job.
-  HASS_SHARP_REF: b9e6efca95cce9e1eb84f343f45cf2493c94b309
+  HASS_SHARP_REF: d43fe35db845d7502b5ae669e9554a05ccc1af95
 
 jobs:
   native:
