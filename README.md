@@ -14,11 +14,27 @@ Both run on `hs_vision`, a Rust library in `native/` that runs two models on [tr
 YuNet for faces and YOLOX-nano for people. The models are embedded in the library. HassSharp downloads the library
 once from this repository's releases, checks it by its SHA-256 and keeps it with the definition's files.
 
+With them comes an entity definition, **Front door people** (`nodes/front_door_people.json`): a People detector on
+`camera.front_door`. [`hass_sharp.toml`](hass_sharp.toml) lists the three for HassSharp's **Add external**.
+
 ## Install
 
 The files need a HassSharp newer than 0.0.48-beta: they use `[NodeSetup]`, `NodeSetupContext` and `DrawCircle`, and
-the last seen sensors need its fix for timestamp sensors. No HassSharp release has them yet: until one does, they are
-only on hass-sharp's branch `face-detection-and-external-import` on GitHub.
+the last seen sensors need its fix for timestamp sensors. **Add external** is just as new. No HassSharp release has
+them yet: until one does, they are only on hass-sharp's branch `face-detection-and-external-import` on GitHub.
+
+1. In HassSharp's panel, open **Node libraries** (or the entity definitions list) and choose **Add external**. Paste
+   `https://github.com/dompagoj/hass-sharp-vision` and choose **Inspect**.
+2. It lists what this repository offers: the node libraries `Vision.cs` and `PeopleDetector.cs`, and the entity
+   definition **Front door people**. Leave all three checked and choose **Import**. The libraries are imported first,
+   together: Detect faces needs only `Vision.cs`, and `PeopleDetector.cs` uses it.
+3. The definition comes in turned off. Open **Front door people**, pick your camera in the **Front door** device's
+   **Camera**, save it, and turn it on.
+
+To update, run **Add external** again: a file you already have starts unchecked, and checking it offers to overwrite
+it. Overwriting **Front door people** keeps the camera you picked.
+
+A HassSharp without **Add external** takes the files pasted in by hand:
 
 1. In HassSharp's panel, open **Node libraries** and choose **Add file**. Name it `Vision.cs`, paste in
    [`nodes/Vision.cs`](nodes/Vision.cs) and save it. Detect faces needs only this file.
@@ -32,9 +48,8 @@ only on hass-sharp's branch `face-detection-and-external-import` on GitHub.
 
    choose its camera, and save the definition.
 
-For now the files are pasted in by hand. To update, paste both files from `main` in again and save them. A new
-library is downloaded into a folder of its own checksum, and the one loaded before stays loaded until Home Assistant
-restarts.
+To update these, paste both files from `main` in again and save them. Either way, a new library is downloaded into a
+folder of its own checksum, and the one loaded before stays loaded until Home Assistant restarts.
 
 ## People detector
 
@@ -140,15 +155,17 @@ The C# tests build `nodes/Vision.cs` and `nodes/PeopleDetector.cs` against a has
 its runtime suite:
 
 ```sh
-dotnet run --project tests/Vision.Tests --disable-build-servers -p:HassSharpRoot=/path/to/hass-sharp -- --vision --people-detector
+dotnet run --project tests/Vision.Tests --disable-build-servers -p:HassSharpRoot=/path/to/hass-sharp -- --vision --people-detector --vision-manifest
 ```
 
-`HASS_SHARP_ROOT` may name the checkout instead of `-p:HassSharpRoot`. `--vision` runs the tests of `Vision.cs` and
-`--people-detector` those of `PeopleDetector.cs`. The checkout must be on hass-sharp's branch
-`face-detection-and-external-import`, which has `[NodeSetup]` and the still picture of the runtime suite's fake
-ffmpeg. The tests need the .NET 11 SDK, Python 3 (the fake ffmpeg is a Python script) and libjpeg-turbo. CI's C# job
-runs them against the hass-sharp commit that `HASS_SHARP_REF` in `ci.yaml` pins by its full sha, now one on that
-branch; once HassSharp releases these APIs, the pin moves to the commit of that release's tag.
+`HASS_SHARP_ROOT` may name the checkout instead of `-p:HassSharpRoot`. `--vision` runs the tests of `Vision.cs`,
+`--people-detector` those of `PeopleDetector.cs`, and `--vision-manifest` imports both as **Add external** does and
+previews `nodes/front_door_people.json`. The checkout must be on hass-sharp's branch
+`face-detection-and-external-import`, which has `[NodeSetup]`, the node library import and the still picture of the
+runtime suite's fake ffmpeg. The tests need the .NET 11 SDK, Python 3 (the fake ffmpeg is a Python script) and
+libjpeg-turbo. CI's C# job runs them against the hass-sharp commit that `HASS_SHARP_REF` in `ci.yaml` pins by its
+full sha, now one on that branch; once HassSharp releases these APIs, the pin moves to the commit of that release's
+tag.
 
 The tests that run the detector load a local build of the library: `HS_VISION_LIBRARY` when it is set (the file must
 exist), else `native/dist/libhs_vision-<rid>.so` from `build.sh`, else `native/target/release/libhs_vision.dylib` or
@@ -163,11 +180,15 @@ python3 -m unittest discover -s tests
 
 They check that the table in `Vision.cs` is `native/SHA256SUMS` and that its `Source` is the release of
 `native/Cargo.toml`'s version. With `HS_VISION_CHECK_RELEASE=1`, as in CI, they also compare that release's
-`SHA256SUMS` with `native/SHA256SUMS`, once it is released.
+`SHA256SUMS` with `native/SHA256SUMS`, once it is released. With `HASS_SHARP_ROOT` set to a hass-sharp checkout, the
+same command also reads `hass_sharp.toml` and the files it lists by the rules of that checkout's
+`custom_components/hass_sharp/external.py`; without it, that test is skipped.
 
 ## Releasing
 
-A change to `nodes/Vision.cs` or `nodes/PeopleDetector.cs` alone needs no release: users copy the files from `main`.
+A change to `nodes/Vision.cs` or `nodes/PeopleDetector.cs` alone needs no release: users import the files, or copy
+them, from `main`. A change to `PeopleDetector.cs`'s settings changes the signature `nodes/front_door_people.json`
+keeps: `--vision-manifest` then fails, and prints the signature `PeopleDetector.cs` derives, to put in the file.
 A change to the library is released as a new version:
 
 1. Set the new version in `native/Cargo.toml`, and in `Cargo.lock` with `cargo update -p hs_vision --offline` in

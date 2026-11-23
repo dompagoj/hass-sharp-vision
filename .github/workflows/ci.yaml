@@ -1,9 +1,9 @@
 name: CI
 
 # Tests the hs_vision crate, its musl build (built, checked and loaded in Home Assistant by native/build.sh), the licence
-# texts and the pins in nodes/Vision.cs, then the C# node libraries against a pinned hass-sharp commit. release.yaml runs
-# this workflow first and publishes only if it passes. Binaries are published only by release.yaml, as release assets,
-# and never committed: the library this workflow builds is thrown away with the runner.
+# texts and the pins in nodes/Vision.cs, then the C# node libraries and hass_sharp.toml against a pinned hass-sharp
+# commit. release.yaml runs this workflow first and publishes only if it passes. Binaries are published only by
+# release.yaml, as release assets, and never committed: the library this workflow builds is thrown away with the runner.
 on:
   push:
   pull_request:
@@ -16,10 +16,11 @@ permissions:
 env:
   # The hass-sharp commit the C# tests build against: a 40-hex sha, never a branch, so that a hass-sharp change cannot
   # break this repository's CI without a commit here (Ruling 25). It pins a commit with the APIs these files need
-  # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix and the fake ffmpeg's still picture), now on
-  # hass-sharp's branch face-detection-and-external-import; once HassSharp releases them it moves to the commit of that
-  # release's tag. none turns the C# tests off, and the csharp job then only says so; any other value fails the job.
-  HASS_SHARP_REF: 3468101422b9773e1e97798b0c92e69044989b5f
+  # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix and the fake ffmpeg's still picture) and what
+  # Add external imports hass_sharp.toml with (the node library import operation and external.py), now on hass-sharp's
+  # branch face-detection-and-external-import; once HassSharp releases them it moves to the commit of that release's
+  # tag. none turns the C# tests off, and the csharp job then only says so; any other value fails the job.
+  HASS_SHARP_REF: b9e6efca95cce9e1eb84f343f45cf2493c94b309
 
 jobs:
   native:
@@ -80,7 +81,7 @@ jobs:
         with:
           dotnet-version: '11.0.x'
       - uses: actions/setup-python@v5
-        # The fake ffmpeg of hass-sharp's runtime suite is a Python script.
+        # The fake ffmpeg of hass-sharp's runtime suite is a Python script, and the manifest test runs in Python.
         if: env.HASS_SHARP_REF != 'none'
         with:
           python-version: '3.14'
@@ -106,4 +107,10 @@ jobs:
           HS_VISION_REQUIRE_LIBRARY: '1'
         run: >-
           dotnet run --project tests/Vision.Tests --disable-build-servers
-          -p:HassSharpRoot=${{ github.workspace }}/.hass-sharp -- --vision --people-detector
+          -p:HassSharpRoot=${{ github.workspace }}/.hass-sharp -- --vision --people-detector --vision-manifest
+      - name: Manifest
+        # hass_sharp.toml and the files it lists, read by hass-sharp's external.py, as Add external reads them.
+        if: env.HASS_SHARP_REF != 'none'
+        env:
+          HASS_SHARP_ROOT: ${{ github.workspace }}/.hass-sharp
+        run: python -m unittest discover -s tests -v

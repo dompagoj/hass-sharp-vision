@@ -1,0 +1,86 @@
+{
+  "name": "Front door people",
+  "settings": [],
+  "logic": {
+    "kind": "graph",
+    "graph": {
+      "version": 5,
+      "name": "Front door people",
+      "nodes": [
+        {
+          "id": "front_door",
+          "kind": "csharp_device",
+          "config": {
+            "key": "front_door",
+            "name": "Front door",
+            "source": "/// <summary>A People detector on the front door's camera.</summary>\npublic class FrontDoorPeople : PeopleDetector { }\n",
+            "signature": {
+              "title": "Front door people",
+              "description": "A People detector on the front door's camera.",
+              "domain": null,
+              "settings": [
+                {
+                  "key": "Camera",
+                  "label": "Camera",
+                  "description": "The camera to watch.",
+                  "type": "entity",
+                  "secret": false,
+                  "domain": "camera",
+                  "required": true
+                },
+                {
+                  "key": "CheckEvery",
+                  "label": "Check every",
+                  "description": "How many seconds pass between checks of the camera's newest frame, from 0.1 to 60.",
+                  "type": "number",
+                  "secret": false,
+                  "minimum": 0.1,
+                  "maximum": 60
+                },
+                {
+                  "key": "StayOnFor",
+                  "label": "Stay on for",
+                  "description": "How many seconds Face seen and Person seen stay on after the last frame with one, from 0 to 3600.",
+                  "type": "number",
+                  "secret": false,
+                  "minimum": 0,
+                  "maximum": 3600
+                },
+                {
+                  "key": "FaceScore",
+                  "label": "Face score",
+                  "description": "The lowest score a face counts with, from 0.1 to 1: lower finds more, and more that are not faces.",
+                  "type": "number",
+                  "secret": false,
+                  "minimum": 0.1,
+                  "maximum": 1
+                },
+                {
+                  "key": "PersonScore",
+                  "label": "Person score",
+                  "description": "The lowest score a person counts with, from 0.1 to 1: lower finds more, and more that are not people.",
+                  "type": "number",
+                  "secret": false,
+                  "minimum": 0.1,
+                  "maximum": 1
+                }
+              ]
+            },
+            "arguments": {
+              "Camera": {
+                "kind": "literal",
+                "type": "entity_id:camera",
+                "value": "camera.front_door"
+              }
+            }
+          },
+          "position": {
+            "x": 60,
+            "y": 100
+          }
+        }
+      ],
+      "edges": []
+    }
+  }
+}
