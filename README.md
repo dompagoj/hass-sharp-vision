@@ -17,8 +17,8 @@ once from this repository's releases, checks it by its SHA-256 and keeps it with
 ## Install
 
 The files need a HassSharp newer than 0.0.48-beta: they use `[NodeSetup]`, `NodeSetupContext` and `DrawCircle`, and
-the last seen sensors need its fix for timestamp sensors. Until that HassSharp is released, these are only on
-hass-sharp's branch `face-detection-and-external-import`, which is not on GitHub yet.
+the last seen sensors need its fix for timestamp sensors. No HassSharp release has them yet: until one does, they are
+only on hass-sharp's branch `face-detection-and-external-import` on GitHub.
 
 1. In HassSharp's panel, open **Node libraries** and choose **Add file**. Name it `Vision.cs`, paste in
    [`nodes/Vision.cs`](nodes/Vision.cs) and save it. Detect faces needs only this file.
@@ -147,8 +147,8 @@ dotnet run --project tests/Vision.Tests --disable-build-servers -p:HassSharpRoot
 `--people-detector` those of `PeopleDetector.cs`. The checkout must be on hass-sharp's branch
 `face-detection-and-external-import`, which has `[NodeSetup]` and the still picture of the runtime suite's fake
 ffmpeg. The tests need the .NET 11 SDK, Python 3 (the fake ffmpeg is a Python script) and libjpeg-turbo. CI's C# job
-is off (`HASS_SHARP_REF: none` in `ci.yaml`) until such a hass-sharp commit is on GitHub; it is then pinned by its
-sha.
+runs them against the hass-sharp commit that `HASS_SHARP_REF` in `ci.yaml` pins by its full sha, now one on that
+branch; once HassSharp releases these APIs, the pin moves to the commit of that release's tag.
 
 The tests that run the detector load a local build of the library: `HS_VISION_LIBRARY` when it is set (the file must
 exist), else `native/dist/libhs_vision-<rid>.so` from `build.sh`, else `native/target/release/libhs_vision.dylib` or

@@ -15,9 +15,11 @@ permissions:
 
 env:
   # The hass-sharp commit the C# tests build against: a 40-hex sha, never a branch, so that a hass-sharp change cannot
-  # break this repository's CI without a commit here (Ruling 25). It is none until a hass-sharp commit with [NodeSetup]
-  # and the fake ffmpeg's still= is on GitHub; while it is none the csharp job only says that the C# tests are off.
-  HASS_SHARP_REF: none
+  # break this repository's CI without a commit here (Ruling 25). It pins a commit with the APIs these files need
+  # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix and the fake ffmpeg's still picture), now on
+  # hass-sharp's branch face-detection-and-external-import; once HassSharp releases them it moves to the commit of that
+  # release's tag. none turns the C# tests off, and the csharp job then only says so; any other value fails the job.
+  HASS_SHARP_REF: 3468101422b9773e1e97798b0c92e69044989b5f
 
 jobs:
   native:
@@ -54,10 +56,17 @@ jobs:
     name: C# node libraries (against hass-sharp)
     runs-on: ubuntu-latest
     steps:
-      - name: C# tests are off
-        if: env.HASS_SHARP_REF == 'none'
+      - name: HASS_SHARP_REF is a commit or none
+        # A branch or tag name would let a hass-sharp change break this CI without a commit here, so only a full sha is taken.
         run: |
-          echo "::notice::The C# tests are off: HASS_SHARP_REF is none until a hass-sharp commit with [NodeSetup] is on GitHub"
+          if [ "$HASS_SHARP_REF" = none ]; then
+            echo "::notice::The C# tests are off: HASS_SHARP_REF is none"
+          elif [[ $HASS_SHARP_REF =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The C# tests build against hass-sharp commit $HASS_SHARP_REF"
+          else
+            echo "::error::HASS_SHARP_REF is '$HASS_SHARP_REF', but it must be none or a full 40-character lowercase hex commit sha, never a branch or tag name"
+            exit 1
+          fi
       - uses: actions/checkout@v4
         if: env.HASS_SHARP_REF != 'none'
       - uses: actions/checkout@v4
