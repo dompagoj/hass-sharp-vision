@@ -256,11 +256,12 @@ mod tests {
         let length = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!((length - 1.0).abs() < 1e-5, "length {length}");
         assert!(fit > 0.0 && fit < 10.0, "fit {fit}");
-        // What this build gives on macOS arm64.
+        // What this build gives on macOS arm64. The tolerance leaves room for another platform's arithmetic, while a
+        // wrong alignment or model moves these values by far more.
         let pinned = [-0.009479362f32, -0.08494233, -0.0237523, 0.07168374];
         for (got, want) in embedding.iter().zip(pinned) {
             assert!(
-                (got - want).abs() < 1e-4,
+                (got - want).abs() < 1e-3,
                 "the first values are {:?}, not {pinned:?}",
                 &embedding[..4]
             );
