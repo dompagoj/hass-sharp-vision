@@ -2,8 +2,9 @@ hs_vision
 =========
 
 hs_vision is part of hass-sharp-vision (https://github.com/dompagoj/hass-sharp-vision), which is MIT-licensed
-(the repository's LICENSE). The library embeds models and links code that are not hass-sharp-vision's own, and its
-tests use photos that are not hass-sharp-vision's own.
+(the repository's LICENSE). The library embeds models and links code that are not hass-sharp-vision's own, runs a
+model that is not its own from a file downloaded beside it, and its tests use photos that are not hass-sharp-vision's
+own.
 
 Models
 ------
@@ -24,6 +25,17 @@ yolox_nano.onnx (YOLOX-nano), in model/ and embedded in the library
   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx
   3,659,407 bytes, SHA-256 c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d, unmodified.
 
+face_recognition_sface_2021dec.onnx (SFace), downloaded and not part of the library
+  From the OpenCV zoo's face_recognition_sface: SFace is contributed by Yaoyao Zhong
+  (https://github.com/zhongyy/SFace), and its ONNX conversion is by Chengrui Wang.
+  Apache License 2.0; the licence is model/LICENSE-sface, the zoo's licence text as it ships it with the model, from
+  https://huggingface.co/opencv/face_recognition_sface
+  Source: https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx
+  38,696,353 bytes, SHA-256 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79, unmodified.
+  The model is not embedded in the library and not committed here: fetch-model.sh downloads it into model/ for the
+  tests, each release carries it and model/LICENSE-sface as assets beside the libraries, and the library reads it
+  from the path it is given. The zoo does not state the data the model was trained on.
+
 Linked code
 -----------
 
@@ -42,8 +54,9 @@ they bundle, such as hashbrown, compiler_builtins, gimli, addr2line and miniz_ox
 except for the parts the Rust project's COPYRIGHT file names under other permissive licences:
 https://github.com/rust-lang/rust/blob/master/COPYRIGHT, with LICENSE-MIT and LICENSE-APACHE beside it.
 
-THIRD-PARTY-LICENSES has the full licence texts of the linked crates and of both models, and names the standard
-library; every release carries it beside the binaries.
+THIRD-PARTY-LICENSES has the full licence texts of the linked crates and of both embedded models, and names the
+standard library; every release carries it beside the binaries. SFace's licence text is model/LICENSE-sface, which
+every release carries beside the model.
 
 Test fixtures
 -------------

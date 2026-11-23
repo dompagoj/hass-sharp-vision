@@ -37,6 +37,10 @@ jobs:
         run: |
           rustup toolchain install
           rustup show
+      - name: Face recognition model
+        # SFace, which the recogniser tests open from native/model/: downloaded and checked by its pinned SHA-256, never
+        # committed.
+        run: ./native/fetch-model.sh
       - name: Crate tests
         working-directory: native
         run: cargo test --release --locked

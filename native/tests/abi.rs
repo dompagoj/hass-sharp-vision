@@ -1,6 +1,6 @@
 //! The C ABI, driven as a caller would drive it.
 
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
 use hs_vision::*;
@@ -210,8 +210,8 @@ fn last_error() -> Option<String> {
 }
 
 #[test]
-fn abi_version_is_1() {
-    assert_eq!(hs_vision_abi_version(), 1);
+fn the_abi_is_version_2() {
+    assert_eq!(hs_vision_abi_version(), 2);
 }
 
 #[test]
@@ -588,4 +588,187 @@ fn concurrent_calls_agree() {
             });
         }
     });
+}
+
+/// The face recognition model, which native/fetch-model.sh downloads.
+fn model() -> String {
+    let path = format!(
+        "{}/model/face_recognition_sface_2021dec.onnx",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert!(
+        std::path::Path::new(&path).is_file(),
+        "{path} is missing: run native/fetch-model.sh"
+    );
+    path
+}
+
+struct Recognizing(*mut Recognizer);
+
+impl Recognizing {
+    fn new() -> Recognizing {
+        let path = CString::new(model()).unwrap();
+        let rec = unsafe { hs_vision_open_recognizer(path.as_ptr()) };
+        assert!(!rec.is_null(), "open failed: {:?}", last_error());
+        assert_eq!(last_error(), None);
+        Recognizing(rec)
+    }
+}
+
+impl Drop for Recognizing {
+    fn drop(&mut self) {
+        unsafe { hs_vision_close_recognizer(self.0) }
+    }
+}
+
+/// The landmarks of the largest face found in the group photo at 640.
+fn largest_face(p: &Picture) -> [f32; 10] {
+    let faces = Open::new().faces(p, 640, 0.7, 64).unwrap();
+    faces
+        .iter()
+        .max_by(|a, b| (a.w * a.h).total_cmp(&(b.w * b.h)))
+        .unwrap()
+        .landmarks
+}
+
+#[test]
+fn opening_a_recognizer_refuses_a_bad_path() {
+    let open = |path: *const c_char| {
+        let rec = unsafe { hs_vision_open_recognizer(path) };
+        assert!(rec.is_null());
+        last_error().expect("null without an error")
+    };
+    assert_eq!(open(ptr::null()), "no model path");
+    let empty = CString::new("").unwrap();
+    assert_eq!(open(empty.as_ptr()), "no model path");
+    let latin1 = CString::new(vec![b'/', 0xE9, b'.', b'o', b'n', b'n', b'x']).unwrap();
+    assert_eq!(open(latin1.as_ptr()), "the model path is not UTF-8");
+    let missing = format!("{}/model/missing.onnx", env!("CARGO_MANIFEST_DIR"));
+    let c = CString::new(missing.clone()).unwrap();
+    assert_eq!(
+        open(c.as_ptr()),
+        format!("the face recognition model {missing} does not exist")
+    );
+    unsafe { hs_vision_close_recognizer(ptr::null_mut()) };
+    assert_eq!(last_error(), None);
+}
+
+/// A call of `hs_vision_embed`, with the error it left.
+#[allow(clippy::too_many_arguments)]
+fn embed_on(
+    rec: *mut Recognizer,
+    rgb: *const u8,
+    width: i32,
+    height: i32,
+    stride: i32,
+    landmarks: *const f32,
+    out: *mut f32,
+    fit: *mut f32,
+) -> (i32, Option<String>) {
+    let n = unsafe { hs_vision_embed(rec, rgb, width, height, stride, landmarks, out, fit) };
+    (n, last_error())
+}
+
+#[test]
+fn embed_refusals_set_the_error_and_a_valid_call_clears_it() {
+    let rec = Recognizing::new();
+    let p = Picture::black(64, 48);
+    let landmarks = [20.0, 20.0, 40.0, 20.0, 30.0, 30.0, 22.0, 40.0, 38.0, 40.0];
+    let mut out = [0f32; 128];
+    let mut fit = -1f32;
+    let (rgb, l, o, f) = (
+        p.rgb.as_ptr(),
+        landmarks.as_ptr(),
+        out.as_mut_ptr(),
+        &mut fit as *mut f32,
+    );
+    let refused = |n_err: (i32, Option<String>), text: &str| {
+        assert_eq!(n_err, (-1, Some(text.to_owned())));
+        // A valid call afterwards clears the error.
+        assert_eq!(embed_on(rec.0, rgb, 64, 48, 192, l, o, f), (0, None));
+    };
+    refused(
+        embed_on(ptr::null_mut(), rgb, 64, 48, 192, l, o, f),
+        "no recogniser",
+    );
+    refused(
+        embed_on(rec.0, ptr::null(), 64, 48, 192, l, o, f),
+        "no pixels",
+    );
+    for (w, h) in [(0, 48), (64, 0), (-1, 48), (8193, 48), (64, 8193)] {
+        refused(
+            embed_on(rec.0, rgb, w, h, 192, l, o, f),
+            "the picture is 1 to 8192 pixels a side",
+        );
+    }
+    for stride in [191, 0, -192] {
+        refused(
+            embed_on(rec.0, rgb, 64, 48, stride, l, o, f),
+            "the stride is less than a row",
+        );
+    }
+    refused(
+        embed_on(rec.0, rgb, 64, 48, 192, ptr::null(), o, f),
+        "no landmarks",
+    );
+    refused(
+        embed_on(rec.0, rgb, 64, 48, 192, l, ptr::null_mut(), f),
+        "no room for the embedding",
+    );
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut odd = landmarks;
+        odd[3] = bad;
+        refused(
+            embed_on(rec.0, rgb, 64, 48, 192, odd.as_ptr(), o, f),
+            "the landmarks are not all finite",
+        );
+    }
+    // No fit asked for is fine.
+    assert_eq!(
+        embed_on(rec.0, rgb, 64, 48, 192, l, o, ptr::null_mut()),
+        (0, None)
+    );
+}
+
+#[test]
+fn the_c_abi_embeds_as_the_crate_does() {
+    let rec = Recognizing::new();
+    let p = Picture::group();
+    let landmarks = largest_face(&p);
+    let mut out = [0f32; 128];
+    let mut fit = -1f32;
+    let called = embed_on(
+        rec.0,
+        p.rgb.as_ptr(),
+        p.width as i32,
+        p.height as i32,
+        p.stride as i32,
+        landmarks.as_ptr(),
+        out.as_mut_ptr(),
+        &mut fit,
+    );
+    assert_eq!(called, (0, None));
+    let picture = hs_vision::detector::Picture {
+        rgb: &p.rgb,
+        width: p.width,
+        height: p.height,
+        stride: p.stride,
+    };
+    let (want, want_fit) = unsafe { &*rec.0 }.embed(&picture, &landmarks).unwrap();
+    assert_eq!((out, fit), (want, want_fit));
+    // Rows further apart than their pixels give the same embedding.
+    let padded = p.padded(16);
+    let mut again = [0f32; 128];
+    let called = embed_on(
+        rec.0,
+        padded.rgb.as_ptr(),
+        padded.width as i32,
+        padded.height as i32,
+        padded.stride as i32,
+        landmarks.as_ptr(),
+        again.as_mut_ptr(),
+        ptr::null_mut(),
+    );
+    assert_eq!(called, (0, None));
+    assert_eq!(again, out);
 }

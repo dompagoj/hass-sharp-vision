@@ -1,24 +1,29 @@
-//! hs_vision: face detection with YuNet and person detection with YOLOX-nano on tract, behind a small C ABI.
+//! hs_vision: face detection with YuNet, face recognition with SFace and person detection with YOLOX-nano on tract,
+//! behind a small C ABI.
 //!
-//! ABI version 1. Every export catches panics, which come back as an error, and records why a call failed in a
-//! thread-local error that `hs_vision_last_error` reads.
+//! ABI version 2, which adds the recogniser to version 1's exports and leaves those as they were. Every export
+//! catches panics, which come back as an error, and records why a call failed in a thread-local error that
+//! `hs_vision_last_error` reads.
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
+pub mod align;
 pub mod detector;
 pub mod nms;
+pub mod recognizer;
 pub mod yolox;
 pub mod yunet;
 
 pub use detector::Detector;
 use detector::Picture;
+pub use recognizer::Recognizer;
 
 /// The version of the C ABI, which the caller checks before using anything else.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// The longest side a picture can have.
 pub const MAX_SIDE: i32 = 8192;
@@ -104,11 +109,10 @@ fn export<T>(failed: T, f: impl FnOnce() -> Result<T, String>) -> T {
     }
 }
 
-/// Checks a picture's arguments, in the order the refusals are documented, and borrows its pixels.
+/// Checks a picture's arguments and a detection's, in the order the refusals are documented, and borrows its pixels.
 ///
 /// # Safety
-/// A non-null `rgb` must point to `height` rows `stride` bytes apart, each with `width` RGB8 pixels, that stay
-/// valid and unchanged for `'a`.
+/// As [`pixels`].
 unsafe fn picture<'a>(
     rgb: *const u8,
     width: i32,
@@ -116,6 +120,29 @@ unsafe fn picture<'a>(
     stride: i32,
     input_size: i32,
     min_score: f32,
+) -> Result<Picture<'a>, String> {
+    // SAFETY: the caller lends the picture as `pixels` needs. On the library's 64-bit targets every picture with
+    // valid sides and stride fits in memory, so `pixels` refuses nothing a detection's checks would come before.
+    let picture = unsafe { pixels(rgb, width, height, stride) }?;
+    if !(64..=1280).contains(&input_size) || input_size % 32 != 0 {
+        return Err("the input size is a multiple of 32 from 64 to 1280".into());
+    }
+    if !(0.0..=1.0).contains(&min_score) {
+        return Err("the minimum score is from 0 to 1".into());
+    }
+    Ok(picture)
+}
+
+/// Checks a picture's arguments, as [`picture`] does but without a detection's, and borrows its pixels.
+///
+/// # Safety
+/// A non-null `rgb` must point to `height` rows `stride` bytes apart, each with `width` RGB8 pixels, that stay
+/// valid and unchanged for `'a`.
+unsafe fn pixels<'a>(
+    rgb: *const u8,
+    width: i32,
+    height: i32,
+    stride: i32,
 ) -> Result<Picture<'a>, String> {
     if rgb.is_null() {
         return Err("no pixels".into());
@@ -125,12 +152,6 @@ unsafe fn picture<'a>(
     }
     if stride < width * 3 {
         return Err("the stride is less than a row".into());
-    }
-    if !(64..=1280).contains(&input_size) || input_size % 32 != 0 {
-        return Err("the input size is a multiple of 32 from 64 to 1280".into());
-    }
-    if !(0.0..=1.0).contains(&min_score) {
-        return Err("the minimum score is from 0 to 1".into());
     }
     let (width, height, stride) = (width as usize, height as usize, stride as usize);
     let len = (height as u64 - 1) * stride as u64 + width as u64 * 3;
@@ -160,7 +181,7 @@ unsafe fn write_out<T: Copy>(found: &[T], out: *mut T, max: usize) -> i32 {
     n as i32
 }
 
-/// The ABI version, 1.
+/// The ABI version, 2.
 #[no_mangle]
 pub extern "C" fn hs_vision_abi_version() -> u32 {
     export(0, || Ok(ABI_VERSION))
@@ -263,6 +284,92 @@ pub unsafe extern "C" fn hs_vision_close(det: *mut Detector) {
         if !det.is_null() {
             // SAFETY: the caller gives the detector back, and nothing uses it any more.
             drop(unsafe { Box::from_raw(det) });
+        }
+        Ok(())
+    })
+}
+
+/// A new recogniser on the SFace model file at `model_path` (UTF-8, NUL-terminated), or null with the error set. The
+/// first recogniser open on a file reads and plans it, which takes a moment; the others share that plan, which the
+/// last one closed frees.
+///
+/// # Safety
+/// `model_path` is null or a NUL-terminated string that stays valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hs_vision_open_recognizer(model_path: *const c_char) -> *mut Recognizer {
+    export(ptr::null_mut(), || {
+        if model_path.is_null() {
+            return Err("no model path".into());
+        }
+        // SAFETY: a non-null `model_path` is a NUL-terminated string the caller lends for this call.
+        let path = unsafe { CStr::from_ptr(model_path) }
+            .to_str()
+            .map_err(|_| "the model path is not UTF-8")?;
+        if path.is_empty() {
+            return Err("no model path".into());
+        }
+        Recognizer::open(path).map(|r| Box::into_raw(Box::new(r)))
+    })
+}
+
+/// Turns the face whose five landmarks are given into its embedding, from a `width` × `height` RGB8 picture whose
+/// rows are `stride` bytes apart. `landmarks` holds ten values, each landmark's x and y in the picture's pixels, in
+/// the order `hs_vision_faces` gives them. Writes the 128 values, of length 1, to `out`, and to `fit`, unless it is
+/// null, how far the landmarks are from where an aligned face has them, in the 112×112 crop's pixels (the root mean
+/// square of the five distances). Gives 0, or −1 with the error set.
+///
+/// # Safety
+/// `rec` is null or a recogniser from `hs_vision_open_recognizer` that is not closed. `rgb` is null or points to the
+/// picture, `landmarks` is null or points to 10 values, `out` is null or has room for 128, and `fit` is null or has
+/// room for one.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn hs_vision_embed(
+    rec: *mut Recognizer,
+    rgb: *const u8,
+    width: i32,
+    height: i32,
+    stride: i32,
+    landmarks: *const f32,
+    out: *mut f32,
+    fit: *mut f32,
+) -> i32 {
+    export(-1, || {
+        // SAFETY: a non-null `rec` is a live recogniser, which any number of threads may use at once.
+        let rec = unsafe { rec.as_ref() }.ok_or("no recogniser")?;
+        // SAFETY: the caller lends the picture for this call.
+        let picture = unsafe { pixels(rgb, width, height, stride) }?;
+        if landmarks.is_null() {
+            return Err("no landmarks".into());
+        }
+        if out.is_null() {
+            return Err("no room for the embedding".into());
+        }
+        let mut points = [0f32; 10];
+        // SAFETY: `landmarks` is not null and points to 10 values.
+        points.copy_from_slice(unsafe { std::slice::from_raw_parts(landmarks, 10) });
+        let (embedding, residual) = rec.embed(&picture, &points)?;
+        // SAFETY: `out` is not null and has room for 128 values.
+        unsafe { std::slice::from_raw_parts_mut(out, embedding.len()) }.copy_from_slice(&embedding);
+        if !fit.is_null() {
+            // SAFETY: a non-null `fit` has room for one value.
+            unsafe { fit.write(residual) };
+        }
+        Ok(0)
+    })
+}
+
+/// Frees a recogniser, and its model's plan when no other recogniser shares it. Null is a no-op.
+///
+/// # Safety
+/// `rec` is null or a recogniser from `hs_vision_open_recognizer` that is not closed and that no other call is
+/// using.
+#[no_mangle]
+pub unsafe extern "C" fn hs_vision_close_recognizer(rec: *mut Recognizer) {
+    export((), || {
+        if !rec.is_null() {
+            // SAFETY: the caller gives the recogniser back, and nothing uses it any more.
+            drop(unsafe { Box::from_raw(rec) });
         }
         Ok(())
     })

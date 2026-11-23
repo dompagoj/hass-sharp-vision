@@ -1,5 +1,7 @@
 native/target/
 native/dist/
+# SFace, which native/fetch-model.sh downloads: it is never committed.
+native/model/face_recognition_sface_2021dec.onnx
 tests/**/bin/
 tests/**/obj/
 __pycache__/

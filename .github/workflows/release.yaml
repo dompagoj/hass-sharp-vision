@@ -2,8 +2,9 @@ name: Release
 
 # A v<version> tag, once every test of ci.yaml passes, builds libhs_vision-<rid>.so for each Linux runtime on a runner of
 # its own architecture and publishes them, with their SHA256SUMS and the NOTICE and licence texts, as the release of that
-# tag. This is the only place binaries are published; they are never committed. A version is released once: a rebuild is
-# a new version, and nothing uploads to an existing release.
+# tag, beside the face recognition model (checked by its pinned SHA-256) and its licence. This is the only place binaries
+# are published; they are never committed. A version is released once: a rebuild is a new version, and nothing uploads to
+# an existing release.
 on:
   push:
     tags:
@@ -118,6 +119,10 @@ jobs:
             diff -u native/SHA256SUMS dist/SHA256SUMS || true
             echo "::notice::The release's checksums differ from native/SHA256SUMS: pin them in Vision.cs next"
           fi
+      - name: Face recognition model
+        # SFace, which the library reads from a file of its own: downloaded and checked by its pinned SHA-256, to publish
+        # unmodified with model/LICENSE-sface.
+        run: ./native/fetch-model.sh
       - name: Create the release
         # --verify-tag: the release is of the pushed tag and never creates one. A release that exists already fails here.
         env:
@@ -126,5 +131,6 @@ jobs:
         run: |
           version=${GITHUB_REF_NAME#v}
           gh release create "$GITHUB_REF_NAME" dist/*.so dist/SHA256SUMS native/NOTICE native/THIRD-PARTY-LICENSES \
+            native/model/face_recognition_sface_2021dec.onnx native/model/LICENSE-sface \
             --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "hs_vision $version for HassSharp: libhs_vision-<rid>.so for each Linux runtime, their SHA256SUMS, and the NOTICE and licence texts they ship with."
+            --notes "hs_vision $version for HassSharp: libhs_vision-<rid>.so for each Linux runtime, their SHA256SUMS, and the NOTICE and licence texts they ship with; and the face recognition model the library reads, face_recognition_sface_2021dec.onnx (SFace from the OpenCV zoo, unmodified), with its licence, LICENSE-sface."
