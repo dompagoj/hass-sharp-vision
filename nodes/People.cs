@@ -1,8 +1,10 @@
 // hass-sharp-vision 1.1.0, from https://github.com/dompagoj/hass-sharp-vision
 using System.Buffers.Binary;
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 /// <summary>
 /// The lines a face's embedding is judged by against the people list. <see cref="Default"/> holds the values of
@@ -36,7 +38,8 @@ public sealed record RecognitionRules(double MatchScore, double MatchMargin, dou
 
 /// <summary>A named person of the people list.</summary>
 /// <param name="Id">The person's id: short, URL-safe and meaningless.</param>
-/// <param name="Name">The name, trimmed.</param>
+/// <param name="FirstName">The first name, trimmed: 1 to 64 characters.</param>
+/// <param name="LastName">The last name, trimmed: at most 64 characters; null when the person has none.</param>
 /// <param name="Added">When the person was added; <see cref="DateTimeOffset.MinValue"/> when that is no longer known.</param>
 /// <param name="Samples">The person's face samples, named and learned.</param>
 /// <param name="LastSeen">When a detector last recognised the person; null when none has.</param>
@@ -45,7 +48,11 @@ public sealed record RecognitionRules(double MatchScore, double MatchMargin, dou
 /// When a learned sample of the person was last added or removed; null when none has been, or the record was written
 /// before this was kept. <see cref="FaceMatcher.Learns"/> goes by the later of this and the newest learned sample's time.
 /// </param>
-public sealed record Person(string Id, string Name, DateTimeOffset Added, IReadOnlyList<FaceSample> Samples, DateTimeOffset? LastSeen, string? LastSeenAt, DateTimeOffset? LearnedChanged);
+public sealed record Person(string Id, string FirstName, string? LastName, DateTimeOffset Added, IReadOnlyList<FaceSample> Samples, DateTimeOffset? LastSeen, string? LastSeenAt, DateTimeOffset? LearnedChanged)
+{
+    /// <summary>The first name, a space and the last name; the first name alone when there is no last name. No two people of the list have one, whatever its case.</summary>
+    public string FullName => LastName == null ? FirstName : $"{FirstName} {LastName}";
+}
 
 /// <summary>A face of a person, as its embedding; its crop is read with <see cref="PeopleList.Crop"/>.</summary>
 /// <param name="Id">The sample's id.</param>
@@ -164,9 +171,10 @@ public static class FaceMatcher
 /// </summary>
 /// <remarks>
 /// <para>
-/// The store's keys: <c>format</c>, 1; <c>names</c>, a JSON object from each person's id to their name, which every
-/// create, rename, merge and delete changes with one <see cref="SharpData.Update{T}"/>, so that two detectors lose no
-/// change and never give two people one name; <c>people/&lt;id&gt;</c>, the person without embeddings and crops, with
+/// The store's keys: <c>format</c>, 1; <c>names</c>, a JSON object from each person's id to their names,
+/// <c>{"first": …, "last": … or null}</c>, which every create, rename, merge and delete changes with one
+/// <see cref="SharpData.Update{T}"/>, so that two detectors lose no change and never give two people one full name;
+/// <c>people/&lt;id&gt;</c>, the person without embeddings and crops, with
 /// when a learned sample of theirs was last added or removed (a record without it has none);
 /// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats;
 /// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/crop</c>, the JPEG; and <c>unfinished/&lt;personId&gt;</c> while an add, a
@@ -186,6 +194,11 @@ public static class FaceMatcher
 /// format is neither read nor written.
 /// </para>
 /// <para>
+/// A name written before last names were kept is a string, not an object: it is read whole as the first name, with no
+/// last name, and the next change of the names, by whichever detector, writes every name in the new form, in the same
+/// one update, so that no other change is lost and nothing else of the person is touched.
+/// </para>
+/// <para>
 /// <see cref="People"/> is a snapshot that a reload replaces and never changes, safe to read while another thread
 /// reloads or writes. The lock guards only the snapshot and the sightings, and is never held across a store call.
 /// </para>
@@ -200,7 +213,7 @@ public sealed class PeopleList
     public const int MostLearned = 20;
     /// <summary>The most people the list has.</summary>
     public const int MostPeople = 200;
-    /// <summary>The longest name, in characters.</summary>
+    /// <summary>The longest first name, and the longest last name, in characters.</summary>
     public const int LongestName = 64;
     /// <summary>The largest crop, in bytes.</summary>
     public const int LargestCrop = 1024 * 1024;
@@ -245,7 +258,7 @@ public sealed class PeopleList
         Reload();
     }
 
-    /// <summary>The people, by name: a snapshot, replaced by each change and reload.</summary>
+    /// <summary>The people, by full name: a snapshot, replaced by each change and reload.</summary>
     public IReadOnlyList<Person> People
     {
         get { lock (gate) return people; }
@@ -281,8 +294,22 @@ public sealed class PeopleList
         }
     }
 
-    /// <summary>The person of a name, ignoring case and surrounding spaces; null when no one has it.</summary>
-    public Person? Named(string name) => name == null ? null : People.FirstOrDefault(person => Same(person.Name, name));
+    /// <summary>
+    /// What the camera picture names a person by: their first name, and when another person of <paramref name="everyone"/>
+    /// has the same first name, whatever its case, a space, the first letter of their last name and a full stop
+    /// ("Ivan K."); the first name alone when they have no last name.
+    /// </summary>
+    /// <param name="person">The person.</param>
+    /// <param name="everyone">The people to tell them from, such as <see cref="People"/>.</param>
+    public static string Label(Person person, IReadOnlyList<Person> everyone)
+    {
+        ArgumentNullException.ThrowIfNull(person);
+        ArgumentNullException.ThrowIfNull(everyone);
+        if (person.LastName is not { Length: > 0 } last) return person.FirstName;
+        var shared = everyone.Any(other => other.Id != person.Id && string.Equals(other.FirstName, person.FirstName, StringComparison.OrdinalIgnoreCase));
+        // A whole letter, with its marks: a last name's first character may be a half of one.
+        return shared ? $"{person.FirstName} {last[..StringInfo.GetNextTextElementLength(last)]}." : person.FirstName;
+    }
 
     /// <summary>The crop of a sample of anyone in the list, as stored; null when there is none.</summary>
     public byte[]? Crop(string sampleId)
@@ -295,19 +322,21 @@ public sealed class PeopleList
     }
 
     /// <summary>Adds a person, named with the samples given.</summary>
-    /// <param name="name">The name; trimmed, 1 to 64 characters, and no one else's.</param>
+    /// <param name="firstName">The first name; trimmed, 1 to 64 characters.</param>
+    /// <param name="lastName">The last name; trimmed, at most 64 characters; none when null or empty. The full name is no one else's, whatever its case.</param>
     /// <param name="samples">1 to 20 faces of the person, which become named samples.</param>
     /// <returns>The person added.</returns>
-    /// <exception cref="PeopleRefusal">The name is empty, too long or taken; there are no samples or too many; the list is full.</exception>
+    /// <exception cref="PeopleRefusal">A name is empty or too long, or the full name is taken; there are no samples or too many; the list is full.</exception>
     /// <exception cref="ArgumentException">A sample has no 128 values, no crop, or a crop over 1 MiB.</exception>
-    public Person Add(string name, IEnumerable<NewSample> samples)
+    public Person Add(string firstName, string? lastName, IEnumerable<NewSample> samples)
     {
-        var trimmed = CheckName(name);
+        var name = CheckName(firstName, lastName);
+        var full = name.Full;
         var given = CheckSamples(samples);
-        if (given.Count == 0) throw new PeopleRefusal($"{trimmed} needs a face to be named with.");
-        if (given.Count > MostNamed) throw NoRoom(trimmed);
+        if (given.Count == 0) throw new PeopleRefusal($"{full} needs a face to be named with.");
+        if (given.Count > MostNamed) throw NoRoom(full);
         CheckFormat();
-        RefuseTaken(ReadNames(), null, trimmed);
+        RefuseTaken(ReadNames(), null, name);
 
         var id = NewId();
         var listed = given.Select(sample => new StoredSample(NewId(), sample.At, sample.Camera, false, sample.Embedding.Fit)).ToList();
@@ -319,9 +348,9 @@ public sealed class PeopleList
             data.Set(RecordKey(id), record);
             ChangeNames(names =>
             {
-                RefuseTaken(names, null, trimmed);
+                RefuseTaken(names, null, name);
                 if (names.Count >= MostPeople) throw new PeopleRefusal(Full);
-                names[id] = trimmed;
+                names[id] = name;
             });
         }
         catch
@@ -332,7 +361,7 @@ public sealed class PeopleList
         }
         Finished(id);
         Reload();
-        return Find(id) ?? new Person(id, trimmed, record.Added, given.Select((sample, i) => Sample(listed[i], sample.Embedding.Values)).ToArray(), null, null, null);
+        return Find(id) ?? new Person(id, name.First, name.Last, record.Added, given.Select((sample, i) => Sample(listed[i], sample.Embedding.Values)).ToArray(), null, null, null);
     }
 
     /// <summary>
@@ -347,7 +376,8 @@ public sealed class PeopleList
     {
         var given = CheckSamples(samples);
         CheckFormat();
-        if (!IsId(personId) || !ReadNames().TryGetValue(personId, out var name)) throw new PeopleRefusal(Gone);
+        if (!IsId(personId) || !ReadNames().TryGetValue(personId, out var stored) || stored == null) throw new PeopleRefusal(Gone);
+        var name = stored.Full;
         if (!learned && given.Count > MostNamed) throw NoRoom(name);
         if (given.Count == 0) return Find(personId) ?? throw new PeopleRefusal(Gone);
 
@@ -387,18 +417,22 @@ public sealed class PeopleList
 
     /// <summary>Renames a person.</summary>
     /// <param name="personId">The person's id.</param>
-    /// <param name="name">The new name; trimmed, 1 to 64 characters, and no one else's (the person's own in another case is theirs).</param>
-    /// <exception cref="PeopleRefusal">The name is empty, too long or someone else's, or the person is no longer in the list.</exception>
-    public void Rename(string personId, string name)
+    /// <param name="firstName">The new first name; trimmed, 1 to 64 characters.</param>
+    /// <param name="lastName">
+    /// The new last name; trimmed, at most 64 characters; none when null or empty. The full name is no one else's (the
+    /// person's own in another case is theirs).
+    /// </param>
+    /// <exception cref="PeopleRefusal">A name is empty or too long, the full name is someone else's, or the person is no longer in the list.</exception>
+    public void Rename(string personId, string firstName, string? lastName)
     {
-        var trimmed = CheckName(name);
+        var name = CheckName(firstName, lastName);
         CheckFormat();
         if (!IsId(personId)) throw new PeopleRefusal(Gone);
         ChangeNames(names =>
         {
             if (!names.ContainsKey(personId)) throw new PeopleRefusal(Gone);
-            RefuseTaken(names, personId, trimmed);
-            names[personId] = trimmed;
+            RefuseTaken(names, personId, name);
+            names[personId] = name;
         });
         Reload();
     }
@@ -573,7 +607,7 @@ public sealed class PeopleList
         var notes = data.Keys("unfinished/");
         if (notes.Count == 0) return;
         // Read after the notes, so that an add's note it finds was written before the names it reads.
-        Dictionary<string, string> names;
+        Dictionary<string, StoredName> names;
         try { names = ReadNames(); }
         catch (PeopleRefusal) { return; }
         var now = DateTimeOffset.UtcNow;
@@ -615,7 +649,7 @@ public sealed class PeopleList
     IReadOnlyList<Person> Load(IReadOnlyList<Person> before)
     {
         if (ReadFormat() is not (null or Format)) return Array.Empty<Person>();
-        Dictionary<string, string> names;
+        Dictionary<string, StoredName> names;
         try { names = ReadNames(); }
         catch (PeopleRefusal) { return Array.Empty<Person>(); }
         var known = new Dictionary<string, float[]>(StringComparer.Ordinal);
@@ -626,7 +660,7 @@ public sealed class PeopleList
         var loaded = new List<Person>();
         foreach (var (id, name) in names)
         {
-            if (!IsId(id) || string.IsNullOrWhiteSpace(name)) continue;
+            if (!IsId(id) || name == null || string.IsNullOrWhiteSpace(name.First)) continue;
             var record = ReadRecord(id);
             var samples = new List<FaceSample>();
             var ids = new HashSet<string>(StringComparer.Ordinal);
@@ -637,9 +671,9 @@ public sealed class PeopleList
                 var values = known.TryGetValue(key, out var cached) ? cached : ReadEmbedding(key);
                 if (values != null) samples.Add(Sample(sample, values));
             }
-            loaded.Add(new Person(id, name, record?.Added ?? DateTimeOffset.MinValue, samples.AsReadOnly(), record?.LastSeen, record?.LastSeenAt, record?.LearnedChanged));
+            loaded.Add(new Person(id, name.First, string.IsNullOrEmpty(name.Last) ? null : name.Last, record?.Added ?? DateTimeOffset.MinValue, samples.AsReadOnly(), record?.LastSeen, record?.LastSeenAt, record?.LearnedChanged));
         }
-        loaded.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase) is var order and not 0 ? order : string.CompareOrdinal(a.Id, b.Id));
+        loaded.Sort((a, b) => string.Compare(a.FullName, b.FullName, StringComparison.OrdinalIgnoreCase) is var order and not 0 ? order : string.CompareOrdinal(a.Id, b.Id));
         return loaded.AsReadOnly();
     }
 
@@ -670,22 +704,25 @@ public sealed class PeopleList
         if (format != Format) throw new PeopleRefusal(Newer);
     }
 
-    /// <summary>The names, by id; empty when none is written yet.</summary>
+    /// <summary>The names, by id, in either form; empty when none is written yet.</summary>
     /// <exception cref="PeopleRefusal">They cannot be read.</exception>
-    Dictionary<string, string> ReadNames()
+    Dictionary<string, StoredName> ReadNames()
     {
-        try { return data.Get<Dictionary<string, string>>("names") ?? new(StringComparer.Ordinal); }
+        try { return data.Get<Dictionary<string, StoredName>>("names") ?? new(StringComparer.Ordinal); }
         catch (InvalidDataException) { throw new PeopleRefusal(Unreadable); }
         catch (InvalidOperationException e) when (e is not ObjectDisposedException) { throw new PeopleRefusal(Unreadable); }
     }
 
-    /// <summary>Changes the names in one step, so that no other detector's change is lost.</summary>
+    /// <summary>
+    /// Changes the names in one step, so that no other detector's change is lost; they are written in the new form, also
+    /// those read in the old.
+    /// </summary>
     /// <exception cref="PeopleRefusal">They cannot be read, or <paramref name="change"/> refused.</exception>
-    void ChangeNames(Action<Dictionary<string, string>> change)
+    void ChangeNames(Action<Dictionary<string, StoredName>> change)
     {
         try
         {
-            data.Update<Dictionary<string, string>>("names", names =>
+            data.Update<Dictionary<string, StoredName>>("names", names =>
             {
                 names ??= new(StringComparer.Ordinal);
                 change(names);
@@ -780,22 +817,25 @@ public sealed class PeopleList
 
     // ---- Names, samples and ids ----
 
-    /// <exception cref="PeopleRefusal">The name is empty or longer than 64 characters.</exception>
-    static string CheckName(string name)
+    /// <summary>The names, trimmed: an empty last name is none.</summary>
+    /// <exception cref="PeopleRefusal">The first name is empty, or either is longer than 64 characters.</exception>
+    static StoredName CheckName(string firstName, string? lastName)
     {
-        var trimmed = name?.Trim() ?? "";
-        if (trimmed.Length == 0) throw new PeopleRefusal("A name cannot be empty.");
-        if (trimmed.Length > LongestName) throw new PeopleRefusal($"A name is at most {LongestName} characters.");
-        return trimmed;
+        var first = firstName?.Trim() ?? "";
+        var last = lastName?.Trim() ?? "";
+        if (first.Length == 0) throw new PeopleRefusal("A first name cannot be empty.");
+        if (first.Length > LongestName) throw new PeopleRefusal($"A first name is at most {LongestName} characters.");
+        if (last.Length > LongestName) throw new PeopleRefusal($"A last name is at most {LongestName} characters.");
+        return new StoredName(first, last.Length == 0 ? null : last);
     }
 
-    static bool Same(string a, string b) => string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
-
-    /// <exception cref="PeopleRefusal">Someone other than <paramref name="except"/> has the name.</exception>
-    static void RefuseTaken(Dictionary<string, string> names, string? except, string name)
+    /// <exception cref="PeopleRefusal">Someone other than <paramref name="except"/> has the full name, whatever its case.</exception>
+    static void RefuseTaken(Dictionary<string, StoredName> names, string? except, StoredName name)
     {
-        if (names.Any(entry => entry.Key != except && entry.Value != null && Same(entry.Value, name)))
-            throw new PeopleRefusal($"{name} is already someone else's name.");
+        var full = name.Full;
+        foreach (var (id, other) in names)
+            if (id != except && other != null && string.Equals(other.Full.Trim(), full, StringComparison.OrdinalIgnoreCase))
+                throw new PeopleRefusal($"There is already a person named {other.Full.Trim()}: choose them from the list.");
     }
 
     static PeopleRefusal NoRoom(string name) => new($"{name} has no room for more samples.");
@@ -838,6 +878,52 @@ public sealed class PeopleList
 
     /// <summary>An add, a delete or a merge's removal of a person, as <c>unfinished/&lt;id&gt;</c> notes it while it runs.</summary>
     internal sealed record Unfinished(DateTimeOffset At, bool Removing);
+
+    /// <summary>
+    /// A person's names as <c>names</c> keeps them: written as <c>{"first": …, "last": …}</c>, and read also as the one
+    /// string a name was before last names were kept, which is the first name whole.
+    /// </summary>
+    [JsonConverter(typeof(StoredNameConverter))]
+    internal sealed record StoredName(string First, string? Last)
+    {
+        /// <summary>The first name, a space and the last name; the first name alone when there is none.</summary>
+        public string Full => string.IsNullOrEmpty(Last) ? First : $"{First} {Last}";
+    }
+
+    /// <summary>Reads a <see cref="StoredName"/> in either form, and writes it in the new one.</summary>
+    internal sealed class StoredNameConverter : JsonConverter<StoredName>
+    {
+        public override StoredName Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.String) return new StoredName(reader.GetString()!, null);
+            if (reader.TokenType != JsonTokenType.StartObject) throw new JsonException("A name is a string or an object");
+            string? first = null, last = null;
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+            {
+                if (reader.TokenType != JsonTokenType.PropertyName) throw new JsonException("A name's object has properties");
+                var property = reader.GetString();
+                reader.Read();
+                if (reader.TokenType is not (JsonTokenType.String or JsonTokenType.Null))
+                {
+                    reader.Skip();
+                    continue;
+                }
+                var value = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+                if (string.Equals(property, "first", StringComparison.OrdinalIgnoreCase)) first = value;
+                else if (string.Equals(property, "last", StringComparison.OrdinalIgnoreCase)) last = value;
+            }
+            return new StoredName(first ?? "", last);
+        }
+
+        public override void Write(Utf8JsonWriter writer, StoredName value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("first", value.First);
+            if (value.Last == null) writer.WriteNull("last");
+            else writer.WriteString("last", value.Last);
+            writer.WriteEndObject();
+        }
+    }
 }
 
 /// <summary>A group of faces of someone the people list does not have, as one detector saw them.</summary>

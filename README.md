@@ -133,6 +133,14 @@ With **Recognise faces** on, the People detector learns who people are from you.
 on its page, one card for each person it keeps seeing; you name each person once, and from then on every People
 detector of the installation recognises them and draws their name on its camera picture.
 
+A person has a first name and, if you give one, a last name, each at most 64 characters. Their full name, the first
+name and the last name, is what the page shows, and no two people may have the same full name, whatever its case: a
+new person or a rename that would make a second "Ana Horvat" is refused with "There is already a person named Ana
+Horvat: choose them from the list." The camera picture draws the first name alone, and when someone else in the list
+has the same first name, the first letter of the last name too: "Ivan K.". A people list stored by an earlier build
+of 1.1.0, which had one name a person, keeps each name whole as the person's first name; give them a last name with
+**Save** on their card if you like.
+
 It does not tell automations who is there: it has no "who" sensor, event or trigger yet. It does not follow a face from
 frame to frame or hold a name while a face is briefly lost, and it does not recognise anyone by their body, clothes or
 gait. People cannot be imported, exported or named from uploaded photos. It is not a lock (see
@@ -159,7 +167,7 @@ score** at its default, 0.50:
 - **Recognised:** the best person's score is at least 0.50 and beats the next person's by at least 0.10. The person's
   last seen (when, and at which camera) is written, at most once a minute, and their name is drawn above the face.
 - **Suggested:** the best score is at least 0.40, but the face is not recognised. It goes to the unknown faces, with
-  that person's name filled in for you to confirm.
+  that person chosen for you to confirm.
 - **Unknown:** anything else. It goes to the unknown faces.
 
 **Match score** moves the other two lines with it: the line for suggesting a name is a tenth under it, and the line for
@@ -191,17 +199,25 @@ it. It has two lists, and a third when asked:
 
 - **Unknown faces**, which wait for you (their number is on the node's card and the definition's): one card for each
   shown group, the newest sighting first, with its largest face, how often and when it was seen, and "Might be …" for
-  a suggested name. **Name** offers the names you have given. **Save** with a new name makes a person of the group's
-  samples; with a name you have given, it adds them to that person. **Dismiss** deletes the group.
-- **People**, by name, each with their newest named face, how many samples they have (and how many learned), and when
-  and at which camera they were last seen. **Save** renames them. **Merge** moves their samples to the person chosen in
-  **Merge into** and removes them, after asking; it is there when there is someone else to merge into. **Samples**
-  shows the third list. **Delete** removes the person and their samples, after asking.
+  a suggested person. To name the face, press **Person**: a dialog lists the people you have named, each with their
+  face, how many samples they have and when they were last seen, and a box to search them by name. Choose one with a
+  click, or with the arrow keys and Enter; or choose **+ New person** under the list, fill in **First name** (and
+  **Last name** if you like), and press **Use**. Then press **Save**: the group's samples go to the person you chose,
+  or make the new person. A suggested person is chosen already, so **Save** alone accepts the suggestion. **Dismiss**
+  deletes the group.
+- **People**, by full name, each with their newest named face, how many samples they have (and how many learned), and
+  when and at which camera they were last seen. **Save** renames them to the **First name** and **Last name** on their
+  card. To merge two cards of one person, press **Merge into** on the card to remove, choose the person to keep in its
+  dialog, and press **Merge**: after asking, it moves the samples to the person chosen and removes the card's person.
+  **Merge into** and **Merge** are there when there is someone else to merge into. **Samples** shows the third list.
+  **Delete** removes the person and their samples, after asking.
 - **Samples of …**, one card for each sample of the person chosen, named first, then learned, the newest first.
   **Remove** deletes a sample; the last sample a person was named with cannot be removed (delete the person instead).
   **Close** on the first card closes the list, and it closes when the person is deleted.
 
-A change made on one detector's page shows on every other detector's page within a few seconds.
+A change made on one detector's page shows on every other detector's page within a few seconds, in its lists and in
+the people its dialogs offer. A person deleted or merged away on another detector while a dialog offers them goes from
+the dialog, and a **Save** or **Merge** that still names them does nothing and shows the page as it is now.
 
 ### Learning
 

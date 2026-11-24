@@ -53,7 +53,10 @@ public class PeopleDetector : SharpDevice
     const int MostSamples = PeopleList.MostNamed + PeopleList.MostLearned;
     // The sentences of a press for what is gone, or cannot be done.
     const string FaceGone = "This face is no longer in the list.", PersonGone = "This person is no longer in the list.",
-        SampleGone = "This sample is no longer in the list.", NoPicture = "This face has no picture left; dismiss it.";
+        SampleGone = "This sample is no longer in the list.", NoPicture = "This face has no picture left; dismiss it.",
+        NoPerson = "Person is required.", NoOneToMergeInto = "Choose a person in Merge into first.";
+    // The id of the page's set of options of the people, which the pick fields choose from.
+    const string PeopleSet = "people";
 
     readonly PeopleDetectorCamera camera;
     readonly Watch faces, people;
@@ -399,7 +402,7 @@ public class PeopleDetector : SharpDevice
         {
             try
             {
-                if (named.Contains(face.Index)) names[face.Index] = Note(frame, face, now);
+                if (named.Contains(face.Index)) names[face.Index] = Note(frame, face, everyone, now);
                 else
                 {
                     // A maybe suggests its person, unless the face is known not to be them.
@@ -423,10 +426,10 @@ public class PeopleDetector : SharpDevice
         return embedding.Fit <= rules.FitLimit ? embedding : null;
     }
 
-    // A recognised face, noted as a sighting of its person, and learned when it meets the rules. Gives its person's name.
-    // Nothing of it is logged. A face not recognised is cut, by Seen, only when a group keeps it, during the call: the
-    // frame is still the check's.
-    string Note(SharpImage frame, Matched face, DateTimeOffset now)
+    // A recognised face, noted as a sighting of its person, and learned when it meets the rules. Gives what the camera
+    // names its person by among everyone (PeopleList.Label). Nothing of it is logged. A face not recognised is cut, by
+    // Seen, only when a group keeps it, during the call: the frame is still the check's.
+    string Note(SharpImage frame, Matched face, IReadOnlyList<Person> everyone, DateTimeOffset now)
     {
         var (embedding, eyes, match, person) = (face.Embedding, face.Eyes, face.Match, face.Match.Person!);
         People.Seen(person.Id, now, cameraId);
@@ -437,7 +440,7 @@ public class PeopleDetector : SharpDevice
             try { People.AddSamples(person.Id, [new NewSample(embedding, Crop(frame, face.Face), now, cameraId)], learned: true); }
             catch (PeopleRefusal) { }
         }
-        return person.Name;
+        return PeopleList.Label(person, everyone);
     }
 
     // A face of a check, embedded and matched: its index in the faces found, the face, its embedding, the pixels between
@@ -472,10 +475,12 @@ public class PeopleDetector : SharpDevice
 
     // ---- The page ----
 
-    // Draws the page: the unknown faces, the people, and the samples of the person chosen, if any. The cards are built
-    // from snapshots and the stores outside the lock, then handed to Ui under it; a draw that a later one has overtaken
-    // hands nothing over, so the page never goes back to an older state. A person whose samples are open and who is gone
-    // closes them. A draw as the definition stops, when the stores and the page are closed, draws nothing.
+    // Draws the page: the people as the set of options its pick fields choose from, first, then the unknown faces, the
+    // people, and the samples of the person chosen, if any. The set and the cards are built from one snapshot of the list
+    // and the stores outside the lock, then handed to Ui under it, the set before the lists, so that each card's choice is
+    // one of the set's; a draw that a later one has overtaken hands nothing over, so the page never goes back to an older
+    // state. A person whose samples are open and who is gone closes them. A draw as the definition stops, when the stores
+    // and the page are closed, draws nothing.
     void Draw()
     {
         try { DrawNow(); }
@@ -491,8 +496,10 @@ public class PeopleDetector : SharpDevice
         var shown = Unknown.Shown;
         var everyone = People.People;
         var places = new Dictionary<string, string>(StringComparer.Ordinal);
+        var views = everyone.Take(PeopleList.MostPeople).Select(person => View(person, now, places)).ToList();
+        var options = views.Select(Option).ToList();
         var unknown = UnknownCards(shown, everyone, now);
-        var people = PersonCards(everyone, now, places);
+        var people = PersonCards(views);
         var chosen = open == null ? null : everyone.FirstOrDefault(person => person.Id == open);
         var samples = chosen == null ? null : SampleCards(chosen, now, places);
         var unknownEmpty = Unknown.OfAnotherFormat ? "The unknown faces were saved by a newer hass-sharp-vision; update this one." : "No unknown faces.";
@@ -502,9 +509,10 @@ public class PeopleDetector : SharpDevice
             if (ticket < drawnTicket) return;
             drawnTicket = ticket;
             drawnGroups = Key(shown);
+            Ui.Options(PeopleSet, options);
             Ui.List("unknown", "Unknown faces", unknown, attention: true, empty: unknownEmpty);
             Ui.List("people", "People", people, empty: peopleEmpty);
-            if (chosen != null) Ui.List("samples", $"Samples of {chosen.Name}", samples!);
+            if (chosen != null) Ui.List("samples", $"Samples of {chosen.FullName}", samples!);
             else
             {
                 // Closed, or the person is gone: a person chosen since is drawn by the draw that follows the choice.
@@ -534,52 +542,74 @@ public class PeopleDetector : SharpDevice
     static string Key(IReadOnlyList<FaceGroup> shown) =>
         string.Join(",", shown.Select(group => $"{group.Id}:{group.SuggestedPersonId}").Order(StringComparer.Ordinal));
 
+    // A person as the page shows them, on their card and as an option of the set: their samples and where they were last
+    // seen, and their newest named face.
+    sealed record PersonView(Person Person, string Detail, byte[]? Face);
+
+    PersonView View(Person person, DateTimeOffset now, Dictionary<string, string> places)
+    {
+        var learned = person.Samples.Count(sample => sample.Learned);
+        var samples = Count(person.Samples.Count, "sample") + (learned > 0 ? $" ({learned} learned)" : "");
+        var seen = person.LastSeen is { } last ? $"last seen {Ago(last, now)}{At(person.LastSeenAt, places)}" : "not seen yet";
+        var face = person.Samples.Where(sample => !sample.Learned).OrderByDescending(sample => sample.At)
+            .Select(sample => People.Crop(sample.Id)).FirstOrDefault(crop => crop != null);
+        return new(person, $"{samples} · {seen}", face);
+    }
+
+    // A person as an option of the set: their full name, their card's detail line, and their face when it is a JPEG the
+    // page takes.
+    static UiOption Option(PersonView view)
+    {
+        var option = new UiOption(view.Person.Id, view.Person.FullName, view.Detail);
+        return IsJpeg(view.Face) ? option.Image(view.Face!) : option;
+    }
+
     // A card for each shown group, the newest sighting first: its largest face, how often and when it was seen, the person
-    // it might be, a Name to give it (the suggestion's filled in), Save and Dismiss.
+    // it might be, a Person to choose for it from the people (the suggestion's chosen) or a new person to make of it, Save
+    // and Dismiss.
     List<UiCard> UnknownCards(IReadOnlyList<FaceGroup> shown, IReadOnlyList<Person> everyone, DateTimeOffset now)
     {
-        var names = everyone.Select(person => person.Name).ToArray();
+        // The pick field takes what it needs of the form when it is added, so one form serves every card.
+        var newPerson = new UiForm("New person")
+            .Field("first_name", "First name", required: true)
+            .Field("last_name", "Last name");
         var cards = new List<UiCard>();
         foreach (var group in shown.Take(FaceGroups.MostGroups))
         {
             var id = group.Id;
             var suggested = group.SuggestedPersonId is { } personId ? everyone.FirstOrDefault(person => person.Id == personId) : null;
             cards.Add(Card(id, Unknown.Crop(id))
-                .Text($"Seen {Count(group.Sightings, "time")} · last {Ago(group.Last, now)}", suggested == null ? null : $"Might be {suggested.Name}")
-                .Field("name", "Name", suggested?.Name, required: true, suggestions: names)
-                .Action("Save", values => Pressed(() => SaveFace(id, values["name"])), style: UiActionStyle.Primary)
+                .Text($"Seen {Count(group.Sightings, "time")} · last {Ago(group.Last, now)}", suggested == null ? null : $"Might be {suggested.FullName}")
+                .Pick("person", "Person", PeopleSet, value: suggested?.Id, required: true, add: newPerson)
+                .Action("Save", values => Pressed(() => SaveFace(id, values.Picked("person"), values.New("person"))), style: UiActionStyle.Primary)
                 .Action("Dismiss", _ => Pressed(() => DismissFace(id)), validate: false));
         }
         return cards;
     }
 
-    // A card for each person, by name: their newest named face, their samples and where they were last seen, a Name to
-    // rename them with and Save; with someone else in the list, Merge into and Merge; Samples, and Delete.
-    List<UiCard> PersonCards(IReadOnlyList<Person> everyone, DateTimeOffset now, Dictionary<string, string> places)
+    // A card for each person, by full name: their newest named face, their samples and where they were last seen, a First
+    // name and a Last name to rename them with and Save; with someone else in the list, Merge into, which chooses from
+    // the people but them, and Merge; Samples, and Delete.
+    List<UiCard> PersonCards(IReadOnlyList<PersonView> views)
     {
         var cards = new List<UiCard>();
-        foreach (var person in everyone.Take(PeopleList.MostPeople))
+        foreach (var (person, detail, face) in views)
         {
             var id = person.Id;
-            var learned = person.Samples.Count(sample => sample.Learned);
-            var samples = Count(person.Samples.Count, "sample") + (learned > 0 ? $" ({learned} learned)" : "");
-            var seen = person.LastSeen is { } last ? $"last seen {Ago(last, now)}{At(person.LastSeenAt, places)}" : "not seen yet";
-            var face = person.Samples.Where(sample => !sample.Learned).OrderByDescending(sample => sample.At)
-                .Select(sample => People.Crop(sample.Id)).FirstOrDefault(crop => crop != null);
-            var others = everyone.Where(other => other.Id != id).Select(other => other.Name).ToArray();
             var card = Card(id, face)
-                .Text(person.Name, $"{samples} · {seen}")
-                .Field("name", "Name", person.Name, required: true);
-            // A select needs an option, so Merge into and Merge are there only when there is someone to merge into.
-            if (others.Length > 0) card.Select("into", "Merge into", others, others[0]);
-            card.Action("Save", values => Pressed(() => Rename(id, values["name"])), style: UiActionStyle.Primary);
-            // A question is fixed when the card is drawn: it names the one other person, or the choice.
-            if (others.Length > 0)
-                card.Action("Merge", values => Pressed(() => Merge(id, values["into"])),
-                    confirm: others.Length == 1 ? $"Merge {person.Name} into {others[0]}?" : $"Merge {person.Name} into the person chosen in Merge into?");
+                .Text(person.FullName, detail)
+                .Field("first_name", "First name", person.FirstName, required: true)
+                .Field("last_name", "Last name", person.LastName);
+            // Merge into and Merge are there only when there is someone to merge into.
+            var others = views.Count > 1;
+            if (others) card.Pick("into", "Merge into", PeopleSet, except: [id]);
+            card.Action("Save", values => Pressed(() => Rename(id, values["first_name"], values["last_name"])), style: UiActionStyle.Primary);
+            // A question is fixed when the card is drawn, so it cannot name the person chosen.
+            if (others)
+                card.Action("Merge", values => Pressed(() => Merge(id, values.Picked("into"))), confirm: $"Merge {person.FullName} into the person chosen in Merge into?");
             cards.Add(card
                 .Action("Samples", _ => Pressed(() => OpenSamples(id)), validate: false)
-                .Action("Delete", _ => Pressed(() => Delete(id)), confirm: $"Delete {person.Name} and their samples?", style: UiActionStyle.Danger, validate: false));
+                .Action("Delete", _ => Pressed(() => Delete(id)), confirm: $"Delete {person.FullName} and their samples?", style: UiActionStyle.Danger, validate: false));
         }
         return cards;
     }
@@ -602,13 +632,15 @@ public class PeopleDetector : SharpDevice
             if (cards.Count == 0) card.Action("Close", _ => Pressed(CloseSamples), validate: false);
             cards.Add(card);
         }
-        if (cards.Count == 0) cards.Add(new UiCard("none").Text($"{person.Name} has no samples left.").Action("Close", _ => Pressed(CloseSamples), validate: false));
+        if (cards.Count == 0) cards.Add(new UiCard("none").Text($"{person.FullName} has no samples left.").Action("Close", _ => Pressed(CloseSamples), validate: false));
         return cards;
     }
 
     // A card with its picture, or without one when the crop is gone or is not a JPEG the page takes.
-    static UiCard Card(string id, byte[]? jpeg) =>
-        jpeg is { Length: >= 2 and <= PeopleList.LargestCrop } && jpeg[0] == 0xFF && jpeg[1] == 0xD8 ? new UiCard(id).Image(jpeg) : new UiCard(id);
+    static UiCard Card(string id, byte[]? jpeg) => IsJpeg(jpeg) ? new UiCard(id).Image(jpeg!) : new UiCard(id);
+
+    // Whether a crop is a JPEG the page takes as a card's or an option's picture.
+    static bool IsJpeg(byte[]? jpeg) => jpeg is { Length: >= 2 and <= PeopleList.LargestCrop } && jpeg[0] == 0xFF && jpeg[1] == 0xD8;
 
     static string Count(int count, string what) => $"{count} {what}{(count == 1 ? "" : "s")}";
 
@@ -655,20 +687,23 @@ public class PeopleDetector : SharpDevice
         return Task.CompletedTask;
     }
 
-    // Names a group: its samples go to the person of that name, or to a new person, first, and the group after, so that a
-    // group an interruption leaves behind matches its person at the next start and goes. The groups apart from it are
-    // known not to be that person.
+    // Names a group: its samples go to the person chosen, by id, or to a new person of the form's names, first, and the
+    // group after, so that a group an interruption leaves behind matches its person at the next start and goes. The
+    // groups apart from it are known not to be that person. HassSharp has checked that the person chosen is in the set
+    // as drawn; the people list may have lost them since, and AddSamples refuses then.
     // The person is written before the group goes, and not the other way: a stop between the two leaves the group, which
     // matches the person at the next start and goes, rather than a group gone with no person made of it. The lock makes
     // no order better: a stop ends the process whatever it holds.
-    void SaveFace(string groupId, string name)
+    void SaveFace(string groupId, string? personId, UiValues? newPerson)
     {
         lock (lists)
         {
             if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
             var samples = Unknown.Samples(groupId);
             if (samples.Count == 0) throw new UiRefusal(NoPicture);
-            var person = People.Named(name) is { } named ? People.AddSamples(named.Id, samples, learned: false) : People.Add(name, samples);
+            var person = personId != null ? People.AddSamples(personId, samples, learned: false)
+                : newPerson != null ? People.Add(newPerson["first_name"], newPerson["last_name"], samples)
+                : throw new UiRefusal(NoPerson);
             Unknown.Named(groupId, person.Id);
             // Other groups of the same face are now recognised, and go too.
             Rematch(People.People);
@@ -684,22 +719,23 @@ public class PeopleDetector : SharpDevice
         }
     }
 
-    void Rename(string personId, string name)
+    void Rename(string personId, string firstName, string lastName)
     {
         Known(personId);
-        People.Rename(personId, name);
+        People.Rename(personId, firstName, lastName);
     }
 
-    void Merge(string personId, string into)
+    // Merges a person into the one chosen, by id: Merge refuses one no longer in the list.
+    void Merge(string personId, string? into)
     {
         lock (lists)
         {
             Known(personId);
-            var target = People.Named(into) ?? throw new UiRefusal(PersonGone);
-            People.Merge(personId, target.Id);
+            if (into == null) throw new UiRefusal(NoOneToMergeInto);
+            People.Merge(personId, into);
             Closed(personId);
             // Here only: another detector's groups see the person gone, and drop them.
-            Unknown.Merged(personId, target.Id);
+            Unknown.Merged(personId, into);
             Rematch(People.People);
         }
     }

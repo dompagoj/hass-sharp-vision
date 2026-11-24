@@ -69,8 +69,12 @@ static class PeopleTests
         var array = Array.CreateInstance(Type("FaceSample"), samples.Length);
         for (var i = 0; i < samples.Length; i++)
             array.SetValue(Activator.CreateInstance(Type("FaceSample"), $"{id}s{i}", (object)Embedding(samples[i]), DateTimeOffset.UnixEpoch, Camera, false), i);
-        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null, null)!;
+        return Activator.CreateInstance(Type("Person"), id, id, null, DateTimeOffset.UnixEpoch, array, null, null, null)!;
     }
+
+    /// <summary>A person of the names given and no samples, for <c>PeopleList.Label</c>.</summary>
+    static dynamic Called(string id, string firstName, string? lastName) =>
+        Activator.CreateInstance(Type("Person"), id, firstName, lastName, DateTimeOffset.UnixEpoch, Array.CreateInstance(Type("FaceSample"), 0), null, null, null)!;
 
     static dynamic People(params object[] people)
     {
@@ -96,7 +100,10 @@ static class PeopleTests
     /// </summary>
     internal static object[] Items(dynamic list) => ((IEnumerable<object>)list).ToArray();
 
-    static dynamic Only(dynamic list, string name) => ((object[])Items(list.People)).Single(p => ((dynamic)p).Name == name);
+    static dynamic Only(dynamic list, string name) => ((object[])Items(list.People)).Single(p => ((dynamic)p).FullName == name);
+
+    /// <summary>The person of a list whose full name is <paramref name="name"/>; null when there is none.</summary>
+    static dynamic? ByName(dynamic list, string name) => ((object[])Items(list.People)).SingleOrDefault(p => ((dynamic)p).FullName == name);
 
     static string Refused(Action action, string what)
     {
@@ -231,8 +238,12 @@ static class PeopleTests
             (nameof(APersonScoresByTheirBestSample), Sync(APersonScoresByTheirBestSample)),
             (nameof(AnEmptyListIsUnknown), Sync(AnEmptyListIsUnknown)),
             (nameof(APersonComesBackFromTheStore), Sync(APersonComesBackFromTheStore)),
-            (nameof(NamesAreTrimmedAndCheckedIgnoringCase), Sync(NamesAreTrimmedAndCheckedIgnoringCase)),
+            (nameof(NamesAreTrimmedAndChecked), Sync(NamesAreTrimmedAndChecked)),
+            (nameof(TwoPeopleMayNotHaveOneFullName), Sync(TwoPeopleMayNotHaveOneFullName)),
             (nameof(RenameRefusesATakenName), Sync(RenameRefusesATakenName)),
+            (nameof(TwoListsGiveOneFullNameOnce), Sync(TwoListsGiveOneFullNameOnce)),
+            (nameof(ThePeopleOfAOneNameStoreKeepTheirNameAsTheFirstName), Sync(ThePeopleOfAOneNameStoreKeepTheirNameAsTheFirstName)),
+            (nameof(TheCameraLabelIsTheFirstNameAndALetterWhenShared), Sync(TheCameraLabelIsTheFirstNameAndALetterWhenShared)),
             (nameof(SamplesAreCappedAndLearnedOnesReplaced), Sync(SamplesAreCappedAndLearnedOnesReplaced)),
             (nameof(ACropOverOneMebibyteIsRefused), Sync(ACropOverOneMebibyteIsRefused)),
             (nameof(The201stPersonIsRefused), Sync(The201stPersonIsRefused)),
@@ -387,13 +398,14 @@ static class PeopleTests
         Check(((object[])Items(list.People)).Length == 0, "a new store has no one");
         var first = NewSample(Unit(20), Crop(20), T0, "camera.porch", fit: 2.25f);
         var second = NewSample(Unit(21), Crop(21, 5000), T0.AddMinutes(3), Camera, fit: 0.5f);
-        var added = list.Add(Named("  Ana Kovač "), Samples(first, second));
-        Check(added.Name == "Ana Kovač" && ((object[])Items(added.Samples)).Length == 2, $"the name is trimmed and both samples are kept: {added.Name}");
+        var added = list.Add(Named("  Ana "), Named(" Kovač  "), Samples(first, second));
+        Check(added.FirstName == "Ana" && added.LastName == "Kovač" && added.FullName == "Ana Kovač" && ((object[])Items(added.Samples)).Length == 2,
+            $"the names are trimmed and both samples are kept: {added.FullName}");
 
         var again = List(home.Restarted());
         var ana = ((object[])Items(again.People)).Single();
         dynamic person = ana;
-        Check(person.Id == added.Id && person.Name == "Ana Kovač" && person.Added == added.Added && person.LastSeen == null && person.LastSeenAt == null,
+        Check(person.Id == added.Id && person.FirstName == "Ana" && person.LastName == "Kovač" && person.Added == added.Added && person.LastSeen == null && person.LastSeenAt == null,
             $"the same person: {person.Id} {person.Added}");
         var samples = ((object[])Items(person.Samples));
         object[] given = [first, second];
@@ -409,41 +421,150 @@ static class PeopleTests
             Check(crop.SequenceEqual((byte[])sent.CropJpeg), $"sample {i}'s crop comes back byte for byte");
         }
         Check(again.Crop("nosuchsample") == null, "a sample no one has has no crop");
-        Check(again.Named("ana kovač ").Id == added.Id && again.Named(" ANA KOVAČ") != null && again.Named("Ana") == null, "Named ignores case and surrounding spaces");
-        Console.WriteLine("PASS people: a person added comes back after a restart, embeddings bit for bit and crops byte for byte");
+        Console.WriteLine("PASS people: a person added comes back after a restart with both names, embeddings bit for bit and crops byte for byte");
     }
 
-    static void NamesAreTrimmedAndCheckedIgnoringCase()
+    static void NamesAreTrimmedAndChecked()
     {
         using var home = new Home();
         var list = List(home.Open("def-a"));
-        list.Add(Named("Ana"), Samples(Seeded(30)));
-        var taken = Refused(() => list.Add(Named("  aNA "), Samples(Seeded(31))), "a name taken but for case and spaces");
-        Check(taken == "aNA is already someone else's name.", "the refusal: " + taken);
-        Check(Refused(() => list.Add("   ", Samples(Seeded(32))), "a blank name") == "A name cannot be empty.", "a blank name is refused");
+        var ana = list.Add(Named(" Ana "), "   ", Samples(Seeded(30)));
+        Check(ana.FirstName == "Ana" && ana.LastName == null && ana.FullName == "Ana", $"a last name of spaces is none: {ana.FullName}|{ana.LastName}");
+        Check(list.Add(Named("Ivan"), "", Samples(Seeded(35))).LastName == null, "an empty last name is none");
+        Check(Refused(() => list.Add("   ", Named("Horvat"), Samples(Seeded(32))), "a blank first name") == "A first name cannot be empty.", "a blank first name is refused");
+        Check(Refused(() => list.Add(null, Named("Horvat"), Samples(Seeded(32))), "no first name") == "A first name cannot be empty.", "no first name is refused");
         var longest = new string('x', 64);
-        Check(Refused(() => list.Add(longest + "y", Samples(Seeded(33))), "65 characters") == "A name is at most 64 characters.", "65 characters are refused");
-        list.Add(Named(" " + longest + " "), Samples(Seeded(34)));
-        Check(Refused(() => list.Add(Named("Mia"), Samples()), "no samples") == "Mia needs a face to be named with.", "a person needs a sample");
-        Check(((object[])Items(list.People)).Select(p => (string)((dynamic)p).Name).Order(StringComparer.Ordinal).SequenceEqual(["Ana", longest]), "only Ana and the 64 x's were added");
-        Check(((object[])Items(List(home.Restarted()).People)).Length == 2, "nothing refused was stored");
-        Console.WriteLine("PASS people: a name is trimmed, at most 64 characters, and taken whatever its case and surrounding spaces");
+        Check(Refused(() => list.Add(longest + "y", null, Samples(Seeded(33))), "a first name of 65 characters") == "A first name is at most 64 characters.", "65 characters are refused");
+        Check(Refused(() => list.Add(Named("Mia"), longest + "y", Samples(Seeded(33))), "a last name of 65 characters") == "A last name is at most 64 characters.", "and in a last name");
+        var long64 = list.Add(Named(" " + longest + " "), " " + longest + " ", Samples(Seeded(34)));
+        Check(long64.FullName == longest + " " + longest, "64 characters each are taken, trimmed: " + long64.FullName);
+        Check(Refused(() => list.Add(Named("Mia"), null, Samples()), "no samples") == "Mia needs a face to be named with.", "a person needs a sample");
+        Check(((object[])Items(list.People)).Select(p => (string)((dynamic)p).FullName).Order(StringComparer.Ordinal).SequenceEqual(["Ana", "Ivan", longest + " " + longest]),
+            "only Ana, Ivan and the x's were added");
+        Check(((object[])Items(List(home.Restarted()).People)).Length == 3, "nothing refused was stored");
+        Console.WriteLine("PASS people: a first name is trimmed and 1 to 64 characters, a last name trimmed and at most 64, and an empty one is none");
+    }
+
+    static void TwoPeopleMayNotHaveOneFullName()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        list.Add(Named("Ana"), Named("Horvat"), Samples(Seeded(36)));
+        const string Taken = "There is already a person named Ana Horvat: choose them from the list.";
+        Check(Refused(() => list.Add("  aNA ", " HORVAT", Samples(Seeded(37))), "a full name taken but for case and spaces") == Taken, "the same full name in another case is refused");
+        Check(Refused(() => list.Add("Ana Horvat", null, Samples(Seeded(37))), "the full name as a first name") == Taken, "the full name as a first name alone is too");
+        list.Add("Ana", null, Samples(Seeded(38)));
+        list.Add("Ana", Named("Kovač"), Samples(Seeded(39)));
+        Check(((object[])Items(list.People)).Select(p => (string)((dynamic)p).FullName).SequenceEqual(["Ana", "Ana Horvat", "Ana Kovač"]),
+            "a first name may be shared, and the list is by full name: " + string.Join(", ", ((object[])Items(list.People)).Select(p => (string)((dynamic)p).FullName)));
+        Check(Refused(() => list.Add("ana", "", Samples(Seeded(47))), "a full name of a first name alone") == "There is already a person named Ana: choose them from the list.",
+            "a first name alone is a full name too");
+        Check(((object[])Items(List(home.Restarted()).People)).Length == 3, "nothing refused was stored");
+        Console.WriteLine("PASS people: two people may not have one full name whatever its case, and the refusal names the one in the list");
     }
 
     static void RenameRefusesATakenName()
     {
         using var home = new Home();
         var list = List(home.Open("def-a"));
-        var ana = list.Add(Named("Ana"), Samples(Seeded(40)));
-        list.Add(Named("Ivan"), Samples(Seeded(41)));
-        var refused = Refused(() => list.Rename((string)ana.Id, Named(" ivan")), "a rename to a taken name");
-        Check(refused == "ivan is already someone else's name.", "the refusal: " + refused);
-        list.Rename((string)ana.Id, Named(" ANA "));
-        Check(Only(list, "ANA").Id == ana.Id, "a rename to its own name in another case");
-        list.Rename((string)ana.Id, Named("Ana Marija"));
-        Check(Only(List(home.Restarted()), "Ana Marija").Id == ana.Id, "the rename is stored");
-        Check(Refused(() => list.Rename("gone0000", "Mia"), "a rename of no one") == "This person is no longer in the list.", "a person no one has");
-        Console.WriteLine("PASS people: a rename to a taken name is refused, and to its own name in another case is not");
+        var ana = list.Add(Named("Ana"), Named("Horvat"), Samples(Seeded(40)));
+        list.Add(Named("Ivan"), null, Samples(Seeded(41)));
+        var refused = Refused(() => list.Rename((string)ana.Id, " ivan", null), "a rename to a taken name");
+        Check(refused == "There is already a person named Ivan: choose them from the list.", "the refusal: " + refused);
+        list.Rename((string)ana.Id, " ANA ", "horvat");
+        Check(Only(list, "ANA horvat").Id == ana.Id, "a rename to its own name in another case");
+        list.Rename((string)ana.Id, Named("Ana Marija"), Named(" Babić "));
+        var renamed = Only(List(home.Restarted()), "Ana Marija Babić");
+        Check(renamed.Id == ana.Id && renamed.FirstName == "Ana Marija" && renamed.LastName == "Babić", "the rename is stored with both names");
+        list.Rename((string)ana.Id, "Ana Marija", "");
+        Check(Only(List(home.Restarted()), "Ana Marija").LastName == null, "a rename can take the last name away");
+        Check(Refused(() => list.Rename((string)ana.Id, "", "Babić"), "a rename without a first name") == "A first name cannot be empty.", "a first name is needed");
+        Check(Refused(() => list.Rename("gone0000", "Mia", null), "a rename of no one") == "This person is no longer in the list.", "a person no one has");
+        Console.WriteLine("PASS people: a rename to a taken full name is refused, and to its own name in another case is not, and both names are stored");
+    }
+
+    static void TwoListsGiveOneFullNameOnce()
+    {
+        using var home = new Home();
+        var a = List(home.Open("def-a"));
+        var b = List(home.Open("def-b"));
+        var refused = 0;
+        var tries = Enumerable.Range(0, 8).SelectMany(i => new[]
+        {
+            Task.Run(() => { try { a.Add(i % 2 == 0 ? "Ana" : "ANA", "Horvat", Samples(Seeded(4200 + i))); } catch (Exception e) when (e.GetType().Name == "PeopleRefusal") { Interlocked.Increment(ref refused); } }),
+            Task.Run(() => { try { b.Add("ana", i % 2 == 0 ? "horvat" : " Horvat ", Samples(Seeded(4300 + i))); } catch (Exception e) when (e.GetType().Name == "PeopleRefusal") { Interlocked.Increment(ref refused); } }),
+        }).ToArray();
+        Task.WaitAll(tries);
+        var stored = (object[])Items(List(home.Restarted()).People);
+        Check(stored.Length == 1 && refused == 15, $"one of sixteen adds of one full name on two lists is stored, and the others refused: {stored.Length} stored, {refused} refused");
+        Check(home.Restarted("check").Keys("samples/").Select(key => key.Split('/')[1]).Distinct().Count() == 1, "and no other person's samples are left");
+        Console.WriteLine("PASS people: two lists on one store adding one full name at once store it once");
+    }
+
+    static void ThePeopleOfAOneNameStoreKeepTheirNameAsTheFirstName()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(4400), Seeded(4401)));
+        var ivan = list.Add(Named("Ivan"), null, Samples(Seeded(4402)));
+        string anaId = ana.Id, ivanId = ivan.Id;
+        // The names as hass-sharp-vision wrote them before it kept last names: one string a person, which may hold spaces.
+        data.Set("names", new Dictionary<string, string> { [anaId] = Named("Ana Marija Horvat"), [ivanId] = Named("Ivan") });
+        var before = home.Restarted("check").Keys().Where(key => key != "names").ToDictionary(key => key, key => Bytes(home.Restarted("check"), key));
+
+        var old = List(home.Restarted("def-c"));
+        var other = List(home.Restarted("def-d"));
+        foreach (var each in new[] { old, other })
+        {
+            var read = (object[])Items(each.People);
+            Check(read.Length == 2 && Only(each, "Ana Marija Horvat").FirstName == "Ana Marija Horvat" && Only(each, "Ana Marija Horvat").LastName == null
+                && Only(each, "Ivan").FirstName == "Ivan" && ((object[])Items(Only(each, "Ana Marija Horvat").Samples)).Length == 2,
+                "each name is read whole as the first name, with no last name: " + string.Join(", ", read.Select(p => (string)((dynamic)p).FirstName + "|" + (string?)((dynamic)p).LastName)));
+        }
+        Check(Refused(() => old.Add("ana marija", "HORVAT", Samples(Seeded(4403))), "a new person of an old full name") == "There is already a person named Ana Marija Horvat: choose them from the list.",
+            "an old name is a full name as a new one is");
+
+        // The first write of the names after reading is the other detector's.
+        var mia = other.Add(Named("Mia"), Named("Kovač"), Samples(Seeded(4404)));
+        var names = home.Restarted("check").Get<JsonObject>("names")!;
+        Check(names.Count == 3 && names.All(entry => entry.Value is JsonObject), "the names are written in the new form, each a first and a last name: " + names.Count);
+        Check((string?)names[anaId]!["first"] == "Ana Marija Horvat" && names[anaId]!["last"] == null && (string?)names[(string)mia.Id]!["last"] == "Kovač", "with what they held");
+        old.Reload();
+        var after = List(home.Restarted("def-e"));
+        foreach (var each in new[] { old, after })
+            Check(((object[])Items(each.People)).Select(p => (string)((dynamic)p).FullName).SequenceEqual(["Ana Marija Horvat", "Ivan", "Mia Kovač"]),
+                "every person is there, by full name: " + string.Join(", ", ((object[])Items(each.People)).Select(p => (string)((dynamic)p).FullName)));
+        var check = home.Restarted("check");
+        Check(before.All(entry => Bytes(check, entry.Key) == entry.Value), "every sample and record of theirs is as it was");
+        Check(((object[])Items(Only(after, "Ana Marija Horvat").Samples)).Length == 2 && ((object[])Items(Only(after, "Ivan").Samples)).Length == 1, "with their samples");
+        Console.WriteLine("PASS people: a store of one name a person is read with that name whole as the first name, and the next write, another detector's, writes each in the new form");
+    }
+
+    /// <summary>A key's value as text: a JSON value's, or its bytes in hex.</summary>
+    static string Bytes(SharpData data, string key)
+    {
+        try { return Convert.ToHexString(data.GetBytes(key)!); }
+        catch (InvalidOperationException) { return System.Text.Json.JsonSerializer.Serialize(data.Get<System.Text.Json.JsonElement>(key)); }
+    }
+
+    static void TheCameraLabelIsTheFirstNameAndALetterWhenShared()
+    {
+        var label = Type("PeopleList").GetMethod("Label")!;
+        string Label(dynamic person, object everyone) => (string)Invoke(label, null, (object)person, everyone)!;
+        var horvat = Called("p1", "Ivan", "Horvat");
+        var kovac = Called("p2", "ivan", "Kovač");
+        var ana = Called("p3", "Ana", "Horvat");
+        var ivan = Called("p4", "Ivan", null);
+        var sime = Called("p5", "Šime", "\u0160imi\u0107");
+        var shared = People(horvat, kovac, ana, ivan, sime);
+        Check(Label(ana, shared) == "Ana" && Label(sime, shared) == "Šime", "a first name no one else has: " + Label(ana, shared));
+        Check(Label(horvat, shared) == "Ivan H." && Label(kovac, shared) == "ivan K.", "a first name another has, in any case, with the last name's first letter: " + Label(horvat, shared) + ", " + Label(kovac, shared));
+        Check(Label(ivan, shared) == "Ivan", "the first name alone without a last name: " + Label(ivan, shared));
+        Check(Label(horvat, People(horvat, ana)) == "Ivan" && Label(horvat, People(horvat)) == "Ivan", "alone with the first name, the first name");
+        var decomposed = Called("p6", "Šime", "S\u030Cari\u0107");
+        Check(Label(decomposed, People(decomposed, sime)) == "Šime S\u030C.", "the first letter is a whole letter, with its mark: " + Label(decomposed, People(decomposed, sime)));
+        Console.WriteLine("PASS people: the camera's label is the first name, with the last name's first letter when another person has the same first name");
     }
 
     static void SamplesAreCappedAndLearnedOnesReplaced()
@@ -451,12 +572,12 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Enumerable.Range(100, 19).Select(seed => (object)Seeded(seed)).ToArray()));
+        var ana = list.Add(Named("Ana"), null, Samples(Enumerable.Range(100, 19).Select(seed => (object)Seeded(seed)).ToArray()));
         string id = ana.Id;
         list.AddSamples(id, Samples(Seeded(119)), false);
         Check(((object[])Items(Only(list, "Ana").Samples)).Length == 20, "20 named samples");
         Check(Refused(() => list.AddSamples(id, Samples(Seeded(120)), false), "the 21st named sample") == "Ana has no room for more samples.", "the 21st named sample is refused");
-        Check(Refused(() => list.Add(Named("Mia"), Samples(Enumerable.Range(130, 21).Select(seed => (object)Seeded(seed)).ToArray())), "21 samples at once")
+        Check(Refused(() => list.Add(Named("Mia"), null, Samples(Enumerable.Range(130, 21).Select(seed => (object)Seeded(seed)).ToArray())), "21 samples at once")
             == "Mia has no room for more samples.", "a person named with 21 samples is refused");
 
         // 20 learned samples, the oldest first, then a 21st, which replaces the oldest learned one.
@@ -479,10 +600,10 @@ static class PeopleTests
     {
         using var home = new Home();
         var list = List(home.Open("def-a"));
-        list.Add(Named("Ana"), Samples(NewSample(Unit(50), Crop(50, 1024 * 1024), T0)));
-        Throws<ArgumentException>(() => list.Add(Named("Ivan"), Samples(NewSample(Unit(51), Crop(51, 1024 * 1024 + 1), T0))), "a crop over 1 MiB");
-        Throws<ArgumentException>(() => list.Add(Named("Ivan"), Samples(NewSample(new float[64], Crop(52), T0))), "an embedding of 64 values");
-        Check(((object[])Items(list.People)).Length == 1 && List(home.Restarted()).Named("Ivan") == null, "nothing of Ivan was stored");
+        list.Add(Named("Ana"), null, Samples(NewSample(Unit(50), Crop(50, 1024 * 1024), T0)));
+        Throws<ArgumentException>(() => list.Add(Named("Ivan"), null, Samples(NewSample(Unit(51), Crop(51, 1024 * 1024 + 1), T0))), "a crop over 1 MiB");
+        Throws<ArgumentException>(() => list.Add(Named("Ivan"), null, Samples(NewSample(new float[64], Crop(52), T0))), "an embedding of 64 values");
+        Check(((object[])Items(list.People)).Length == 1 && ByName(List(home.Restarted()), "Ivan") == null, "nothing of Ivan was stored");
         Console.WriteLine("PASS people: a crop over 1 MiB, or an embedding without 128 values, is refused");
     }
 
@@ -490,9 +611,9 @@ static class PeopleTests
     {
         using var home = new Home();
         var list = List(home.Open("def-a"));
-        for (var i = 0; i < 200; i++) list.Add($"Person {i}", Samples(NewSample(Unit(1000 + i), Crop(1000 + i, 40), T0)));
+        for (var i = 0; i < 200; i++) list.Add($"Person {i}", null, Samples(NewSample(Unit(1000 + i), Crop(1000 + i, 40), T0)));
         Check(((object[])Items(list.People)).Length == 200, "200 people");
-        var refused = Refused(() => list.Add(Named("Mia"), Samples(Seeded(60))), "the 201st person");
+        var refused = Refused(() => list.Add(Named("Mia"), null, Samples(Seeded(60))), "the 201st person");
         Check(refused == "The list has room for 200 people; delete someone to add another.", "the refusal: " + refused);
         Check(((object[])Items(List(home.Restarted()).People)).Length == 200, "200 people are stored");
         Console.WriteLine("PASS people: the 201st person is refused");
@@ -503,8 +624,8 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Enumerable.Range(400, 15).Select(seed => (object)Seeded(seed)).ToArray()));
-        var ivan = list.Add(Named("Ivan"), Samples(Enumerable.Range(500, 10).Select(seed => (object)Seeded(seed)).ToArray()));
+        var ana = list.Add(Named("Ana"), null, Samples(Enumerable.Range(400, 15).Select(seed => (object)Seeded(seed)).ToArray()));
+        var ivan = list.Add(Named("Ivan"), null, Samples(Enumerable.Range(500, 10).Select(seed => (object)Seeded(seed)).ToArray()));
         string anaId = ana.Id, ivanId = ivan.Id;
         for (var i = 0; i < 3; i++) list.AddSamples(ivanId, Samples(NewSample(Unit(600 + i), Crop(600 + i), T0.AddHours(i))), true);
         list.Seen(ivanId, T0.AddDays(1), "camera.porch");
@@ -513,7 +634,7 @@ static class PeopleTests
             .Select(s => (string)((dynamic)s).Id).ToHashSet();
 
         list.Merge(ivanId, anaId);
-        Check(list.Named("Ivan") == null && ((object[])Items(list.People)).Length == 1, "Ivan is gone");
+        Check(ByName(list, "Ivan") == null && ((object[])Items(list.People)).Length == 1, "Ivan is gone");
         var merged = Only(list, "Ana");
         var samples = ((object[])Items(merged.Samples));
         Check(samples.Count(s => !((dynamic)s).Learned) == 20 && samples.Count(s => ((dynamic)s).Learned) == 3, $"20 named and 3 learned: {samples.Length}");
@@ -533,8 +654,8 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Seeded(700), Seeded(701)));
-        var ivan = list.Add(Named("Ivan"), Samples(Seeded(702), Seeded(703), Seeded(704)));
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(700), Seeded(701)));
+        var ivan = list.Add(Named("Ivan"), null, Samples(Seeded(702), Seeded(703), Seeded(704)));
         string anaId = ana.Id, ivanId = ivan.Id;
         var ivans = ((object[])Items(ivan.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
 
@@ -555,7 +676,7 @@ static class PeopleTests
         other.Merge(ivanId, anaId);
         var done = ((object[])Items(Only(List(home.Restarted()), "Ana").Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
         Check(done.Length == 5 && done.Distinct().Count() == 5, "Ana has five samples, each once: " + string.Join(", ", done));
-        Check(other.Named("Ivan") == null && data.Keys($"samples/{ivanId}/").Count == 0 && data.Keys($"people/{ivanId}").Count == 0, "Ivan is gone: " + string.Join(", ", data.Keys()));
+        Check(ByName(other, "Ivan") == null && data.Keys($"samples/{ivanId}/").Count == 0 && data.Keys($"people/{ivanId}").Count == 0, "Ivan is gone: " + string.Join(", ", data.Keys()));
         Console.WriteLine("PASS people: an interrupted merge leaves both people readable, and a second merge finishes it");
     }
 
@@ -564,7 +685,7 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Seeded(800), Seeded(801)));
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(800), Seeded(801)));
         string id = ana.Id;
         var learned = list.AddSamples(id, Samples(Seeded(802)), true);
         var named = ((object[])Items(ana.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
@@ -586,16 +707,16 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Seeded(900), Seeded(901)));
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(900), Seeded(901)));
         list.AddSamples((string)ana.Id, Samples(Seeded(902)), true);
         list.Seen((string)ana.Id, T0, Camera);
         var before = data.Keys();
         list.Delete((string)ana.Id);
-        Check(((object[])Items(list.People)).Length == 0 && list.Named("Ana") == null, "Ana is gone");
+        Check(((object[])Items(list.People)).Length == 0 && ByName(list, "Ana") == null, "Ana is gone");
         Check(data.Keys().SequenceEqual(["format", "names"]), "only the format and the names are left: " + string.Join(", ", data.Keys()) + " of " + string.Join(", ", before));
-        Check(data.Get<Dictionary<string, string>>("names")!.Count == 0, "the names are empty");
+        Check(data.Get<JsonObject>("names")!.Count == 0, "the names are empty");
         list.Delete((string)ana.Id);
-        list.Add(Named("ana"), Samples(Seeded(903)));
+        list.Add(Named("ana"), null, Samples(Seeded(903)));
         Console.WriteLine("PASS people: a delete removes the person's every key, and frees the name");
     }
 
@@ -603,7 +724,7 @@ static class PeopleTests
     {
         using var home = new Home();
         var list = List(home.Open("def-a"));
-        string id = list.Add(Named("Ana"), Samples(Seeded(950))).Id;
+        string id = list.Add(Named("Ana"), null, Samples(Seeded(950))).Id;
         DateTimeOffset? Stored() => Only(List(home.Restarted()), "Ana").LastSeen;
         list.Seen(id, T0, Camera);
         Check(Stored() == T0 && Only(list, "Ana").LastSeenAt == Camera, "the first sighting is written");
@@ -636,13 +757,13 @@ static class PeopleTests
         });
         var adds = Enumerable.Range(0, 16).SelectMany(i => new[]
         {
-            Task.Run(() => { a.Add(Named($"A {i}"), Samples(Seeded(2000 + i))); }),
-            Task.Run(() => { b.Add(Named($"B {i}"), Samples(Seeded(3000 + i))); }),
+            Task.Run(() => { a.Add(Named($"A {i}"), null, Samples(Seeded(2000 + i))); }),
+            Task.Run(() => { b.Add(Named($"B {i}"), null, Samples(Seeded(3000 + i))); }),
         }).ToArray();
         await Task.WhenAll(adds);
         reading.Cancel();
         await reader;
-        var stored = ((object[])Items(List(home.Restarted()).People)).Select(p => (string)((dynamic)p).Name).Order(StringComparer.Ordinal).ToArray();
+        var stored = ((object[])Items(List(home.Restarted()).People)).Select(p => (string)((dynamic)p).FullName).Order(StringComparer.Ordinal).ToArray();
         var expected = Enumerable.Range(0, 16).SelectMany(i => new[] { $"A {i}", $"B {i}" }).Order(StringComparer.Ordinal).ToArray();
         Check(stored.SequenceEqual(expected), $"all 32 names are stored: {stored.Length}");
         await Until(() => ((object[])Items(a.People)).Length == 32 && ((object[])Items(b.People)).Length == 32, "both lists to hold all 32");
@@ -659,19 +780,19 @@ static class PeopleTests
         dynamic b = null!;
         b = List(home.Open("def-b"), () =>
         {
-            seen = b.Named("Ana");
+            seen = ByName(b, "Ana");
             Interlocked.Increment(ref ranB);
             return Task.CompletedTask;
         });
-        var ana = a.Add(Named("Ana"), Samples(Seeded(4000)));
+        var ana = a.Add(Named("Ana"), null, Samples(Seeded(4000)));
         await Until(() => Volatile.Read(ref ranB) > 0 && seen != null, "B's change action, after B reloaded, to see Ana");
         Check(seen!.Id == ana.Id && ((object[])Items(seen.Samples)).Length == 1, "B sees Ana with her sample");
-        b.Rename((string)ana.Id, Named("Ana Marija"));
-        await Until(() => a.Named("Ana Marija") != null, "A to see B's rename");
+        b.Rename((string)ana.Id, Named("Ana Marija"), null);
+        await Until(() => ByName(a, "Ana Marija") != null, "A to see B's rename");
         await Task.Delay(200);
         var ownRuns = Volatile.Read(ref ranA);
         a.Delete((string)ana.Id);
-        await Until(() => b.Named("Ana Marija") == null, "B to see A's delete");
+        await Until(() => ByName(b, "Ana Marija") == null, "B to see A's delete");
         await Task.Delay(200);
         Check(Volatile.Read(ref ranA) == ownRuns, $"A's own delete ran A's change action {ranA - ownRuns} times");
         Console.WriteLine("PASS people: a change one list makes reloads the other and runs its change action, and never the writer's own");
@@ -682,15 +803,15 @@ static class PeopleTests
         using var home = new Home();
         var a = List(home.Open("def-a"));
         var b = List(home.Open("def-b"));
-        a.Add(Named("Ana"), Samples(Seeded(4100)));
-        a.Add(Named("Ivan"), Samples(Seeded(4101)));
+        a.Add(Named("Ana"), null, Samples(Seeded(4100)));
+        a.Add(Named("Ivan"), null, Samples(Seeded(4101)));
         await Until(() => ((object[])Items(b.People)).Length == 2, "B to see both");
         // Stored data's dialog, or a device's button, clears the store.
         home.Open("def-c").Clear();
         await Until(() => ((object[])Items(a.People)).Length == 0 && ((object[])Items(b.People)).Length == 0, "both lists to reload to empty");
         a.Reload();
         Check(((object[])Items(a.People)).Length == 0, "a reload after the clear is empty");
-        a.Add(Named("Ana"), Samples(Seeded(4102)));
+        a.Add(Named("Ana"), null, Samples(Seeded(4102)));
         Check(((object[])Items(a.People)).Length == 1, "a person is added after the clear");
         Console.WriteLine("PASS people: a list reloads to empty after the store is cleared, and is written again after");
     }
@@ -702,13 +823,13 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        string id = list.Add(Named("Ana"), Samples(Seeded(5000))).Id;
+        string id = list.Add(Named("Ana"), null, Samples(Seeded(5000))).Id;
         data.Remove($"people/{id}");
         list.Reload();
         var ana = Only(list, "Ana");
         Check(((object[])Items(ana.Samples)).Length == 0 && ana.Added == DateTimeOffset.MinValue, $"Ana is listed without samples, added at an unknown time: {ana}");
         Check(Match(Unit(5000), list.People).Kind.ToString() == "Unknown", "a person without samples matches no one");
-        Check(Refused(() => list.Add(Named("ana"), Samples(Seeded(5001))), "her name") == "ana is already someone else's name.", "her name stays taken");
+        Check(Refused(() => list.Add(Named("ana"), null, Samples(Seeded(5001))), "her name") == "There is already a person named Ana: choose them from the list.", "her name stays taken");
         var again = list.AddSamples(id, Samples(Seeded(5002)), false);
         Check(((object[])Items(again.Samples)).Length == 1, "a sample can be added to her again");
         list.Delete(id);
@@ -721,7 +842,7 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        string id = list.Add(Named("Ana"), Samples(Seeded(5100))).Id;
+        string id = list.Add(Named("Ana"), null, Samples(Seeded(5100))).Id;
         byte[] embedding = new byte[512];
         data.SetBytes("samples/nobody00/sample00/embedding", embedding);
         data.SetBytes("samples/nobody00/sample00/crop", Crop(5101));
@@ -738,7 +859,7 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Seeded(5200), Seeded(5201)));
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(5200), Seeded(5201)));
         string id = ana.Id;
         var ids = ((object[])Items(ana.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
         data.SetBytes($"samples/{id}/{ids[0]}/embedding", new byte[100]);
@@ -762,7 +883,7 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        string id = list.Add(Named("Ana"), Samples(Seeded(5300))).Id;
+        string id = list.Add(Named("Ana"), null, Samples(Seeded(5300))).Id;
         Check(list.Problem == null, "a list of its own format has no problem");
         data.Set("format", 2);
         var before = Contents(data);
@@ -770,9 +891,9 @@ static class PeopleTests
         Check(((object[])Items(newer.People)).Length == 0, "a store of a newer format is not read");
         const string Newer = "The people list was saved by a newer hass-sharp-vision; update this one to change it.";
         Check(newer.Problem == Newer, "its problem says so: " + newer.Problem);
-        Check(Refused(() => newer.Add(Named("Ivan"), Samples(Seeded(5301))), "an add") == Newer, "an add is refused");
+        Check(Refused(() => newer.Add(Named("Ivan"), null, Samples(Seeded(5301))), "an add") == Newer, "an add is refused");
         list.Reload();
-        Check(Refused(() => list.Rename(id, "Mia"), "a rename") == Newer, "a rename is refused");
+        Check(Refused(() => list.Rename(id, "Mia", null), "a rename") == Newer, "a rename is refused");
         Check(Refused(() => list.Delete(id), "a delete") == Newer, "a delete is refused");
         Check(Refused(() => list.AddSamples(id, Samples(Seeded(5302)), true), "samples") == Newer, "samples are refused");
         Check(Refused(() => list.RemoveSample(id, "nosuchsample"), "a sample's removal") == Newer, "a sample's removal is refused");
@@ -783,7 +904,7 @@ static class PeopleTests
         var unreadable = List(home.Restarted());
         Check(((object[])Items(unreadable.People)).Length == 0, "a format that is not a number is not read either");
         Check(unreadable.Problem == "The people list cannot be read; delete it in Stored data to start again.", "its problem says so: " + unreadable.Problem);
-        Check(Refused(() => unreadable.Add(Named("Ivan"), Samples(Seeded(5303))), "an add") == "The people list cannot be read; delete it in Stored data to start again.",
+        Check(Refused(() => unreadable.Add(Named("Ivan"), null, Samples(Seeded(5303))), "an add") == "The people list cannot be read; delete it in Stored data to start again.",
             "nor written");
         Console.WriteLine("PASS people: a store of a newer format is neither read nor written, and the refusal and the list's problem say so");
     }
@@ -793,13 +914,13 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        list.Add(Named("Ana"), Samples(Seeded(5400)));
+        list.Add(Named("Ana"), null, Samples(Seeded(5400)));
         data.SetBytes("names", [1, 2, 3]);
         var before = Contents(data);
         var damaged = List(home.Restarted());
         Check(((object[])Items(damaged.People)).Length == 0, "unreadable names give no one");
         Check(damaged.Problem == "The people list cannot be read; delete it in Stored data to start again.", "its problem says so: " + damaged.Problem);
-        var refused = Refused(() => damaged.Add(Named("Ivan"), Samples(Seeded(5401))), "an add");
+        var refused = Refused(() => damaged.Add(Named("Ivan"), null, Samples(Seeded(5401))), "an add");
         Check(refused == "The people list cannot be read; delete it in Stored data to start again.", "the refusal: " + refused);
         Check(Contents(data) == before, "nothing was written");
         Console.WriteLine("PASS people: names that cannot be read give an empty list, and changes are refused");
@@ -829,7 +950,7 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        list.Add(Named("Ana"), Samples(Seeded(6000)));
+        list.Add(Named("Ana"), null, Samples(Seeded(6000)));
         // An add interrupted after its samples and record, before its name: begun an hour ago, so no add is still writing it.
         Unfinished(data, "interrupted0", DateTimeOffset.UtcNow.AddHours(-1), false);
         Written(data, "interrupted0", 6001);
@@ -843,7 +964,7 @@ static class PeopleTests
             "nothing of the interrupted add is left: " + string.Join(", ", stored.Keys()));
         Check(KeysOf(stored, "inprogress00").Length == 3 && stored.Keys("unfinished/inprogress00").Count == 1,
             "the add in progress keeps its keys and its note: " + string.Join(", ", stored.Keys()));
-        Check(((object[])Items(after.People)).Length == 1 && after.Named("Ana") != null, "Ana is still listed, and only she");
+        Check(((object[])Items(after.People)).Length == 1 && ByName(after, "Ana") != null, "Ana is still listed, and only she");
         Check(stored.Keys("unfinished/").Count == 1, "Ana's own add left no note: " + string.Join(", ", stored.Keys("unfinished/")));
 
         // A delete finishes what is old by then, too. One DataStores of its own, which has read what the last list removed.
@@ -852,7 +973,7 @@ static class PeopleTests
         var other = List(deleting);
         Unfinished(deleting, "interrupted1", DateTimeOffset.UtcNow.AddHours(-1), false);
         Written(deleting, "interrupted1", 6003);
-        other.Delete((string)other.Named("Ana").Id);
+        other.Delete((string)ByName(other, "Ana").Id);
         Check(deleting.Keys().SequenceEqual(["format", "names"]), "a delete finished the interrupted add: " + string.Join(", ", deleting.Keys()));
         Console.WriteLine("PASS people: an interrupted add leaves no face data once a list is made on the store, and an add in progress is left alone");
     }
@@ -862,24 +983,24 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Seeded(6100), Seeded(6101)));
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(6100), Seeded(6101)));
         list.AddSamples((string)ana.Id, Samples(Seeded(6102)), true);
-        var ivan = list.Add(Named("Ivan"), Samples(Seeded(6103)));
+        var ivan = list.Add(Named("Ivan"), null, Samples(Seeded(6103)));
         string id = ana.Id;
         // A delete interrupted after it removed the name, before the record and the samples: just now, so it is young.
         Unfinished(data, id, DateTimeOffset.UtcNow, true);
-        data.Update<Dictionary<string, string>>("names", names => { names!.Remove(id); return names; });
+        data.Update<JsonObject>("names", names => { names!.Remove(id); return names; });
         Check(KeysOf(data, id).Length == 7, "the interruption left Ana's record and three samples: " + string.Join(", ", KeysOf(data, id)));
 
         var after = List(home.Restarted());
         var stored = home.Restarted("check");
         Check(KeysOf(stored, id).Length == 0 && stored.Keys("unfinished/").Count == 0, "nothing of Ana is left: " + string.Join(", ", stored.Keys()));
-        Check(after.Named("Ana") == null && after.Named("Ivan").Id == ivan.Id && KeysOf(stored, (string)ivan.Id).Length == 3, "Ivan is untouched");
+        Check(ByName(after, "Ana") == null && ByName(after, "Ivan").Id == ivan.Id && KeysOf(stored, (string)ivan.Id).Length == 3, "Ivan is untouched");
 
         // A delete interrupted before it removed the name leaves the person, and its note goes once it is old.
         Unfinished(stored, (string)ivan.Id, DateTimeOffset.UtcNow.AddHours(-1), true);
         var again = List(home.Restarted());
-        Check(again.Named("Ivan") != null && home.Restarted("check").Keys("unfinished/").Count == 0, "Ivan is still listed, and the note is gone");
+        Check(ByName(again, "Ivan") != null && home.Restarted("check").Keys("unfinished/").Count == 0, "Ivan is still listed, and the note is gone");
         Console.WriteLine("PASS people: an interrupted delete leaves no face data once a list is made on the store");
     }
 
@@ -888,15 +1009,15 @@ static class PeopleTests
         using var home = new Home();
         var data = home.Open("def-a");
         var list = List(data);
-        var ana = list.Add(Named("Ana"), Samples(Seeded(6200)));
-        var ivan = list.Add(Named("Ivan"), Samples(Seeded(6201), Seeded(6202)));
+        var ana = list.Add(Named("Ana"), null, Samples(Seeded(6200)));
+        var ivan = list.Add(Named("Ivan"), null, Samples(Seeded(6201), Seeded(6202)));
         string anaId = ana.Id, ivanId = ivan.Id;
         // A merge interrupted after it copied the samples and removed the source's name, before the source's keys went.
         var moved = ((object)list).GetType().GetMethod("MoveSamples", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new Exception("PeopleList has no MoveSamples step");
         Invoke(moved, list, ivanId, anaId);
         Unfinished(data, ivanId, DateTimeOffset.UtcNow, true);
-        data.Update<Dictionary<string, string>>("names", names => { names!.Remove(ivanId); return names; });
+        data.Update<JsonObject>("names", names => { names!.Remove(ivanId); return names; });
 
         var after = List(home.Restarted());
         var stored = home.Restarted("check");
@@ -1534,7 +1655,7 @@ static class PeopleTests
         var array = Array.CreateInstance(Type("FaceSample"), samples.Length);
         for (var i = 0; i < samples.Length; i++)
             array.SetValue(Activator.CreateInstance(Type("FaceSample"), $"{id}s{i}", (object)Embedding(samples[i].Values), samples[i].At, Camera, samples[i].Learned), i);
-        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null, null)!;
+        return Activator.CreateInstance(Type("Person"), id, id, null, DateTimeOffset.UnixEpoch, array, null, null, null)!;
     }
 
     /// <summary>Whether a face of <paramref name="eyes"/> pixels between the eyes, recognised in <paramref name="people"/> by the default rules, is learned.</summary>
@@ -1619,7 +1740,7 @@ static class PeopleTests
         using var home = new Home();
         var list = List(home.Open("def-a"));
         var face = Unit(8100);
-        var ana = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8101), Crop(8101), T0), NewSample(Unit(8102), Crop(8102), T0)));
+        var ana = list.Add(Named("Ana"), null, Samples(NewSample(At(face, 0.75, 8101), Crop(8101), T0), NewSample(Unit(8102), Crop(8102), T0)));
         string id = ana.Id;
         var learnedAt = DateTimeOffset.UtcNow.AddDays(-1);
         var learned = list.AddSamples(id, Samples(NewSample(Unit(8103), Crop(8103), learnedAt)), true);
@@ -1648,7 +1769,7 @@ static class PeopleTests
         using var home = new Home();
         var list = List(home.Open("def-a"));
         var face = Unit(8110);
-        string id = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8111), Crop(8111), T0))).Id;
+        string id = list.Add(Named("Ana"), null, Samples(NewSample(At(face, 0.75, 8111), Crop(8111), T0))).Id;
         Check(Only(list, "Ana").LearnedChanged == null, "a person named only has no learned change");
         var at = DateTimeOffset.UtcNow.AddDays(-1);
         list.AddSamples(id, Samples(NewSample(Unit(8112), Crop(8112), at)), true);
@@ -1665,8 +1786,8 @@ static class PeopleTests
         var list = List(home.Open("def-a"));
         var face = Unit(8120);
         var day = DateTimeOffset.UtcNow.AddDays(-1);
-        string anaId = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8121), Crop(8121), T0))).Id;
-        var ivan = list.Add(Named("Ivan"), Samples(NewSample(Unit(8122), Crop(8122), T0)));
+        string anaId = list.Add(Named("Ana"), null, Samples(NewSample(At(face, 0.75, 8121), Crop(8121), T0))).Id;
+        var ivan = list.Add(Named("Ivan"), null, Samples(NewSample(Unit(8122), Crop(8122), T0)));
         string ivanId = ivan.Id;
         list.AddSamples(anaId, Samples(NewSample(Unit(8123), Crop(8123), day)), true);
         var ivanLearned = list.AddSamples(ivanId, Samples(NewSample(Unit(8124), Crop(8124), day.AddHours(1))), true);
@@ -1677,14 +1798,14 @@ static class PeopleTests
 
         // Ivan's removal is later than Ana's learned sample: Ana has it after the merge.
         list.Merge(ivanId, anaId);
-        Check(list.Named("Ivan") == null, "Ivan is merged away");
+        Check(ByName(list, "Ivan") == null, "Ivan is merged away");
         Check(!LearnsIn(list, anaId, face, before.AddMinutes(10) - TimeSpan.FromSeconds(1)), "the merged person learns nothing within ten minutes of Ivan's removal");
         Check(LearnsIn(list, anaId, face, after.AddMinutes(10)), "and learns ten minutes after it");
         DateTimeOffset? changed = Only(list, "Ana").LearnedChanged;
         Check(changed is { } at && at >= before && at <= after, $"the later of the two is kept: {changed}");
 
         // Merged into someone whose change is later, theirs is kept.
-        var mia = list.Add(Named("Mia"), Samples(NewSample(Unit(8125), Crop(8125), T0)));
+        var mia = list.Add(Named("Mia"), null, Samples(NewSample(Unit(8125), Crop(8125), T0)));
         string miaId = mia.Id;
         var later = DateTimeOffset.UtcNow.AddDays(1);
         list.AddSamples(miaId, Samples(NewSample(Unit(8126), Crop(8126), later)), true);
@@ -1699,7 +1820,7 @@ static class PeopleTests
         var data = home.Open("def-a");
         var list = List(data);
         var face = Unit(8130);
-        string id = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8131), Crop(8131), T0))).Id;
+        string id = list.Add(Named("Ana"), null, Samples(NewSample(At(face, 0.75, 8131), Crop(8131), T0))).Id;
         var at = DateTimeOffset.UtcNow.AddDays(-1);
         list.AddSamples(id, Samples(NewSample(Unit(8132), Crop(8132), at.AddMinutes(-30))), true);
         list.AddSamples(id, Samples(NewSample(Unit(8133), Crop(8133), at)), true);
