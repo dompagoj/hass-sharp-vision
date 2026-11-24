@@ -284,10 +284,10 @@ public static class Vision
     static readonly Dictionary<string, string> Sha256 = new(StringComparer.Ordinal)
     {
         // pinned:begin
-        ["linux-arm64"] = "70c21a44411ce2c5b71128aa605653f38234123e1aecdd8e908f17f3f94e9bdd",
-        ["linux-musl-arm64"] = "947135b392e481b42d08fb97de2d8d5544d038b24aa581465cc0c3822e1b6607",
-        ["linux-musl-x64"] = "3f57c050c4c8344fdb9ec86a4ff30341e805a8dde4fec5e54b895ba17cea097f",
-        ["linux-x64"] = "16242e7b754de087fbb796851e661ed5c5bfa5080b7f5ac79ea7ca96b27c8ff7",
+        ["linux-arm64"] = "74868ad91f410195dea18cdee8fe1e51829a2f47bb81df1ca8ca7ad00dccd750",
+        ["linux-musl-arm64"] = "641245c6d56f6a43377e627eefe5b323d4ae0ecd2227c5b6ec005c40bbdff2c1",
+        ["linux-musl-x64"] = "99c0d03b613c58cb0a79b31d74989048cb2a9ce8aed02a4be80b8eb34626f944",
+        ["linux-x64"] = "243ddf6eb470ad8a764e154243a76fdf2e3d5c8b0c0b6f1013030076afdfd015",
         // pinned:end
     };
 
