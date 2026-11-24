@@ -452,7 +452,7 @@ public static class Vision
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(faces);
-        return Draw(image, faces, null);
+        return Draw(image, faces, null, boxes: true, points: true);
     }
 
     /// <summary>
@@ -466,27 +466,52 @@ public static class Vision
     /// <exception cref="ArgumentException">There are not as many names as faces.</exception>
     public static SharpImage DrawFaces(SharpImage image, IReadOnlyList<DetectedFace> faces, IReadOnlyList<string?> names)
     {
-        ArgumentNullException.ThrowIfNull(image);
-        ArgumentNullException.ThrowIfNull(faces);
         ArgumentNullException.ThrowIfNull(names);
-        if (names.Count != faces.Count) throw new ArgumentException("There is one name, or null, for each face");
-        return Draw(image, faces, names);
+        return DrawFaces(image, faces, names, boxes: true, points: true);
     }
 
-    static SharpImage Draw(SharpImage image, IReadOnlyList<DetectedFace> faces, IReadOnlyList<string?>? names)
+    /// <summary>
+    /// Draws each face on <paramref name="image"/> as
+    /// <see cref="DrawFaces(SharpImage, IReadOnlyList{DetectedFace}, IReadOnlyList{string})"/> does, its box and its five
+    /// dots each only when asked: without its box, a face's score is not drawn either, and its name is drawn where it is
+    /// with the box. The best first, until one does not fit under the picture's 500 drawings: a face is 2 drawings for
+    /// the box and its label, 5 for the dots, and 1 for a name without the box.
+    /// </summary>
+    /// <param name="image">The picture to draw on, such as a copy (<see cref="SharpImage.Copy"/>).</param>
+    /// <param name="faces">The faces found in it.</param>
+    /// <param name="names">Each face's name, in the order of <paramref name="faces"/>: null or blank for a face without one; or null for none.</param>
+    /// <param name="boxes">Whether each face's box is drawn, with its score or its name above it.</param>
+    /// <param name="points">Whether a dot is drawn on each of a face's five landmarks.</param>
+    /// <returns><paramref name="image"/>.</returns>
+    /// <exception cref="ArgumentException">There are not as many names as faces.</exception>
+    public static SharpImage DrawFaces(SharpImage image, IReadOnlyList<DetectedFace> faces, IReadOnlyList<string?>? names, bool boxes, bool points)
     {
-        var room = Math.Max(0, (MaxDrawings - image.Drawings) / 7);
-        foreach (var index in Enumerable.Range(0, faces.Count).OrderByDescending(index => faces[index].Score).Take(room))
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(faces);
+        if (names != null && names.Count != faces.Count) throw new ArgumentException("There is one name, or null, for each face");
+        return Draw(image, faces, names, boxes, points);
+    }
+
+    static SharpImage Draw(SharpImage image, IReadOnlyList<DetectedFace> faces, IReadOnlyList<string?>? names, bool boxes, bool points)
+    {
+        foreach (var index in Enumerable.Range(0, faces.Count).OrderByDescending(index => faces[index].Score))
         {
             var face = faces[index];
-            int x = Round(face.X), y = Round(face.Y);
-            image.DrawRect(x, y, Round(face.Width), Round(face.Height), SharpColor.Green, Math.Clamp(Round(MathF.Min(face.Width, face.Height) / 50), 2, 50));
-            var radius = Math.Clamp(Round(face.Width / 40), 2, 4096);
-            foreach (var (point, color) in new[] { (face.RightEye, SharpColor.Blue), (face.LeftEye, SharpColor.Red), (face.NoseTip, SharpColor.Yellow),
-                (face.RightMouthCorner, SharpColor.FromRgb(255, 0, 255)), (face.LeftMouthCorner, SharpColor.Orange) })
-                image.DrawCircle(Round(point.X), Round(point.Y), radius, color, filled: true);
             var name = names?[index];
-            image.DrawText(string.IsNullOrWhiteSpace(name) ? Score(face.Score) : name, x, Math.Max(0, y - 20), SharpColor.White, 16, background: true);
+            var named = !string.IsNullOrWhiteSpace(name);
+            var cost = (boxes ? 2 : named ? 1 : 0) + (points ? 5 : 0);
+            if (cost == 0) continue;
+            if (image.Drawings + cost > MaxDrawings) break;
+            int x = Round(face.X), y = Round(face.Y);
+            if (boxes) image.DrawRect(x, y, Round(face.Width), Round(face.Height), SharpColor.Green, Math.Clamp(Round(MathF.Min(face.Width, face.Height) / 50), 2, 50));
+            if (points)
+            {
+                var radius = Math.Clamp(Round(face.Width / 40), 2, 4096);
+                foreach (var (point, color) in new[] { (face.RightEye, SharpColor.Blue), (face.LeftEye, SharpColor.Red), (face.NoseTip, SharpColor.Yellow),
+                    (face.RightMouthCorner, SharpColor.FromRgb(255, 0, 255)), (face.LeftMouthCorner, SharpColor.Orange) })
+                    image.DrawCircle(Round(point.X), Round(point.Y), radius, color, filled: true);
+            }
+            if (boxes || named) image.DrawText(named ? name! : Score(face.Score), x, Math.Max(0, y - 20), SharpColor.White, 16, background: true);
         }
         return image;
     }

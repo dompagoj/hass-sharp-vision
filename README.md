@@ -74,7 +74,7 @@ The People detector is a node of its own: in an entity definition's step list it
 `PeopleDetector`, as in `public class FrontDoor : PeopleDetector { }`, works the same way, and may add entities of its
 own in its constructor.
 
-It has eleven settings:
+It has thirteen settings:
 
 | Setting | Default | What it is |
 | --- | --- | --- |
@@ -88,13 +88,15 @@ It has eleven settings:
 | Match score | 0.50 | The lowest score a face is recognised at, from 0.3 to 0.9. Higher recognises fewer faces, and fewer wrongly. The lines for suggesting and learning move with it. |
 | Learn new looks | on | Whether a face recognised beyond doubt is kept as a further sample of its person. |
 | Keep unknown faces for | 7 | Whole days a face nobody has named is kept after it was last seen, from 1 to 365. |
-| Names on the camera | on | Whether the camera picture shows a recognised face's name above its box. Off, every face shows its score. |
+| Boxes on the camera | on | Whether the camera picture shows a box around each face, and around each person when people are detected, with its score above it. Off, neither boxes nor scores are drawn. |
+| Face points on the camera | on | Whether the camera picture shows the five points of each face: its eyes, its nose and its mouth corners. |
+| Names on the camera | on | Whether the camera picture shows a recognised face's name above its box, or where its box would be with **Boxes on the camera** off. Off, every face with a box shows its score. |
 
 The device (manufacturer HassSharp, model People detector) has eight entities, in this order:
 
 | Entity | Key | What it shows |
 | --- | --- | --- |
-| Camera | `camera` | Each frame checked, with the faces and people found drawn on it. It has no name of its own, so Home Assistant shows the device's. |
+| Camera | `camera` | Each frame checked, with the faces and people found drawn on it as the three settings on the camera say; with all three off, the frame as it is. It has no name of its own, so Home Assistant shows the device's. |
 | Face seen | `face_seen` | Binary sensor (occupancy): on while a face is seen. |
 | Person seen | `person_seen` | Binary sensor (occupancy): on while a person is seen. |
 | Faces | `faces` | Sensor (measurement): how many faces the newest frame checked has. |

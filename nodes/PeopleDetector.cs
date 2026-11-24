@@ -3,7 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 
-/// <summary>The camera of a <see cref="PeopleDetector"/>: each frame it checks, with the faces and people found drawn on it.</summary>
+/// <summary>The camera of a <see cref="PeopleDetector"/>: each frame it checks, with the faces and people found drawn on it as its settings say.</summary>
 public class PeopleDetectorCamera : SharpCamera
 {
     /// <summary>The camera keyed <c>camera</c>, with no name of its own: Home Assistant shows the device's.</summary>
@@ -18,12 +18,13 @@ public class PeopleDetectorCamera : SharpCamera
 /// <para>
 /// The step list shows the summary above, so it names no member. The device reports whether a face or a person is seen
 /// (held on for <see cref="StayOnFor"/> after the last), how many are in the newest frame checked, and when one was last
-/// seen; and it has a camera that shows each frame checked with what was found drawn on it, its entities in the order
-/// its constructor gives. With <see cref="RecogniseFaces"/> on, it recognises the clear faces of each frame against the
-/// people list every People detector shares (<see cref="PeopleList"/>), says who is in frame (Recognised, held as seen
-/// is), groups the faces it does not know (<see cref="FaceGroups"/>), and learns new looks of the people it is sure of;
-/// its page lists the unknown faces to name or dismiss, the people to rename, merge and delete, and a person's samples
-/// to remove.
+/// seen; and it has a camera that shows each frame checked with what was found drawn on it as
+/// <see cref="BoxesOnTheCamera"/>, <see cref="FacePointsOnTheCamera"/> and <see cref="NamesOnTheCamera"/> say, its
+/// entities in the order its constructor gives. With <see cref="RecogniseFaces"/> on, it recognises the clear faces of
+/// each frame against the people list every People detector shares (<see cref="PeopleList"/>), says who is in frame
+/// (Recognised, held as seen is), groups the faces it does not know (<see cref="FaceGroups"/>), and learns new looks of
+/// the people it is sure of; its page lists the unknown faces to name or dismiss, the people to rename, merge and
+/// delete, and a person's samples to remove.
 /// </para>
 /// <para>
 /// Drop it in an entity definition as a node of its own and give it a camera; or derive a C# device node's class from
@@ -172,7 +173,15 @@ public class PeopleDetector : SharpDevice
     [Setting("Keep unknown faces for", Minimum = 1, Maximum = 365)]
     public int KeepUnknownFacesFor { get; set; } = 7;
 
-    /// <summary>Whether the camera picture shows a recognised face's name above its box.</summary>
+    /// <summary>Whether the camera picture shows a box around each face, and around each person when people are detected.</summary>
+    [Setting("Boxes on the camera")]
+    public bool BoxesOnTheCamera { get; set; } = true;
+
+    /// <summary>Whether the camera picture shows the five points of each face: its eyes, its nose and its mouth corners.</summary>
+    [Setting("Face points on the camera")]
+    public bool FacePointsOnTheCamera { get; set; } = true;
+
+    /// <summary>Whether the camera picture shows a recognised face's name above its box, or where its box would be.</summary>
     [Setting("Names on the camera")]
     public bool NamesOnTheCamera { get; set; } = true;
 
@@ -358,8 +367,9 @@ public class PeopleDetector : SharpDevice
             var now = Now;
             if (RecogniseFaces) before = People.People;
             var names = RecogniseFaces ? Recognise(frame, foundFaces, now, hold) : null;
-            var drawing = Vision.DrawPeople(frame.Copy(), foundPeople);
-            using (var drawn = names != null && NamesOnTheCamera ? Vision.DrawFaces(drawing, foundFaces, names) : Vision.DrawFaces(drawing, foundFaces)) camera.Show(drawn);
+            // A copy, shown also when its settings draw nothing on it.
+            var drawing = BoxesOnTheCamera ? Vision.DrawPeople(frame.Copy(), foundPeople) : frame.Copy();
+            using (var drawn = Vision.DrawFaces(drawing, foundFaces, NamesOnTheCamera ? names : null, BoxesOnTheCamera, FacePointsOnTheCamera)) camera.Show(drawn);
             faces.Checked(foundFaces.Count, now, hold);
             if (DetectPeople) people.Checked(foundPeople.Count, now, hold);
         }

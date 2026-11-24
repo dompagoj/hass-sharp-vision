@@ -153,6 +153,7 @@ static class VisionTests
             (nameof(ALibraryOfAbi1IsRefused), ALibraryOfAbi1IsRefused),
             (nameof(SimilarityIsTheDotProduct), SimilarityIsTheDotProduct),
             (nameof(FrontalNeedsTheEyesApartAndTheNoseBetweenThem), FrontalNeedsTheEyesApartAndTheNoseBetweenThem),
+            (nameof(DrawsTheBoxesAndThePointsEachOnlyWhenAsked), DrawsTheBoxesAndThePointsEachOnlyWhenAsked),
         };
         var failures = new List<string>();
         if (LocalLibrary != null)
@@ -293,6 +294,7 @@ static class VisionTests
 
         public SharpImage DrawFaces(SharpImage image, object faces) => (SharpImage)Invoke(Overload("DrawFaces", 2), null, image, faces)!;
         public SharpImage DrawFaces(SharpImage image, object faces, string?[] names) => (SharpImage)Invoke(Overload("DrawFaces", 3), null, image, faces, names)!;
+        public SharpImage DrawFaces(SharpImage image, object faces, string?[]? names, bool boxes, bool points) => (SharpImage)Invoke(Overload("DrawFaces", 5), null, image, faces, names, boxes, points)!;
         public SharpImage DrawPeople(SharpImage image, object people) => (SharpImage)Invoke(vision.GetMethod("DrawPeople")!, null, image, people)!;
 
         public ValueTask DisposeAsync()
@@ -727,6 +729,94 @@ static class VisionTests
         var refused = Throws<ArgumentException>(() => rig.Vision.DrawFaces(group.Copy(), found, ["Ana"]), "one name for seven faces");
         Check(refused.Message == "There is one name, or null, for each face", "the names' sentence: " + refused.Message);
         Console.WriteLine($"PASS vision: DrawFaces with names draws a face's name in place of its score, and its score without one ({changed.Length} bytes of two labels changed)");
+    }
+
+    // The People detector's camera options: a face's box, with its score above it, and its five points are each drawn only
+    // when asked, and a name is drawn where it is above the box, also without the box.
+    static async Task DrawsTheBoxesAndThePointsEachOnlyWhenAsked()
+    {
+        await using var vision = new Loaded(Committed());
+        // Three faces on the group photo, side by side and far enough apart that no drawing of one is on another's.
+        var group = Photo("group.jpg");
+        object[] faces = [.. new[] { 40, 270, 500 }.Select(x => vision.Face(x, 150, 100, 120, (x + 30, 190), (x + 70, 190), (x + 50, 215)))];
+        var found = Array.CreateInstance(faces[0].GetType(), faces.Length);
+        for (var i = 0; i < faces.Length; i++) found.SetValue(faces[i], i);
+        var width = group.Width;
+        var frame = group.ToPixels();
+        var full = vision.DrawFaces(group.Copy(), found).ToPixels();
+        byte[] Drawn(string?[]? names, bool boxes, bool points, int drawings)
+        {
+            var image = vision.DrawFaces(group.Copy(), found, names, boxes, points);
+            Check(image.Drawings == drawings, $"boxes {boxes}, points {points}, {(names == null ? "no names" : "names")}: {drawings} drawings, not {image.Drawings}");
+            return image.ToPixels();
+        }
+        static bool Same(byte[] one, byte[] other, int at) => one[at] == other[at] && one[at + 1] == other[at + 1] && one[at + 2] == other[at + 2];
+        int[] Pixels() => [.. Enumerable.Range(0, frame.Length / 3).Select(pixel => pixel * 3)];
+
+        // Each face's five dots, as far as their radius and a pixel more for their edge, and their centres.
+        var dots = faces.SelectMany(face => new[] { "RightEye", "LeftEye", "NoseTip", "RightMouthCorner", "LeftMouthCorner" }.Select(landmark =>
+        {
+            var point = face.GetType().GetProperty(landmark)!.GetValue(face)!;
+            return (X: (int)MathF.Round(Get(point, "X")), Y: (int)MathF.Round(Get(point, "Y")), Radius: Math.Clamp((int)MathF.Round(Get(face, "Width") / 40), 2, 4096) + 1);
+        })).ToArray();
+        bool InDot(int at)
+        {
+            int column = at / 3 % width, row = at / 3 / width;
+            return dots.Any(dot => (column - dot.X) * (column - dot.X) + (row - dot.Y) * (row - dot.Y) <= dot.Radius * dot.Radius);
+        }
+        int[] centres = [.. dots.Select(dot => (dot.Y * width + dot.X) * 3)];
+        // Each box's top edge, inside its corners.
+        int[] edges = [.. faces.SelectMany(face =>
+        {
+            int x = (int)MathF.Round(Get(face, "X")), y = (int)MathF.Round(Get(face, "Y")), w = (int)MathF.Round(Get(face, "Width"));
+            return Enumerable.Range(Math.Max(0, x + 2), Math.Max(0, Math.Min(width, x + w - 2) - Math.Max(0, x + 2))).Select(column => (Math.Max(0, y + 1) * width + column) * 3);
+        })];
+        Check(centres.All(at => !Same(full, frame, at)) && edges.Count(at => Greenish(full, at)) * 2 >= edges.Length,
+            "drawn whole, every dot's centre is coloured and the boxes' top edges are green");
+
+        // Both on: as DrawFaces draws them, with names or without.
+        Check(Drawn(null, boxes: true, points: true, 3 * 7).AsSpan().SequenceEqual(full), "with boxes and points, DrawFaces draws what it draws without the options");
+        string?[] names = ["Ana", null, "Marko"];
+        var namedFull = vision.DrawFaces(group.Copy(), found, names).ToPixels();
+        Check(Drawn(names, boxes: true, points: true, 3 * 7).AsSpan().SequenceEqual(namedFull), "with boxes, points and names, DrawFaces draws what it draws with the names alone");
+
+        // Points off: the boxes and their scores, and no dot.
+        var boxes = Drawn(null, boxes: true, points: false, 3 * 2);
+        Check(centres.All(at => Same(boxes, frame, at)), "with points off, no dot's centre is coloured");
+        Check(edges.All(at => Same(boxes, full, at)), "with points off, the boxes' top edges are as drawn whole");
+        Check(Pixels().All(at => Same(boxes, InDot(at) ? frame : full, at)), "with points off, the picture is the one drawn whole but where the dots are, which are the frame's");
+
+        // Boxes off: the dots, and no box nor score.
+        var points = Drawn(null, boxes: false, points: true, 3 * 5);
+        Check(centres.All(at => Same(points, full, at)), "with boxes off, each dot's centre is as drawn whole");
+        Check(edges.All(at => Same(points, frame, at)), "with boxes off, the boxes' top edges are the frame's");
+        Check(Pixels().All(at => Same(points, InDot(at) ? full : frame, at)), "with boxes off, the picture is the frame but where the dots are, which are as drawn whole");
+
+        // Both off: the frame as it was.
+        Check(Drawn(null, boxes: false, points: false, 0).AsSpan().SequenceEqual(frame), "with both off, the picture is the frame");
+
+        // Both off with names: the frame with each name where it is drawn above its box, and nothing else.
+        var labelled = group.Copy();
+        foreach (var index in new[] { 0, 2 })
+            labelled.DrawText(names[index]!, (int)MathF.Round(Get(faces[index], "X")), Math.Max(0, (int)MathF.Round(Get(faces[index], "Y")) - 20), SharpColor.White, 16, background: true);
+        var bare = Drawn(names, boxes: false, points: false, 2);
+        Check(bare.AsSpan().SequenceEqual(labelled.ToPixels()) && !bare.AsSpan().SequenceEqual(frame), "with both off, the frame has the two names, each where it is above its box, and nothing else");
+        var dotted = Drawn(names, boxes: false, points: true, 3 * 5 + 2);
+        Check(Pixels().All(at => Same(dotted, InDot(at) ? full : bare, at)), "with boxes off, the names are drawn with the dots");
+
+        // As many as fit under the 500 drawings, the best first: a face is 2 drawings without its dots, 5 without its box.
+        SharpImage Crowded()
+        {
+            var crowded = Photo("group.jpg");
+            for (var i = 0; i < 495; i++) crowded.DrawRect(i % 600, 0, 4, 4, SharpColor.White, 1);
+            return crowded;
+        }
+        Check(vision.DrawFaces(Crowded(), found, null, true, false).Drawings == 499, "points off, 495 drawings have room for 2 faces");
+        Check(vision.DrawFaces(Crowded(), found, null, false, true).Drawings == 500, "boxes off, 495 drawings have room for 1 face");
+        Check(vision.DrawFaces(Crowded(), found, names, false, false).Drawings == 497, "both off, 495 drawings have room for the 2 names");
+        var refused = Throws<ArgumentException>(() => vision.DrawFaces(group.Copy(), found, ["Ana"], false, false), "one name for three faces");
+        Check(refused.Message == "There is one name, or null, for each face", "the names' sentence: " + refused.Message);
+        Console.WriteLine("PASS vision: DrawFaces draws each face's box, with its score, and its five points each only when asked, and a name above where the box is or would be");
     }
 
     static async Task EmbedsAFaceOfTheFixture()

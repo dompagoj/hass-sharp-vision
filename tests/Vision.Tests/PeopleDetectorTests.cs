@@ -86,6 +86,7 @@ static class PeopleDetectorTests
                 (nameof(AtMostFourFacesAreEmbeddedTheLargestFirst), AtMostFourFacesAreEmbeddedTheLargestFirst),
                 (nameof(FacesAreRecognisedSuggestedOrGrouped), FacesAreRecognisedSuggestedOrGrouped),
                 (nameof(TheCameraShowsTheRecognisedName), TheCameraShowsTheRecognisedName),
+                (nameof(TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked), TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked),
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
                 (nameof(ARemovedLearnedSampleIsNotLearnedAgainAtOnce), ARemovedLearnedSampleIsNotLearnedAgainAtOnce),
                 (nameof(APersonIsGivenToOneFaceOfACheck), APersonIsGivenToOneFaceOfACheck),
@@ -434,7 +435,7 @@ static class PeopleDetectorTests
         Check(preview.Valid && preview.Diagnostics.IsEmpty, "Vision.cs, People.cs and PeopleDetector.cs preview valid: " + string.Join(" | ", preview.Diagnostics.Select(d => $"{d.SourceId} {d.StartLine}:{d.StartColumn} {d.Message}")));
 
         await using var rig = await Rig.Start("entities", Elsewhere);
-        // The C# device's inputs: the eleven settings, with their bounds; the camera alone is required.
+        // The C# device's inputs: the thirteen settings, with their bounds; the camera alone is required.
         var signature = rig.Preview(new CustomNodeSource("c", "public class Porch : PeopleDetector { }", "csharp_device")).Snapshot.Custom["c"].Signature!;
         var settings = signature["settings"]!.AsArray().Select(s => s!.AsObject()).ToArray();
         string Shape(JsonObject s) => string.Join(",", new[] { "key", "label", "type", "domain", "minimum", "maximum", "required" }.Select(k => s[k]?.ToJsonString() ?? "-"));
@@ -450,6 +451,8 @@ static class PeopleDetectorTests
             "\"MatchScore\",\"Match score\",\"number\",-,0.3,0.9,-",
             "\"LearnNewLooks\",\"Learn new looks\",\"boolean\",-,-,-,-",
             "\"KeepUnknownFacesFor\",\"Keep unknown faces for\",\"integer\",-,1,365,-",
+            "\"BoxesOnTheCamera\",\"Boxes on the camera\",\"boolean\",-,-,-,-",
+            "\"FacePointsOnTheCamera\",\"Face points on the camera\",\"boolean\",-,-,-,-",
             "\"NamesOnTheCamera\",\"Names on the camera\",\"boolean\",-,-,-,-",
         ];
         Check(settings.Select(Shape).SequenceEqual(expected), "the device's inputs and their bounds: " + string.Join(" | ", settings.Select(Shape)));
@@ -478,7 +481,7 @@ static class PeopleDetectorTests
             {
                 public Probe()
                 {
-                    var lines = new List<string> { string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{CheckEvery}|{StayOnFor}|{FaceScore}|{PersonScore}|{DetectPeople}|{RecogniseFaces}|{MatchScore}|{LearnNewLooks}|{KeepUnknownFacesFor}|{NamesOnTheCamera}|{Manufacturer}|{Model}") };
+                    var lines = new List<string> { string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{CheckEvery}|{StayOnFor}|{FaceScore}|{PersonScore}|{DetectPeople}|{RecogniseFaces}|{MatchScore}|{LearnNewLooks}|{KeepUnknownFacesFor}|{BoxesOnTheCamera}|{FacePointsOnTheCamera}|{NamesOnTheCamera}|{Manufacturer}|{Model}") };
                     foreach (var e in Entities)
                         lines.Add($"{e.Key}|{e.Name}|{e.GetType().Name}|{e.DeviceClass}|{e.Icon}|{e.RestoreState}|{(e as SharpSensor)?.StateClass}");
                     AppContext.SetData("HassSharp.PeopleDetectorTests.Probe", string.Join("\n", lines));
@@ -490,7 +493,7 @@ static class PeopleDetectorTests
         var seen = AppContext.GetData(ProbeKey) as string ?? throw new Exception("the probe's constructor did not run: " + rig.Lines());
         string[] entities =
         [
-            "0.5|10|0.7|0.45|True|True|0.5|True|7|True|HassSharp|People detector",
+            "0.5|10|0.7|0.45|True|True|0.5|True|7|True|True|True|HassSharp|People detector",
             "camera||PeopleDetectorCamera|||False|",
             "face_seen|Face seen|SharpBinarySensor|occupancy||False|",
             "person_seen|Person seen|SharpBinarySensor|occupancy||False|",
@@ -501,7 +504,7 @@ static class PeopleDetectorTests
             "recognised|Recognised|SharpSensor||mdi:account-eye|False|",
         ];
         Check(seen.Split('\n').SequenceEqual(entities), "the defaults, the metadata and the entities in order:\n" + seen);
-        Console.WriteLine("PASS people detector: the libraries preview valid, the device's eleven inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its eight entities in order");
+        Console.WriteLine("PASS people detector: the libraries preview valid, the device's thirteen inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its eight entities in order");
     }
 
     static async Task UnsupportedPlatformFailsTheStart()
@@ -1138,6 +1141,71 @@ static class PeopleDetectorTests
         await Until(() => rig.Labels("porch").Contains("Ana H."), "with another Ana in the list, the porch's camera names her Ana H.: " + string.Join(", ", rig.Labels("porch")), 10);
         Check(rig.Labels("porch").Count(l => !IsScore(l)) == 1, "and names no one else: " + string.Join(", ", rig.Labels("porch")));
         Console.WriteLine("PASS people detector: the camera draws a recognised face's first name, with the last name's first letter when another person has it, and not a maybe's, and no name with Names on the camera off");
+    }
+
+    // Boxes on the camera and Face points on the camera reach the camera picture: by default both are drawn; each off
+    // leaves out its own; both off leave the frame with the names alone, or with nothing, and the picture is still shown.
+    static async Task TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked()
+    {
+        var spots = await Spots();
+        using var fake = new Fake(spots);
+        Show();
+        await using var rig = await Rig.Start("drawing");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        fake.Embeds(0, PeopleTests.At(PeopleTests.Unit(1), 0.8, 11));
+        // Porch has no value for either: their defaults.
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await rig.Saved("boxes", rig.Definition("Boxes people", "Boxes", Arguments(more: [("LearnNewLooks", false), ("FacePointsOnTheCamera", false)]), Faking("Boxes")));
+        await rig.Saved("points", rig.Definition("Points people", "Points", Arguments(more: [("LearnNewLooks", false), ("BoxesOnTheCamera", false), ("NamesOnTheCamera", false)]), Faking("Points")));
+        await rig.Saved("bare", rig.Definition("Bare people", "Bare", Arguments(more: [("LearnNewLooks", false), ("BoxesOnTheCamera", false), ("FacePointsOnTheCamera", false)]), Faking("Bare")));
+        await rig.Saved("blank", rig.Definition("Blank people", "Blank", Arguments(more: [("RecogniseFaces", false), ("BoxesOnTheCamera", false), ("FacePointsOnTheCamera", false)])));
+
+        // What each camera draws: its faces' boxes, its people's, its dots, its scores and its names.
+        var cyan = SharpColor.FromRgb(0, 200, 255);
+        string Summary(string definition)
+        {
+            var drawn = rig.Drawn(definition);
+            int Count(Func<(string Kind, string? Text, SharpColor Color), bool> which) => drawn.Count(which);
+            var names = drawn.Where(d => d.Kind == "Label" && !IsScore(d.Text!)).Select(d => d.Text);
+            return $"{Count(d => d.Kind == "Rectangle" && d.Color == SharpColor.Green)} faces, {Count(d => d.Kind == "Rectangle" && d.Color == cyan)} people, "
+                + $"{Count(d => d.Kind == "Circle")} dots, {Count(d => d.Kind == "Label" && IsScore(d.Text!))} scores, names {string.Join("+", names)}; {drawn.Length} in all";
+        }
+        var expected = new Dictionary<string, string>
+        {
+            ["porch"] = $"8 faces, 7 people, 40 dots, 14 scores, names {First(Ana)}; 70 in all",
+            ["boxes"] = $"8 faces, 7 people, 0 dots, 14 scores, names {First(Ana)}; 30 in all",
+            ["points"] = "0 faces, 0 people, 40 dots, 0 scores, names ; 40 in all",
+            ["bare"] = $"0 faces, 0 people, 0 dots, 0 scores, names {First(Ana)}; 1 in all",
+        };
+        string All() => string.Join(" | ", expected.Keys.Select(definition => $"{definition}: {Summary(definition)}"));
+        await Until(() => expected.All(pair => Summary(pair.Key) == pair.Value), "each camera draws what its options say: " + All(), 20);
+        // Read before a request below makes a picture's JPEG, after which its drawings are gone.
+        var summaries = All();
+
+        // Both off and no name: the frame itself is shown, with nothing drawn on it.
+        await Until(() => rig.Latest("faces", "blank")?.Number == 8, "the blank detector checks the group photo: " + rig.Shown("faces", definition: "blank"), 10);
+        Check(rig.Drawn("blank").Length == 0, "the blank camera draws nothing: " + Summary("blank"));
+        var frame = SharpImage.FromPixels(640, 426, SharpPixelFormat.Yuv420, Group).ToPixels();
+        int[] edges = [.. spots.SelectMany(spot =>
+        {
+            int x = (int)MathF.Round(spot.X), row = Math.Clamp((int)MathF.Round(spot.Y) + 1, 0, 425), w = (int)MathF.Round(spot.Width);
+            return Enumerable.Range(Math.Max(0, x + 2), Math.Max(0, Math.Min(640, x + w - 2) - Math.Max(0, x + 2))).Select(column => (row * 640 + column) * 3);
+        })];
+        async Task<byte[]> CameraPixels(string definition)
+        {
+            var picture = SharpImage.Load(await rig.Api.CameraImage($"{definition}:door:camera"));
+            Check(picture.Width == 640 && picture.Height == 426, $"{definition}'s camera shows the frame, 640 wide: {picture.Width} × {picture.Height}");
+            return picture.ToPixels();
+        }
+        var blank = await CameraPixels("blank");
+        var off = Enumerable.Range(0, frame.Length).Average(at => Math.Abs(blank[at] - frame[at]));
+        int green = edges.Count(at => VisionTests.Greenish(blank, at)), framed = edges.Count(at => VisionTests.Greenish(frame, at));
+        Check(off < 8 && green <= framed + edges.Length / 20, $"the blank camera shows the frame: {off:0.0} off on average, {green} of {edges.Length} top edge pixels green, {framed} in the frame");
+        var boxed = await CameraPixels("boxes");
+        var boxedGreen = edges.Count(at => VisionTests.Greenish(boxed, at));
+        Check(boxedGreen * 2 >= edges.Length, $"the boxes camera has its faces' top edges green: {boxedGreen} of {edges.Length}");
+        Console.WriteLine($"PASS people detector: the camera draws boxes and face points by default, each only with its option on, a name in every way, and with both off and no name shows the frame as it is ({summaries})");
     }
 
     static async Task ANewLookIsLearnedOnceAndOnlyWhenAllowed()
