@@ -107,8 +107,8 @@ The device (manufacturer HassSharp, model People detector) has eight entities, i
 **Stay on for** seconds have passed since the last check that found one. A check that finds none within that time
 leaves it on, so a frame without a face between two checks that find one does not turn it off. Person seen works the
 same way. While one stays on, its last seen is written at most once a minute; when it turns off, last seen is the
-time of the last check that found one. The last seen sensors keep their state across restarts; Recognised starts as
-`Nobody`, and the others start unknown.
+time of the last check that found one. The last seen sensors keep their state across restarts; Recognised starts
+unavailable ([below](#recognised)), and the others start unknown.
 
 The device opens the camera's live feed, at most 1280 pixels wide, when the definition starts, and checks it on its
 interval whether or not anyone watches the camera. Each check takes the newest frame, finds the faces at an input size
@@ -224,8 +224,11 @@ changes: not at every check. A rename on the page, on this detector or another, 
 merged away goes from the state and from `last_recognised`. It is unavailable with **Recognise faces** off, and while
 the face recognition model has not opened (it is still downloading, or failed to open and is tried again): a face no
 one could compare is never `Unknown`, so an automation for strangers does not fire for the family then. After a restart
-it is `Nobody` until a check says otherwise, and `last_recognised` and its time come back, from the detector's own
-stored data.
+it is unavailable until the model has opened and a check has looked with it, and then says what that check found:
+`Nobody`, unless someone is in frame. A camera that gives no frame after the start leaves it unavailable, as no check
+looks until one comes. `last_recognised` and its time come back, from the detector's own stored data. A change from
+unavailable is not a change from `Nobody`, so an automation that triggers on a change from `Nobody` does not fire for a
+restart.
 
 Two automations, for a detector whose Recognised is `sensor.front_door_recognised` (Home Assistant names it after the
 device, so **Front door people**'s is that). The first sends a notification when someone comes to the door; the second
@@ -258,9 +261,10 @@ turns on the hall light whenever Recognised changes while Ana Horvat is at the d
         entity_id: light.hall
 ```
 
-A state trigger without `to` fires at each change of the state or an attribute, so the second also fires when someone
-else arrives or leaves while Ana is there; turning on a light that is on does nothing. Do not let Recognised unlock,
-disarm or open anything (see [Trust and privacy](#trust-and-privacy)).
+A state trigger with neither `from` nor `to` fires at each change of the state or an attribute, so the second also fires
+when someone else arrives or leaves while Ana is there; turning on a light that is on does nothing. It fires too when
+Recognised becomes available after a restart, and its condition turns the light on then only if Ana is at the door. Do
+not let Recognised unlock, disarm or open anything (see [Trust and privacy](#trust-and-privacy)).
 
 ### The page
 

@@ -207,8 +207,8 @@ public class PeopleDetector : SharpDevice
     /// <summary>
     /// Opens the camera's live feed and checks its newest frame every <see cref="CheckEvery"/> seconds. With
     /// <see cref="RecogniseFaces"/> on, it opens the people list and the unknown groups first, and begins opening the
-    /// recogniser; Recognised is Nobody, with the last visit this detector kept, and unavailable until the recogniser
-    /// opens. With it off, Recognised is unavailable.
+    /// recogniser; Recognised has the last visit this detector kept, and is unavailable until a check finds the recogniser
+    /// open, then what that check found: Nobody, unless someone is in frame. With it off, Recognised is unavailable.
     /// </summary>
     protected sealed override Task Start()
     {
