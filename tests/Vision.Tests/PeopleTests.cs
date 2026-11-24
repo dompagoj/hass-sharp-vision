@@ -44,18 +44,18 @@ static class PeopleTests
         return new AssemblyLoadContext("people-tests").LoadFromStream(image);
     }
 
-    static Type Type(string name) => library.Value.GetType("NodeLib." + name, true)!;
+    internal static Type Type(string name) => library.Value.GetType("NodeLib." + name, true)!;
 
     static object? Invoke(MethodInfo method, object? target, params object?[] arguments) =>
         method.Invoke(target, BindingFlags.DoNotWrapExceptions, null, arguments, null);
 
-    static dynamic Embedding(float[] values, float fit = 1.5f) => Activator.CreateInstance(Type("FaceEmbedding"), values, fit)!;
+    internal static dynamic Embedding(float[] values, float fit = 1.5f) => Activator.CreateInstance(Type("FaceEmbedding"), values, fit)!;
 
-    static dynamic NewSample(float[] values, byte[] crop, DateTimeOffset at, string camera = Camera, float fit = 1.5f) =>
+    internal static dynamic NewSample(float[] values, byte[] crop, DateTimeOffset at, string camera = Camera, float fit = 1.5f) =>
         Activator.CreateInstance(Type("NewSample"), (object)Embedding(values, fit), crop, at, camera)!;
 
     /// <summary>An array of <c>NewSample</c>s, which a <c>PeopleList</c> takes as its <c>IEnumerable&lt;NewSample&gt;</c>.</summary>
-    static dynamic Samples(params object[] samples)
+    internal static dynamic Samples(params object[] samples)
     {
         var array = Array.CreateInstance(Type("NewSample"), samples.Length);
         for (var i = 0; i < samples.Length; i++) array.SetValue(samples[i], i);
@@ -78,7 +78,7 @@ static class PeopleTests
         return array;
     }
 
-    static dynamic DefaultRules => Type("RecognitionRules").GetProperty("Default")!.GetValue(null)!;
+    internal static dynamic DefaultRules => Type("RecognitionRules").GetProperty("Default")!.GetValue(null)!;
 
     static dynamic Rules(double matchScore, double matchMargin = 0.10, double suggestScore = 0.40) =>
         Activator.CreateInstance(Type("RecognitionRules"), matchScore, matchMargin, suggestScore, 0.60, 0.15, 16.0, 24.0, 7.0)!;
@@ -87,13 +87,13 @@ static class PeopleTests
         Invoke(Type("FaceMatcher").GetMethod("Match")!, null, (object)Embedding(face), people, rules ?? DefaultRules)!;
 
     /// <summary>A <c>PeopleList</c> over <paramref name="data"/>; <paramref name="changed"/> runs after it reloads for another's change.</summary>
-    static dynamic List(SharpData data, Func<Task>? changed = null) => Activator.CreateInstance(Type("PeopleList"), data, changed)!;
+    internal static dynamic List(SharpData data, Func<Task>? changed = null) => Activator.CreateInstance(Type("PeopleList"), data, changed)!;
 
     /// <summary>
     /// The items of a list of the compiled library's. Called with a dynamic value, as it always is here, it gives a dynamic
     /// one, so each call is cast back to <c>object[]</c>: a lambda cannot go into a call that is bound at run time.
     /// </summary>
-    static object[] Items(dynamic list) => ((IEnumerable<object>)list).ToArray();
+    internal static object[] Items(dynamic list) => ((IEnumerable<object>)list).ToArray();
 
     static dynamic Only(dynamic list, string name) => ((object[])Items(list.People)).Single(p => ((dynamic)p).Name == name);
 
@@ -126,7 +126,7 @@ static class PeopleTests
     // ---- Made-up embeddings and crops ----
 
     /// <summary>A unit vector of 128 values made from a seed.</summary>
-    static float[] Unit(int seed)
+    internal static float[] Unit(int seed)
     {
         var random = new Random(seed);
         var values = new double[128];
@@ -141,7 +141,7 @@ static class PeopleTests
     }
 
     /// <summary>A unit vector whose cosine to <paramref name="from"/>, a unit vector, is <paramref name="cosine"/>.</summary>
-    static float[] At(float[] from, double cosine, int seed)
+    internal static float[] At(float[] from, double cosine, int seed)
     {
         var other = Unit(seed);
         var along = other.Zip(from).Sum(pair => (double)pair.First * pair.Second);
@@ -150,13 +150,13 @@ static class PeopleTests
         return Normalised(from.Zip(across).Select(pair => cosine * pair.First + sine * pair.Second).ToArray());
     }
 
-    static double Cosine(float[] a, float[] b) => a.Zip(b).Sum(pair => pair.First * pair.Second);
+    internal static double Cosine(float[] a, float[] b) => a.Zip(b).Sum(pair => pair.First * pair.Second);
 
     // Each crop carries this marker, which no log line may.
     const string CropMarker = "crop-of-a-face-";
 
     /// <summary>The bytes of a made-up crop: a JPEG's first bytes, the marker and a number, then bytes from a seed.</summary>
-    static byte[] Crop(int seed, int length = 600)
+    internal static byte[] Crop(int seed, int length = 600)
     {
         var bytes = new byte[length];
         new Random(seed).NextBytes(bytes);
