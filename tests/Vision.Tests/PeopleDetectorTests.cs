@@ -91,6 +91,9 @@ static class PeopleDetectorTests
                 (nameof(APersonIsGivenToOneFaceOfACheck), APersonIsGivenToOneFaceOfACheck),
                 (nameof(TwoLookAlikesOfOneFrameAreNamedEachOnTheirOwnCard), TwoLookAlikesOfOneFrameAreNamedEachOnTheirOwnCard),
                 (nameof(AFaceAlikeToAPersonNeverSeenWithThemIsThatPerson), AFaceAlikeToAPersonNeverSeenWithThemIsThatPerson),
+                (nameof(ASaveDuringACheckIsNotUndoneByIt), ASaveDuringACheckIsNotUndoneByIt),
+                (nameof(ASaveOnAnotherDetectorDuringACheckIsNotUndoneByIt), ASaveOnAnotherDetectorDuringACheckIsNotUndoneByIt),
+                (nameof(PressesAndChecksOfTwoDetectorsNeverWaitOnEachOther), PressesAndChecksOfTwoDetectorsNeverWaitOnEachOther),
                 (nameof(GroupsOlderThanTheKeepTimeAreGoneAfterACheck), GroupsOlderThanTheKeepTimeAreGoneAfterACheck),
                 (nameof(ARecogniserThatThrowsFailsThatFaceOnly), ARecogniserThatThrowsFailsThatFaceOnly),
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
@@ -807,16 +810,49 @@ static class PeopleDetectorTests
             }
         }
 
+        /// <summary>
+        /// The next embedding of <paramref name="spot"/> (of any spot when null) by the class <paramref name="type"/> (by
+        /// any when null) blocks inside <c>Embed</c> until <see cref="Release"/>, or for 30 seconds at most. A hold held
+        /// already is released first.
+        /// </summary>
+        public void HoldAt(int? spot = null, string? type = null)
+        {
+            Release();
+            lock (gate) (hold, holdSpot, holdType, held) = (new ManualResetEventSlim(false), spot, type, false);
+        }
+
+        /// <summary>Whether an embedding is blocked inside <c>Embed</c> by <see cref="HoldAt"/> now.</summary>
+        public bool Held { get { lock (gate) return held; } }
+
+        /// <summary>Lets the embedding held go on, and holds no other.</summary>
+        public void Release()
+        {
+            ManualResetEventSlim? releasing;
+            lock (gate) (releasing, hold, held) = (hold, null, false);
+            releasing?.Set();
+        }
+
+        ManualResetEventSlim? hold;
+        int? holdSpot;
+        string? holdType;
+        bool held;
+
         float[] Embed(string type, float[] box)
         {
             var (x, y, width, height) = (box[0], box[1], box[2], box[3]);
             var spot = Enumerable.Range(0, spots.Length)
                 .MinBy(i => MathF.Abs(spots[i].X + spots[i].Width / 2 - (x + width / 2)) + MathF.Abs(spots[i].Y + spots[i].Height / 2 - (y + height / 2)));
             (float[] Values, float Fit) row;
+            ManualResetEventSlim? waiting = null;
             lock (gate)
             {
                 embedded.Add((type, spot));
                 if (opened.GetValueOrDefault(type) == closed.GetValueOrDefault(type)) usedClosed++;
+                if (hold != null && !held && (holdSpot == null || holdSpot == spot) && (holdType == null || holdType == type)) (waiting, held) = (hold, true);
+            }
+            waiting?.Wait(TimeSpan.FromSeconds(30));
+            lock (gate)
+            {
                 if (failing.Contains(spot)) throw new InvalidOperationException("The fake recogniser failed");
                 row = table.TryGetValue(spot, out var given) ? given : (PeopleTests.Unit(1000 + spot), 1.5f);
             }
@@ -825,6 +861,7 @@ static class PeopleDetectorTests
 
         public void Dispose()
         {
+            Release();
             foreach (var hook in new[] { "Open", "Embed", "Dispose" }) AppContext.SetData(Hooks + hook, null);
         }
     }
@@ -1152,6 +1189,169 @@ static class PeopleDetectorTests
         Check(rig.Labels().Count(label => label == Ivan) == 1, "still named Ivan: " + string.Join(", ", rig.Labels()));
         NoNameIsLogged(rig);
         Console.WriteLine("PASS people detector: a face 0.55 alike to a person, never seen in a frame with them, is recognised as them");
+    }
+
+    /// <summary>Every group of a running detector's <c>Unknown</c>, shown or not, as the internal <c>All</c> gives them.</summary>
+    static dynamic[] AllGroups(dynamic unknown)
+    {
+        object target = unknown;
+        var all = target.GetType().GetProperty("All", BindingFlags.Instance | BindingFlags.NonPublic) ?? throw new Exception("FaceGroups has no All");
+        return [.. ((IEnumerable<object>)all.GetValue(target)!).Select(group => (dynamic)group)];
+    }
+
+    /// <summary>Whether a group of <paramref name="unknown"/> has a sample of the face.</summary>
+    static bool HoldsFace(dynamic unknown, dynamic group, float[] face) =>
+        VisionTests.Items((object)unknown.Samples((string)group.Id)).Any(sample => PeopleTests.Cosine((float[])((dynamic)sample).Embedding.Values, face) > 0.999);
+
+    /// <summary>
+    /// The look-alikes of <see cref="TwoLookAlikesOfOneFrameAreNamedEachOnTheirOwnCard"/>: A at the largest face embedded,
+    /// B 0.55 alike to A at the smallest, and the two faces between fitting too badly to be compared.
+    /// </summary>
+    static (int First, int Last, float[] A, float[] B) LookAlikes(Spot[] spots, Fake fake)
+    {
+        int[] chosen = [.. Enumerable.Range(0, spots.Length).Where(i => spots[i].Usable).Take(4)];
+        Check(chosen.Length == 4, "four faces are embedded in each check");
+        var a = PeopleTests.Unit(41);
+        var b = PeopleTests.At(a, 0.55, 42);
+        fake.Embeds(chosen[0], a);
+        fake.Embeds(chosen[3], b);
+        fake.Embeds(chosen[1], PeopleTests.Unit(43), fit: 9);
+        fake.Embeds(chosen[2], PeopleTests.Unit(44), fit: 9);
+        return (chosen[0], chosen[3], a, b);
+    }
+
+    // As the controller's run saw it on group.jpg: a check took the people list before embedding its faces, the page's
+    // Save of A's card landed meanwhile, and the check then noted A's face against the list without her: it joined B's
+    // group, which the Save had just marked as not her, and B's face started a fourth card. The check is held inside
+    // Embed while the Save runs.
+    static async Task ASaveDuringACheckIsNotUndoneByIt()
+    {
+        var spots = await Spots();
+        using var fake = new Fake(spots);
+        var (first, _, a, b) = LookAlikes(spots, fake);
+        Show();
+        await using var rig = await Rig.Start("save-in-check");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 2, "two faces, two cards: " + Shown(rig).Length, 10);
+        var unknown = Member(rig.Detector(), "Unknown");
+        string oneId = Shown(rig).Single(group => HoldsFace(unknown, group, a)).Id;
+        string otherId = Shown(rig).Single(group => HoldsFace(unknown, group, b)).Id;
+
+        fake.HoldAt(first);
+        await Until(() => fake.Held, "a check is held inside Embed", 10);
+        var seen = (int)unknown.Find(otherId).Sightings;
+        var press = Press(rig, "unknown", oneId, "save", new { name = Ana });
+        Check(await Task.WhenAny(press, Task.Delay(TimeSpan.FromSeconds(10))) == press && await press == "done", "the Save runs while the check is held");
+        var from = fake.Embedded("Porch").Length;
+        fake.Release();
+        await Until(() => fake.Embedded("Porch").Length >= from + 2 * 4, "the held check and one more", 10);
+
+        var other = unknown.Find(otherId);
+        Check(other != null && !HoldsFace(unknown, other, a), "B's group has no sample of A's face");
+        Check((int)other!.Sightings > seen, "and has taken B's sightings");
+        var groups = ((dynamic[])AllGroups(unknown));
+        Check(groups.Length == 1 && CardsOf(Page(rig), "unknown").Length == 1, "it is the only group, and the only card: " + string.Join(", ", groups));
+        Check(rig.Labels().Where(label => !IsScore(label)).SequenceEqual([Ana]), "A is named Ana: " + string.Join(", ", rig.Labels()));
+        // In the running detector's own types, which are not those PeopleTests compiles.
+        object everyone = Member(rig.Detector(), "People").People;
+        var library = ((object)unknown).GetType().Assembly;
+        var embedding = Activator.CreateInstance(library.GetType("NodeLib.FaceEmbedding", true)!, a, 1.5f)!;
+        var rules = library.GetType("NodeLib.RecognitionRules", true)!.GetProperty("Default")!.GetValue(null)!;
+        var match = library.GetType("NodeLib.FaceMatcher", true)!.GetMethod("Match")!.Invoke(null, [embedding, everyone, rules])!;
+        Check(((dynamic)match).Person?.Name == Ana && !(bool)unknown.KnownNotToBe((dynamic)embedding, (dynamic)match), "no group takes A's face from Ana");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a Save on the page while a check is embedding its faces is not undone by that check: the named face is recognised, and the look-alike's card keeps his face alone");
+    }
+
+    // The same with the change made by another detector on the shared store: it lands while this detector's check is held
+    // inside Embed, and this detector's list has read it before the check goes on.
+    static async Task ASaveOnAnotherDetectorDuringACheckIsNotUndoneByIt()
+    {
+        var spots = await Spots();
+        using var fake = new Fake(spots);
+        var (first, _, a, _) = LookAlikes(spots, fake);
+        Source("camera.hall", Porch());
+        Show();
+        await using var rig = await Rig.Start("save-elsewhere");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await rig.Saved("hall", rig.Definition("Hall people", "Hall", Arguments("camera.hall", ("LearnNewLooks", false)), Faking("Hall")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 2 && CardsOf(Page(rig, "hall"), "unknown").Length == 2, "two cards on each page", 10);
+        var unknown = Member(rig.Detector(), "Unknown");
+        var hall = Member(rig.Detector("hall"), "Unknown");
+        string hallOne = VisionTests.Items((object)hall.Shown).Select(group => (dynamic)group).Single(group => HoldsFace(hall, group, a)).Id;
+
+        fake.HoldAt(first, "Porch");
+        await Until(() => fake.Held, "the porch's check is held inside Embed", 10);
+        Check(await Press(rig, "unknown", hallOne, "save", new { name = Ana }, "hall") == "done", "Save of A's card on the hall's page");
+        // The hall stopped, so that no later write of its (Ana's last seen) has the porch match its groups again after
+        // the held check.
+        await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "hall", enabled = false });
+        await Until(() => rig.Home.Logs(PyLogLevel.Debug).Contains("Hall people: People detector stopped"), "the hall stops");
+        var porchPeople = Member(rig.Detector(), "People");
+        await Until(() => VisionTests.Items((object)porchPeople.People).Any(person => ((dynamic)person).Name == Ana), "the porch's list has Ana", 10);
+        var from = fake.Embedded("Porch").Length;
+        fake.Release();
+        await Until(() => fake.Embedded("Porch").Length >= from + 2 * 4, "the held check and one more", 10);
+
+        var holding = ((dynamic[])AllGroups(unknown)).Where(group => HoldsFace(unknown, group, a)).ToArray();
+        Check(holding.Length == 0, "no group of the porch's holds A's face: " + string.Join(", ", holding));
+        Check(rig.Labels().Contains(Ana), "the porch names A Ana: " + string.Join(", ", rig.Labels()));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a Save on another detector's page while this one's check is embedding is not undone by the check: the named face goes to no group of this one's");
+    }
+
+    // A press never waits on a check, and no lock of one detector is held while another's is waited for: two detectors on
+    // one store check without a pause, an embedding of one or the other held now and then, while the pages are pressed.
+    static async Task PressesAndChecksOfTwoDetectorsNeverWaitOnEachOther()
+    {
+        using var fake = new Fake(await Spots());
+        Source("camera.hall", Porch());
+        Show();
+        await using var rig = await Rig.Start("presses");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await rig.Saved("hall", rig.Definition("Hall people", "Hall", Arguments("camera.hall", ("LearnNewLooks", false)), Faking("Hall")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length > 0 && CardsOf(Page(rig, "hall"), "unknown").Length > 0, "cards on both pages", 10);
+        var random = new Random(4242);
+        string[] names = [Ana, Ivan, Mia, Ivo];
+        var (pressed, done) = (0, 0);
+        for (var round = 0; round < 60; round++)
+        {
+            var definition = round % 2 == 0 ? "porch" : "hall";
+            if (random.Next(3) == 0) fake.Release();
+            else if (!fake.Held) fake.HoldAt(type: random.Next(2) == 0 ? "Porch" : "Hall");
+            var page = Page(rig, definition);
+            var (cards, people) = (CardsOf(page, "unknown"), CardsOf(page, "people"));
+            Task<string>? press = random.Next(3) switch
+            {
+                0 when people.Length >= 2 => Press(rig, "people", (string)people[0]["id"]!, "merge", new { name = Title(people[0]), into = Title(people[1]) }, definition),
+                1 when people.Length > 0 => Press(rig, "people", (string)people[random.Next(people.Length)]["id"]!, "delete", new { }, definition),
+                _ when cards.Length > 0 => Press(rig, "unknown", (string)cards[random.Next(cards.Length)]["id"]!, "save", new { name = names[random.Next(names.Length)] }, definition),
+                _ => null,
+            };
+            if (press != null)
+            {
+                pressed++;
+                Check(await Task.WhenAny(press, Task.Delay(TimeSpan.FromSeconds(10))) == press, $"press {pressed} completes within 10 s");
+                if (await press == "done") done++;
+            }
+            // Paced by the checks, so that faces come back as cards: one more face embedded by either.
+            var embedded = fake.Embedded().Length;
+            await Until(() => fake.Embedded().Length > embedded, "the checks go on", 10);
+        }
+        fake.Release();
+        var (porch, hall) = (fake.Embedded("Porch").Length, fake.Embedded("Hall").Length);
+        await Until(() => fake.Embedded("Porch").Length >= porch + 8 && fake.Embedded("Hall").Length >= hall + 8, "both detectors still check", 10);
+        var list = PeopleOf(rig);
+        string Ids(object people) => string.Join(",", VisionTests.Items(people).Select(person => (string)((dynamic)person).Id).Order(StringComparer.Ordinal));
+        await Until(() =>
+        {
+            list.Reload();
+            var stored = Ids((object)list.People);
+            return Ids((object)Member(rig.Detector(), "People").People) == stored && Ids((object)Member(rig.Detector("hall"), "People").People) == stored;
+        }, "both detectors' lists agree with the store", 10);
+        Check(done >= 20, $"most presses were done: {done} of {pressed}");
+        NoNameIsLogged(rig);
+        Console.WriteLine($"PASS people detector: {pressed} presses of Save, Merge and Delete on two detectors' pages, with their checks held and let go now and then, each complete, and the lists agree");
     }
 
     // As seen live: a learned sample removed on the page, while the same face stays in view, was learned again at the

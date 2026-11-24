@@ -73,6 +73,21 @@ public class PeopleDetector : SharpDevice
     // Only the checks use these, one at a time.
     DateTimeOffset expireNext, failureLogged = DateTimeOffset.MinValue;
 
+    // Held while the people list and the unknown groups are used together: a check's matching and noting of its faces
+    // (not its embedding), each press that changes the list or the groups, and the matching again after another's change
+    // of the list. So a check never matches or notes a face against a list older than the one the groups were last
+    // matched against, nor in the middle of a press. Guards matchedAgainst. It is never held across an await, nor while
+    // waiting for a frame, embedding a face or logging (a log line goes to Python), and the page is drawn outside it
+    // (Closed takes page inside it; nothing takes it inside page).
+    // Two detectors on one store cannot wait on each other's: a write to a store holds only the store's own lock, and the
+    // other users' Changed actions are queued (Task.Run) after that lock is let go, so a detector writing the shared store
+    // under this lock never runs, or waits for, another detector's code; nor does the people list hold its lock across a
+    // store call or its callback.
+    readonly Lock lists = new();
+    // The people list the groups were last matched against: a check that finds another (a change whose ListsChanged has
+    // not run yet, or a write of its own) matches them again first.
+    IReadOnlyList<Person>? matchedAgainst;
+
     // Guards the page: each draw hands its lists to Ui under it; and samplesOf, drawnGroups and drawnTicket. Drawing runs
     // from the checks, the minute's timer, the handlers and the people list's Changed, which can run at the same time.
     readonly Lock page = new();
@@ -181,7 +196,7 @@ public class PeopleDetector : SharpDevice
             Unknown = new FaceGroups(Data, cameraId, rules);
             People = new PeopleList(Shared(PeopleList.StoreName), ListsChanged);
             // The list may have changed while this detector was off, and the match score with the settings.
-            Unknown.Rematch(People.People, rules);
+            lock (lists) Rematch(People.People);
             Draw();
             Every(RedrawEvery, Refresh, immediately: false);
             BeginOpening(DateTimeOffset.UtcNow);
@@ -207,14 +222,22 @@ public class PeopleDetector : SharpDevice
     }
 
     // The people list changed on another detector: the unknown groups are matched against it again, and the page drawn.
+    // It runs queued, never inside the other's write (see lists), so it may wait for the lock.
     Task ListsChanged()
     {
         // Another detector wrote while Start() was still making the list, before People was set: Start() matches and
         // draws right after.
         if (People == null) return Task.CompletedTask;
-        Unknown.Rematch(People.People, rules);
+        lock (lists) Rematch(People.People);
         Draw();
         return Task.CompletedTask;
+    }
+
+    // Under lists: the groups matched against the people list, which they are then in line with.
+    void Rematch(IReadOnlyList<Person> everyone)
+    {
+        Unknown.Rematch(everyone, rules);
+        matchedAgainst = everyone;
     }
 
     // ---- The recogniser ----
@@ -312,7 +335,9 @@ public class PeopleDetector : SharpDevice
     }
 
     // Recognises the usable faces of a frame, the largest first and at most MostEmbedded, and expires the unknown groups
-    // when that is due. Gives each face's name, in the order of found: a recognised face's person's, null for the others.
+    // when that is due. The faces are embedded first, outside lists; then, under it, matched against the people list as
+    // it is now, with the groups in line with it, and noted. Gives each face's name, in the order of found: a recognised
+    // face's person's, null for the others.
     // A face the matcher gives to a person, but that belongs to an unknown group known not to be them, is not theirs
     // (FaceGroups.KnownNotToBe: the matcher itself knows nothing of the groups). Two faces of one frame are two people,
     // so a person is given to one face of the check, the best match; another face matched to them goes to the unknown
@@ -323,63 +348,79 @@ public class PeopleDetector : SharpDevice
         var names = new string?[found.Count];
         if (Recognizer(now) is { } recognizer && found.Count > 0)
         {
-            // One snapshot for the check: Learns reads it, which has no sample learned in this check.
-            var everyone = People.People;
             var chosen = Enumerable.Range(0, found.Count)
                 .Where(index => Usable(found[index]))
                 .OrderByDescending(index => Vision.EyeDistance(found[index]))
                 .Take(MostEmbedded)
                 .ToList();
-            // Every face matched first, then each noted, the largest first.
-            var matched = new List<Matched>();
+            // Every face embedded first, then matched, then each noted, the largest first.
+            var embedded = new List<(int Index, FaceEmbedding Embedding)>();
             foreach (var index in chosen)
             {
                 try
                 {
-                    if (Match(recognizer, frame, index, found[index], everyone) is { } face) matched.Add(face);
+                    if (Embed(recognizer, frame, found[index]) is { } embedding) embedded.Add((index, embedding));
                 }
                 catch (Exception e) when (!Stopping.IsCancellationRequested) { Failed(e, now); }
             }
-            var elsewhere = matched.Where(face => Unknown.KnownNotToBe(face.Embedding, face.Match)).Select(face => face.Index).ToHashSet();
-            var given = matched.Where(face => face.Match.Kind == MatchKind.Recognised && face.Match.Person != null && !elsewhere.Contains(face.Index))
-                .GroupBy(face => face.Match.Person!.Id, StringComparer.Ordinal)
-                .Select(faces => faces.MaxBy(face => face.Match.Score)!)
-                .ToList();
-            var recognised = given.Select(face => face.Match.Person!.Id).ToList();
-            var named = given.Select(face => face.Index).ToHashSet();
-            foreach (var face in matched)
-            {
-                try
-                {
-                    if (named.Contains(face.Index)) names[face.Index] = Note(frame, face, now);
-                    else
-                    {
-                        // A maybe suggests its person, unless the face is known not to be them.
-                        var suggested = face.Match is { Kind: MatchKind.Maybe, Person: { } maybe } && !elsewhere.Contains(face.Index) ? maybe.Id : null;
-                        Unknown.Seen(face.Embedding, () => Crop(frame, face.Face), face.Eyes, now, suggested, recognised);
-                    }
-                }
-                catch (Exception e) when (!Stopping.IsCancellationRequested) { Failed(e, now); }
-            }
+            List<Exception> failures;
+            lock (lists) failures = MatchAndNote(frame, found, embedded, names, now);
+            // Logged outside the lock: a log line goes to Python.
+            foreach (var failure in failures) Failed(failure, now);
         }
         if (now >= expireNext)
         {
             expireNext = now + ExpireEvery;
-            Unknown.Expire(now, TimeSpan.FromDays(KeepUnknownFacesFor));
+            lock (lists) Unknown.Expire(now, TimeSpan.FromDays(KeepUnknownFacesFor));
         }
         return names;
+    }
+
+    // Under lists: matches a check's embedded faces against the people list as it is now, with the groups brought in line
+    // with it first when it changed since they were last matched, and notes each, setting the names of those recognised.
+    // Gives the failures of the faces that could not be noted, for the caller to log.
+    List<Exception> MatchAndNote(SharpImage frame, IReadOnlyList<DetectedFace> found, List<(int Index, FaceEmbedding Embedding)> embedded, string?[] names, DateTimeOffset now)
+    {
+        var failures = new List<Exception>();
+        var everyone = People.People;
+        if (!ReferenceEquals(everyone, matchedAgainst)) Rematch(everyone);
+        // One snapshot for the check: Learns reads it, which has no sample learned in this check.
+        var matched = embedded
+            .Select(face => new Matched(face.Index, found[face.Index], face.Embedding, Vision.EyeDistance(found[face.Index]), FaceMatcher.Match(face.Embedding, everyone, rules)))
+            .ToList();
+        var elsewhere = matched.Where(face => Unknown.KnownNotToBe(face.Embedding, face.Match)).Select(face => face.Index).ToHashSet();
+        var given = matched.Where(face => face.Match.Kind == MatchKind.Recognised && face.Match.Person != null && !elsewhere.Contains(face.Index))
+            .GroupBy(face => face.Match.Person!.Id, StringComparer.Ordinal)
+            .Select(faces => faces.MaxBy(face => face.Match.Score)!)
+            .ToList();
+        var recognised = given.Select(face => face.Match.Person!.Id).ToList();
+        var named = given.Select(face => face.Index).ToHashSet();
+        foreach (var face in matched)
+        {
+            try
+            {
+                if (named.Contains(face.Index)) names[face.Index] = Note(frame, face, now);
+                else
+                {
+                    // A maybe suggests its person, unless the face is known not to be them.
+                    var suggested = face.Match is { Kind: MatchKind.Maybe, Person: { } maybe } && !elsewhere.Contains(face.Index) ? maybe.Id : null;
+                    Unknown.Seen(face.Embedding, () => Crop(frame, face.Face), face.Eyes, now, suggested, recognised);
+                }
+            }
+            catch (Exception e) when (!Stopping.IsCancellationRequested) { failures.Add(e); }
+        }
+        return failures;
     }
 
     // A face clear enough to embed: large enough, and looking towards the camera.
     bool Usable(DetectedFace face) => Vision.EyeDistance(face) >= rules.UsableEyes && Vision.Frontal(face);
 
-    // A face embedded and matched against the people list; null when it fits too badly to be compared at all.
-    Matched? Match(IFaceRecognizer recognizer, SharpImage frame, int index, DetectedFace face, IReadOnlyList<Person> everyone)
+    // A face embedded; null when it fits too badly to be compared at all.
+    FaceEmbedding? Embed(IFaceRecognizer recognizer, SharpImage frame, DetectedFace face)
     {
         var embedding = recognizer.Embed(frame, face);
         // Too far from where an aligned face has its landmarks to be compared at all.
-        if (!(embedding.Fit <= rules.FitLimit)) return null;
-        return new Matched(index, face, embedding, Vision.EyeDistance(face), FaceMatcher.Match(embedding, everyone, rules));
+        return embedding.Fit <= rules.FitLimit ? embedding : null;
     }
 
     // A recognised face, noted as a sighting of its person, and learned when it meets the rules. Gives its person's name.
@@ -617,21 +658,30 @@ public class PeopleDetector : SharpDevice
     // Names a group: its samples go to the person of that name, or to a new person, first, and the group after, so that a
     // group an interruption leaves behind matches its person at the next start and goes. The groups apart from it are
     // known not to be that person.
+    // The person is written before the group goes, and not the other way: a stop between the two leaves the group, which
+    // matches the person at the next start and goes, rather than a group gone with no person made of it. The lock makes
+    // no order better: a stop ends the process whatever it holds.
     void SaveFace(string groupId, string name)
     {
-        if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
-        var samples = Unknown.Samples(groupId);
-        if (samples.Count == 0) throw new UiRefusal(NoPicture);
-        var person = People.Named(name) is { } named ? People.AddSamples(named.Id, samples, learned: false) : People.Add(name, samples);
-        Unknown.Named(groupId, person.Id);
-        // Other groups of the same face are now recognised, and go too.
-        Unknown.Rematch(People.People, rules);
+        lock (lists)
+        {
+            if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
+            var samples = Unknown.Samples(groupId);
+            if (samples.Count == 0) throw new UiRefusal(NoPicture);
+            var person = People.Named(name) is { } named ? People.AddSamples(named.Id, samples, learned: false) : People.Add(name, samples);
+            Unknown.Named(groupId, person.Id);
+            // Other groups of the same face are now recognised, and go too.
+            Rematch(People.People);
+        }
     }
 
     void DismissFace(string groupId)
     {
-        if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
-        Unknown.Remove(groupId);
+        lock (lists)
+        {
+            if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
+            Unknown.Remove(groupId);
+        }
     }
 
     void Rename(string personId, string name)
@@ -642,13 +692,16 @@ public class PeopleDetector : SharpDevice
 
     void Merge(string personId, string into)
     {
-        Known(personId);
-        var target = People.Named(into) ?? throw new UiRefusal(PersonGone);
-        People.Merge(personId, target.Id);
-        Closed(personId);
-        // Here only: another detector's groups see the person gone, and drop them.
-        Unknown.Merged(personId, target.Id);
-        Unknown.Rematch(People.People, rules);
+        lock (lists)
+        {
+            Known(personId);
+            var target = People.Named(into) ?? throw new UiRefusal(PersonGone);
+            People.Merge(personId, target.Id);
+            Closed(personId);
+            // Here only: another detector's groups see the person gone, and drop them.
+            Unknown.Merged(personId, target.Id);
+            Rematch(People.People);
+        }
     }
 
     void OpenSamples(string personId)
@@ -664,18 +717,24 @@ public class PeopleDetector : SharpDevice
 
     void Delete(string personId)
     {
-        Known(personId);
-        People.Delete(personId);
-        Closed(personId);
-        Unknown.Rematch(People.People, rules);
+        lock (lists)
+        {
+            Known(personId);
+            People.Delete(personId);
+            Closed(personId);
+            Rematch(People.People);
+        }
     }
 
     void RemoveSample(string personId, string sampleId)
     {
-        var person = Known(personId);
-        if (!person.Samples.Any(sample => sample.Id == sampleId)) throw new UiRefusal(SampleGone);
-        People.RemoveSample(personId, sampleId);
-        Unknown.Rematch(People.People, rules);
+        lock (lists)
+        {
+            var person = Known(personId);
+            if (!person.Samples.Any(sample => sample.Id == sampleId)) throw new UiRefusal(SampleGone);
+            People.RemoveSample(personId, sampleId);
+            Rematch(People.People);
+        }
     }
 
     // The person, as the people list has them now.

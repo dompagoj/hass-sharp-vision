@@ -84,7 +84,7 @@ static class PeopleTests
     static dynamic Rules(double matchScore, double matchMargin = 0.10, double suggestScore = 0.40) =>
         Activator.CreateInstance(Type("RecognitionRules"), matchScore, matchMargin, suggestScore, 0.60, 0.15, 16.0, 24.0, 7.0)!;
 
-    static dynamic Match(float[] face, object people, object? rules = null) =>
+    internal static dynamic Match(float[] face, object people, object? rules = null) =>
         Invoke(Type("FaceMatcher").GetMethod("Match")!, null, (object)Embedding(face), people, rules ?? DefaultRules)!;
 
     /// <summary>A <c>PeopleList</c> over <paramref name="data"/>; <paramref name="changed"/> runs after it reloads for another's change.</summary>
