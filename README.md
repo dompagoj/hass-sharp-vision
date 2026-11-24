@@ -154,12 +154,24 @@ uploaded photos. It is not a lock (see [Trust and privacy](#trust-and-privacy)).
 A face is recognised only when it is clear enough:
 
 - it is at least 16 pixels between the eyes, in the frame as the device checks it;
-- it looks towards the camera: its eyes are at least a fifth of its box's width apart and its nose is between them, so
-  a profile is not used;
-- its five points (eyes, nose tip, mouth corners) line up with a face's: one that fits badly is not used.
+- it is not turned too far from the camera: its eyes are at least a fifth of its box's width apart, and its nose tip is
+  either between them across the picture or, along the line between the eyes, no further from their midpoint than
+  0.55 of the distance between them (0.5 is the nose tip in line with an eye). So a face turned partly away is used,
+  and so is a tilted head, measured along its own eyes; a profile is not;
+- its five points (eyes, nose tip, mouth corners) line up with a face's: one that fits badly is not used. The further a
+  face is turned, the worse it fits: on the calibration's photos a third of the faces turned 0.50 to 0.55 fit too badly,
+  and every one turned more than 0.60.
 
 At most four faces are recognised in a check, the largest first. Every other face still counts for Face seen and Faces,
 and is drawn with its score (with **Boxes on the camera** on).
+
+A face whose nose tip is beside its eyes (a turned face) is matched as any other, with one difference: when it is only
+suggested ([below](#matching)), it is taken for that person seen from further aside than their samples, and goes
+nowhere. It is not recognised, and does not go to the unknown faces or count as one, unless it belongs to an unknown
+group known not to be that person ([Unknown faces](#unknown-faces)), whose face it is then. A turned face that matches
+no one is an unknown face like any other, so a stranger who does not look into the camera still counts. A known person
+turned further than their samples reach can match no one too: their face then becomes an unknown card of its own, and
+counts in `unknown_faces`, until you name it for them, which gives them that look as a sample.
 
 ### Matching
 
@@ -170,7 +182,7 @@ score** at its default, 0.50:
 - **Recognised:** the best person's score is at least 0.50 and beats the next person's by at least 0.10. The person's
   last seen (when, and at which camera) is written, at most once a minute, and their name is drawn above the face.
 - **Suggested:** the best score is at least 0.40, but the face is not recognised. It goes to the unknown faces, with
-  that person chosen for you to confirm.
+  that person chosen for you to confirm; a turned face goes nowhere ([above](#which-faces-are-used)).
 - **Unknown:** anything else. It goes to the unknown faces.
 
 **Match score** moves the other two lines with it: the line for suggesting a name is a tenth under it, and the line for
@@ -207,9 +219,9 @@ keeps up to 5 samples, the larger faces and the ones unlike those it has, and co
   the last check that did, as Face seen is on: a name stays while the person looks away, and goes that long after they
   were last recognised. A check that fails does not end it sooner.
 - A face counts as not anyone's when it was compared with the people list and given to no one: no one matched, it was
-  only suggested, or it was a second face of someone recognised in the same frame. A face that was not compared (too
-  small, turned away, fitting badly, or beyond the four largest) does not count, so a face in a crowd or a profile does
-  not make Recognised `Unknown`.
+  only suggested (unless it was turned), or it was a second face of someone recognised in the same frame. A face that
+  was not compared (too small, turned too far, fitting badly, or beyond the four largest) does not count, and neither
+  does a turned face only suggested, so a face in a crowd or a profile does not make Recognised `Unknown`.
 
 Its attributes:
 
@@ -368,6 +380,12 @@ before recognition is tried.
 People who look alike, relatives above all, score closer than the calibration's strangers: in this repository's own
 test photo, two different men score 0.52 to 0.56 at about 18 pixels between the eyes, above the default **Match
 score**.
+
+Turned faces were measured on the same photos: up to the limit of 0.55 they matched their own person as often as
+frontal faces did, and strangers' as seldom, but LFW has few of them (78 turned 0.45 to 0.55 that fit) and only four
+turned further that fit, too few to say how a face turned further does. Two strangers turned alike
+are a little more alike than two frontal ones, so a person named from a turned card is likelier to be suggested for a
+stranger turned the same way.
 
 Faces, their crops, their embeddings and the names you give them are biometric and personal data:
 

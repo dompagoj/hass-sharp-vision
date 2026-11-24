@@ -85,6 +85,8 @@ static class PeopleDetectorTests
                 (nameof(AFaceThatIsNotUsableIsNeverMatched), AFaceThatIsNotUsableIsNeverMatched),
                 (nameof(AtMostFourFacesAreEmbeddedTheLargestFirst), AtMostFourFacesAreEmbeddedTheLargestFirst),
                 (nameof(FacesAreRecognisedSuggestedOrGrouped), FacesAreRecognisedSuggestedOrGrouped),
+                (nameof(ATurnedFaceIsComparedAsAFrontalOneIsButForAMaybe), ATurnedFaceIsComparedAsAFrontalOneIsButForAMaybe),
+                (nameof(ATurnedMaybeAGroupIsAlikeToIsThatGroups), ATurnedMaybeAGroupIsAlikeToIsThatGroups),
                 (nameof(TheCameraShowsTheRecognisedName), TheCameraShowsTheRecognisedName),
                 (nameof(TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked), TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked),
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
@@ -743,13 +745,19 @@ static class PeopleDetectorTests
 
     // ---- Recognition, with a fake recogniser ----
 
-    /// <summary>A face the detector finds on the group photo's frame: its box, the pixels between its eyes and whether it looks at the camera.</summary>
-    internal sealed record Spot(float X, float Y, float Width, float Height, float Eyes, bool Frontal)
+    /// <summary>
+    /// A face the detector finds on the group photo's frame: its box, the pixels between its eyes, whether it looks at the
+    /// camera by the frontal rule, and how far it is turned.
+    /// </summary>
+    internal sealed record Spot(float X, float Y, float Width, float Height, float Eyes, bool Frontal, float Turn)
     {
-        /// <summary>Clear enough to embed by the default rules.</summary>
-        public bool Usable => Eyes >= (double)PeopleTests.DefaultRules.UsableEyes && Frontal;
-        public override string ToString() => string.Create(CultureInfo.InvariantCulture, $"({X:0},{Y:0}) {Width:0}×{Height:0}, eyes {Eyes:0.0}{(Frontal ? "" : ", profile")}");
+        /// <summary>Clear enough to embed by the default rules: large enough, and frontal or turned no further than the limit with its eyes a fifth of its box apart.</summary>
+        public bool Usable => Eyes >= (double)PeopleTests.DefaultRules.UsableEyes && (Frontal || Turn <= TurnLimit && Eyes >= Width / 5);
+        public override string ToString() => string.Create(CultureInfo.InvariantCulture, $"({X:0},{Y:0}) {Width:0}×{Height:0}, eyes {Eyes:0.0}, turned {Turn:0.00}{(Frontal ? "" : ", not frontal")}");
     }
+
+    /// <summary>The default rules' turn limit: the furthest a face the frontal rule turns away may be turned to be compared.</summary>
+    static double TurnLimit => (double)PeopleTests.DefaultRules.TurnLimit;
 
     static Spot[]? spots;
 
@@ -762,7 +770,7 @@ static class PeopleDetectorTests
         var found = VisionTests.Items(VisionTests.Loaded.Faces(detection.Detector, frame, 640, 0.7));
         Check(found.Length == 8, $"group.jpg's frame has 8 faces at 640, not {found.Length}");
         return spots = [.. found
-            .Select(face => new Spot(VisionTests.Get(face, "X"), VisionTests.Get(face, "Y"), VisionTests.Get(face, "Width"), VisionTests.Get(face, "Height"), detection.Vision.EyeDistance(face), detection.Vision.Frontal(face)))
+            .Select(face => new Spot(VisionTests.Get(face, "X"), VisionTests.Get(face, "Y"), VisionTests.Get(face, "Width"), VisionTests.Get(face, "Height"), detection.Vision.EyeDistance(face), detection.Vision.Frontal(face), detection.Vision.Turn(face)))
             .OrderByDescending(spot => spot.Eyes)];
     }
 
@@ -778,6 +786,19 @@ static class PeopleDetectorTests
 
             // The test's clock while it has one (Clock), else the system's.
             protected override DateTimeOffset Now => AppContext.GetData("HassSharp.PeopleDetectorTests.Now") is Func<string, DateTimeOffset> clock ? clock("{{type}}") : DateTimeOffset.UtcNow;
+
+            // The faces as the test places them (Fake.Turns), while it has a hook for them.
+            protected override IReadOnlyList<DetectedFace> FacesFound(IReadOnlyList<DetectedFace> found)
+            {
+                if (AppContext.GetData("HassSharp.PeopleDetectorTests.Faces") is not Func<string, float[], float[]> place) return found;
+                return [.. found.Select(f =>
+                {
+                    var v = place("{{type}}", [f.X, f.Y, f.Width, f.Height, f.Score, f.RightEye.X, f.RightEye.Y, f.LeftEye.X, f.LeftEye.Y, f.NoseTip.X, f.NoseTip.Y,
+                        f.RightMouthCorner.X, f.RightMouthCorner.Y, f.LeftMouthCorner.X, f.LeftMouthCorner.Y]);
+                    return new DetectedFace(v[0], v[1], v[2], v[3], v[4], new VisionPoint(v[5], v[6]), new VisionPoint(v[7], v[8]), new VisionPoint(v[9], v[10]),
+                        new VisionPoint(v[11], v[12]), new VisionPoint(v[13], v[14]));
+                })];
+            }
 
             protected override Task<IFaceRecognizer> OpenRecognizer()
             {
@@ -802,7 +823,8 @@ static class PeopleDetectorTests
     /// The test's side of the fake recogniser of <see cref="Faking"/>. A face's embedding is decided by its place in the
     /// picture: the spot (<see cref="Spots"/>) whose box is nearest, and the vector the test gave that spot, else a
     /// stranger's of its own. It counts the opens, the embeddings and the closes of each class, and an embedding asked of
-    /// a recogniser already closed.
+    /// a recogniser already closed. It also places the faces the detector finds: a spot the test turned has its nose tip
+    /// moved onto the line between its eyes.
     /// </summary>
     sealed class Fake : IDisposable
     {
@@ -811,6 +833,8 @@ static class PeopleDetectorTests
         readonly Lock gate = new();
         readonly Spot[] spots;
         readonly Dictionary<int, (float[] Values, float Fit)> table = [];
+        readonly Dictionary<(string Type, int Spot), float> turns = [];
+        readonly List<(string Type, int Spot, float[] Face)> placed = [];
         readonly HashSet<int> failing = [];
         readonly List<(string Type, int Spot)> embedded = [];
         readonly Dictionary<string, int> attempts = [], opened = [], closed = [];
@@ -823,7 +847,19 @@ static class PeopleDetectorTests
             AppContext.SetData(Hooks + "Open", (Action<string>)Open);
             AppContext.SetData(Hooks + "Embed", (Func<string, float[], float[]>)Embed);
             AppContext.SetData(Hooks + "Dispose", (Action<string>)(type => { lock (gate) closed[type] = closed.GetValueOrDefault(type) + 1; }));
+            AppContext.SetData(Hooks + "Faces", (Func<string, float[], float[]>)Place);
         }
+
+        /// <summary>
+        /// The face at <paramref name="spot"/>, as the class <paramref name="type"/> finds it, is turned by
+        /// <paramref name="turn"/>: its nose tip moved onto the line between its eyes, that many eye distances from their
+        /// midpoint, towards the left eye when positive and the right eye when negative; so past an eye across the picture,
+        /// however the head is tilted, when the turn is over 0.5. Its box, eyes and mouth corners stay.
+        /// </summary>
+        public void Turns(int spot, float turn, string type = "Porch") { lock (gate) turns[(type, spot)] = turn; }
+
+        /// <summary>The faces placed so far: the class, the spot and the face's fifteen values as the class was given them.</summary>
+        public (string Type, int Spot, float[] Face)[] Placed() { lock (gate) return [.. placed]; }
 
         /// <summary>The face at <paramref name="spot"/> embeds as <paramref name="values"/>, with that fit.</summary>
         public void Embeds(int spot, float[] values, float fit = 1.5f) { lock (gate) table[spot] = (values, fit); }
@@ -885,11 +921,27 @@ static class PeopleDetectorTests
         string? holdType;
         bool held;
 
+        // The spot whose box is nearest the box.
+        int Nearest(float x, float y, float width, float height) => Enumerable.Range(0, spots.Length)
+            .MinBy(i => MathF.Abs(spots[i].X + spots[i].Width / 2 - (x + width / 2)) + MathF.Abs(spots[i].Y + spots[i].Height / 2 - (y + height / 2)));
+
+        float[] Place(string type, float[] face)
+        {
+            var spot = Nearest(face[0], face[1], face[2], face[3]);
+            float turn;
+            lock (gate)
+                if (!turns.TryGetValue((type, spot), out turn)) return face;
+            var (rx, ry, lx, ly) = (face[5], face[6], face[7], face[8]);
+            float[] moved = [.. face];
+            (moved[9], moved[10]) = ((rx + lx) / 2 + turn * (lx - rx), (ry + ly) / 2 + turn * (ly - ry));
+            lock (gate) placed.Add((type, spot, moved));
+            return moved;
+        }
+
         float[] Embed(string type, float[] box)
         {
             var (x, y, width, height) = (box[0], box[1], box[2], box[3]);
-            var spot = Enumerable.Range(0, spots.Length)
-                .MinBy(i => MathF.Abs(spots[i].X + spots[i].Width / 2 - (x + width / 2)) + MathF.Abs(spots[i].Y + spots[i].Height / 2 - (y + height / 2)));
+            var spot = Nearest(x, y, width, height);
             (float[] Values, float Fit) row;
             ManualResetEventSlim? waiting = null;
             lock (gate)
@@ -910,7 +962,7 @@ static class PeopleDetectorTests
         public void Dispose()
         {
             Release();
-            foreach (var hook in new[] { "Open", "Embed", "Dispose" }) AppContext.SetData(Hooks + hook, null);
+            foreach (var hook in new[] { "Open", "Embed", "Dispose", "Faces" }) AppContext.SetData(Hooks + hook, null);
         }
     }
 
@@ -1060,8 +1112,8 @@ static class PeopleDetectorTests
         var spots = await Spots();
         var small = Array.FindIndex(spots, spot => spot.Frontal && !spot.Usable);
         var profile = Array.FindIndex(spots, spot => !spot.Frontal);
-        Check(small >= 0 && profile >= 0 && spots.Count(spot => spot.Usable) >= 5 && spots[0].Usable,
-            "the group photo has a face too small, a profile and five usable faces, the largest among them: " + string.Join(" | ", spots.Select(s => s.ToString())));
+        Check(small >= 0 && profile >= 0 && spots[profile].Turn > TurnLimit && spots.Count(spot => spot.Usable) >= 5 && spots[0].Usable,
+            "the group photo has a face too small, a profile turned beyond the limit and five usable faces, the largest among them: " + string.Join(" | ", spots.Select(s => s.ToString())));
         using var fake = new Fake(spots);
         Show();
         await using var rig = await Rig.Start("unusable");
@@ -1123,6 +1175,120 @@ static class PeopleDetectorTests
         Check(seen.LastSeen != null && seen.LastSeenAt == "camera.porch", $"Ana is seen at camera.porch: {seen.LastSeen} at {seen.LastSeenAt}");
         Check(Reread(list, Ivan).LastSeen == null, "Ivan, only suggested, is not seen");
         Console.WriteLine("PASS people detector: a named person's face is recognised and seen at the camera, a maybe is grouped with its suggestion, and an unknown face is a shown group from its third check");
+    }
+
+    /// <summary>Whether the nose tip of a face's fifteen values (<see cref="Fake.Placed"/>) is beside both eyes across the picture, as the frontal rule turns a face away.</summary>
+    static bool PastTheFrontalRule(float[] face) => face[9] < MathF.Min(face[5], face[7]) || face[9] > MathF.Max(face[5], face[7]);
+
+    // The same faces seen by two detectors: on the porch the four largest usable are turned, three of them past the frontal
+    // rule but inside the limit and one beyond it; the plain detector sees them as they are. A turned face of Ana is
+    // recognised and learned, a turned stranger is an unknown face as a frontal one is, and the face beyond the limit is
+    // never embedded, so the next face is; but a turned face that is only a maybe of Ivan is neither grouped nor counted,
+    // where the plain detector groups it with Ivan suggested and counts it.
+    static async Task ATurnedFaceIsComparedAsAFrontalOneIsButForAMaybe()
+    {
+        var spots = await Spots();
+        int[] usable = [.. Enumerable.Range(0, spots.Length).Where(i => spots[i].Usable)];
+        Check(usable.Length >= 5 && spots[usable[0]].Eyes >= (double)PeopleTests.DefaultRules.LearnEyes,
+            "the group photo has five usable faces, the largest large enough to learn: " + string.Join(" | ", spots.Select(s => s.ToString())));
+        var (ana, stranger, maybe, beyond, fifth) = (usable[0], usable[1], usable[2], usable[3], usable[4]);
+        var inside = (float)TurnLimit - 0.03f;
+        using var fake = new Fake(spots);
+        fake.Embeds(ana, FaceOf(1));
+        fake.Embeds(maybe, PeopleTests.At(PeopleTests.Unit(2), 0.45, 12));
+        fake.Turns(ana, inside);
+        fake.Turns(stranger, -inside);
+        fake.Turns(maybe, inside);
+        fake.Turns(beyond, (float)TurnLimit + 0.2f);
+        Show();
+        await using var rig = await Rig.Start("turned");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(), Faking("Porch")));
+        await rig.Saved("plain", rig.Definition("Plain people", "Plain", Arguments(more: ("LearnNewLooks", false)), Faking("Plain")));
+
+        await Until(() => Shown(rig, "plain").Length == 3, "the plain detector shows three groups", 10);
+        await Until(() => LearnedOf(Reread(list, Ana)).Length > 0, "Ana gains a learned sample, which only the porch learns", 10);
+        await Until(() => Shown(rig).Length == 2, "the porch shows two groups", 10);
+        var placed = fake.Placed();
+        Check(placed.Length > 0 && placed.All(p => p.Type == "Porch" && PastTheFrontalRule(p.Face)), "the porch's turned faces are past the frontal rule, and the plain detector's faces are as found");
+        var from = (Porch: fake.Embedded("Porch").Length, Plain: fake.Embedded("Plain").Length);
+        await Until(() => fake.Embedded("Porch").Length >= from.Porch + 5 * 4 && fake.Embedded("Plain").Length >= from.Plain + 5 * 4, "five checks more of each", 10);
+
+        var porch = fake.Embedded("Porch").Chunk(4).ToArray();
+        Check(porch.All(check => check.SequenceEqual([ana, stranger, maybe, fifth])),
+            $"the porch embeds the three turned inside the limit and the fifth face, never the one beyond it ({ana},{stranger},{maybe},{fifth}): " + string.Join(" | ", porch.Select(c => string.Join(",", c))));
+        var plain = fake.Embedded("Plain").Chunk(4).ToArray();
+        Check(plain.All(check => check.SequenceEqual([ana, stranger, maybe, beyond])), "the plain detector embeds the four largest: " + string.Join(" | ", plain.Select(c => string.Join(",", c))));
+
+        var learned = LearnedOf(Reread(list, Ana));
+        Check(learned.Length == 1 && PeopleTests.Cosine((float[])((dynamic)learned[0]).Embedding.Values, FaceOf(1)) > 0.999, "the turned face of Ana is her learned sample");
+        Check(rig.Labels("porch").Count(label => label == First(Ana)) == 1 && rig.Labels("plain").Count(label => label == First(Ana)) == 1, "both cameras name Ana: " + string.Join(", ", rig.Labels("porch")));
+        Check(Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 2 | {Ana}", "on the porch, Ana is in frame with two unknown faces, the turned stranger and the fifth face: " + Sensor(rig));
+        Check(Sensor(rig, "plain") == $"{Ana} | [{Ana}] | [{First(Ana)}] | 3 | {Ana}", "the plain detector counts three, the maybe among them: " + Sensor(rig, "plain"));
+
+        var unknown = (Porch: Member(rig.Detector(), "Unknown"), Plain: Member(rig.Detector("plain"), "Unknown"));
+        float[] Of(int spot) => PeopleTests.Unit(1000 + spot);
+        var porchGroups = Shown(rig);
+        Check(porchGroups.Length == 2 && porchGroups.Any(g => HoldsFace(unknown.Porch, g, Of(stranger))) && porchGroups.Any(g => HoldsFace(unknown.Porch, g, Of(fifth)))
+            && porchGroups.All(g => g.SuggestedPersonId == null), "the porch's groups are the turned stranger's and the fifth face's, suggesting no one");
+        Check(AllGroups(unknown.Porch).Length == 2, "and it keeps no group of the maybe, shown or not: " + AllGroups(unknown.Porch).Length);
+        var plainGroups = Shown(rig, "plain");
+        Check(plainGroups.Count(g => g.SuggestedPersonId == (string)ivan.Id) == 1 && plainGroups.Count(g => g.SuggestedPersonId == null) == 2, "the plain detector's maybe is a group suggesting Ivan");
+        Check(Reread(list, Ivan).LastSeen == null, "Ivan is never seen");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a face turned past the frontal rule but inside the limit is recognised, learned and grouped as a frontal one is, one beyond the limit is never embedded, and a turned maybe is neither grouped nor counted, where a frontal maybe is");
+    }
+
+    // The look-alikes: A named Ivan, so that B's card is known not to be him. B's face, turned, scores as a maybe of Ivan
+    // but is more alike to B's card: it is B's, counted and grouped with the card. A turned maybe of Ivan that no card is
+    // alike to is neither.
+    static async Task ATurnedMaybeAGroupIsAlikeToIsThatGroups()
+    {
+        var spots = await Spots();
+        using var fake = new Fake(spots);
+        var (first, last, a, b) = LookAlikes(spots, fake);
+        Show();
+        await using var rig = await Rig.Start("turned-maybe");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => Shown(rig).Length == 2, "the look-alikes are two cards: " + Shown(rig).Length, 10);
+        var unknown = Member(rig.Detector(), "Unknown");
+        string aId = Shown(rig).Single(group => HoldsFace(unknown, group, a)).Id;
+        string bId = Shown(rig).Single(group => HoldsFace(unknown, group, b)).Id;
+        Check(await Press(rig, "unknown", aId, "save", new { person = NewPerson(Ivan) }) == "done", "Save of A's card as Ivan");
+        int Sightings() => (int)unknown.Find(bId).Sightings;
+        async Task Checks(int count)
+        {
+            var from = fake.Embedded("Porch").Length;
+            await Until(() => fake.Embedded("Porch").Length >= from + count * 4, $"{count} checks", 10);
+        }
+
+        // A out of view; B turned, a maybe of Ivan, and more alike to B's card.
+        bool Maybe(float[] face) => PeopleTests.Cosine(face, a) is >= 0.42 and < 0.48;
+        var turned = Enumerable.Range(60, 200).Select(seed => PeopleTests.At(b, 0.8, seed)).First(face => Maybe(face));
+        fake.Embeds(first, a, fit: 9);
+        fake.Embeds(last, turned);
+        fake.Turns(last, (float)TurnLimit - 0.03f);
+        await Checks(2);
+        var seen = Sightings();
+        await Until(() => Sensor(rig) == "Unknown | [] | [] | 1 | -", "the turned face of B is an unknown face: " + Sensor(rig), 10);
+        await Checks(3);
+        Check(Sightings() > seen && Shown(rig).Length == 1, $"and a sighting of B's card, the only one: {seen} to {Sightings()}, {Shown(rig).Length} cards");
+        Check(fake.Placed().Length > 0 && fake.Placed().All(p => PastTheFrontalRule(p.Face)), "B's face is past the frontal rule");
+
+        // A turned maybe of Ivan no card is alike to.
+        var other = Enumerable.Range(300, 200).Select(seed => PeopleTests.At(a, 0.45, seed))
+            .First(face => Maybe(face) && PeopleTests.Cosine(face, b) < 0.4 && PeopleTests.Cosine(face, turned) < 0.4);
+        fake.Embeds(last, other);
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", "a turned maybe of Ivan alone is no unknown face: " + Sensor(rig), 10);
+        seen = Sightings();
+        var groups = AllGroups(unknown).Length;
+        await Checks(5);
+        Check(Sightings() == seen && AllGroups(unknown).Length == groups && Sensor(rig) == "Nobody | [] | [] | 0 | -",
+            $"it is neither a sighting of B's card nor a group of its own: {seen} to {Sightings()}, {groups} to {AllGroups(unknown).Length} groups, " + Sensor(rig));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a turned face that is a maybe of a person but more alike to a card known not to be them is that card's and counts, and a turned maybe no card is alike to is neither");
     }
 
     static async Task TheCameraShowsTheRecognisedName()

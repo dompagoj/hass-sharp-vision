@@ -153,6 +153,7 @@ static class VisionTests
             (nameof(ALibraryOfAbi1IsRefused), ALibraryOfAbi1IsRefused),
             (nameof(SimilarityIsTheDotProduct), SimilarityIsTheDotProduct),
             (nameof(FrontalNeedsTheEyesApartAndTheNoseBetweenThem), FrontalNeedsTheEyesApartAndTheNoseBetweenThem),
+            (nameof(TheTurnIsHowFarTheNoseLiesAlongTheEyes), TheTurnIsHowFarTheNoseLiesAlongTheEyes),
             (nameof(DrawsTheBoxesAndThePointsEachOnlyWhenAsked), DrawsTheBoxesAndThePointsEachOnlyWhenAsked),
         };
         var failures = new List<string>();
@@ -277,6 +278,7 @@ static class VisionTests
 
         public float EyeDistance(object face) => (float)Invoke(vision.GetMethod("EyeDistance")!, null, face)!;
         public bool Frontal(object face) => (bool)Invoke(vision.GetMethod("Frontal")!, null, face)!;
+        public float Turn(object face) => (float)Invoke(vision.GetMethod("Turn") ?? throw new Exception("Vision has no Turn"), null, face)!;
 
         public Task Setup() => (Task)Invoke(detection.GetMethod("Setup")!, null, Setups)!;
 
@@ -512,6 +514,33 @@ static class VisionTests
         Console.WriteLine("PASS vision: a face is frontal when its eyes are at least a fifth of its box apart and its nose tip is between them across the picture");
     }
 
+    static async Task TheTurnIsHowFarTheNoseLiesAlongTheEyes()
+    {
+        await using var vision = new Loaded(Committed());
+        object Face((float X, float Y) right, (float X, float Y) left, (float X, float Y) nose) => vision.Face(0, 0, 100, 100, right, left, nose);
+        void Turned(object face, float turn, bool frontal, string what)
+        {
+            var (measured, rule) = (vision.Turn(face), vision.Frontal(face));
+            Check(MathF.Abs(measured - turn) < 1e-6f && rule == frontal, $"{what}: turned {turn}, {(frontal ? "" : "not ")}frontal; measured {measured}, {(rule ? "" : "not ")}frontal");
+        }
+        // Eyes 40 apart, level: the nose's offset from their midpoint, along them, in eye distances.
+        Turned(Face((30, 40), (70, 40), (50, 60)), 0, true, "straight on");
+        Turned(Face((30, 40), (70, 40), (60, 60)), 0.25f, true, "a quarter of the eye distance towards the left eye");
+        Turned(Face((30, 40), (70, 40), (40, 60)), 0.25f, true, "and towards the right eye");
+        Turned(Face((30, 40), (70, 40), (72, 60)), 0.55f, false, "a three-quarter view past the left eye");
+        Turned(Face((30, 40), (70, 40), (28, 60)), 0.55f, false, "and past the right eye");
+        Turned(Face((48, 40), (52, 40), (75, 60)), 6.25f, false, "a profile: the eyes close together, the nose far beside them");
+        // A head tilted 45°: along the line between the eyes, not across the picture.
+        Turned(Face((30, 30), (60, 60), (35, 55)), 0, true, "a tilted head looking straight on");
+        Turned(Face((30, 30), (60, 60), (25, 60)), 1f / 12, false, "a tilted head the frontal rule turns away, hardly turned");
+        Turned(Face((30, 30), (60, 60), (47, 67)), 0.4f, true, "a tilted head turned 0.4");
+        // The eyes in the other order across the picture, and upside down.
+        Turned(Face((70, 40), (30, 40), (60, 60)), 0.25f, true, "the eyes' order across the picture");
+        Turned(Face((70, 60), (30, 60), (60, 40)), 0.25f, true, "an upside-down face");
+        Check(vision.Turn(Face((50, 40), (50, 40), (50, 60))) == float.PositiveInfinity, "eyes in one place: infinitely turned");
+        Console.WriteLine("PASS vision: a face's turn is how far its nose tip lies from the midpoint of its eyes along the line between them, in eye distances, whichever way it is turned, tilted or upside down");
+    }
+
     /// <summary>A <see cref="Loaded"/> of <see cref="LocalSource"/> on a server of its own, set up: its detector is the one it owns.</summary>
     internal sealed class SetUp : IAsyncDisposable
     {
@@ -686,9 +715,11 @@ static class VisionTests
             var (right, left, nose) = (Point(face, "RightEye"), Point(face, "LeftEye"), Point(face, "NoseTip"));
             var (low, high) = (MathF.Min(right.X, left.X), MathF.Max(right.X, left.X));
             return string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"({Get(face, "X"):0},{Get(face, "Y"):0}) {Get(face, "Width"):0} wide: eyes {rig.Vision.EyeDistance(face):0.0} apart ({rig.Vision.EyeDistance(face) / Get(face, "Width"):0.00} of the width), nose {(high > low ? (nose.X - low) / (high - low) : float.NaN):0.00} of the way between them, {(rig.Vision.Frontal(face) ? "frontal" : "not frontal")}");
+                $"({Get(face, "X"):0},{Get(face, "Y"):0}) {Get(face, "Width"):0} wide: eyes {rig.Vision.EyeDistance(face):0.0} apart ({rig.Vision.EyeDistance(face) / Get(face, "Width"):0.00} of the width), nose {(high > low ? (nose.X - low) / (high - low) : float.NaN):0.00} of the way between them, turned {rig.Vision.Turn(face):0.00}, {(rig.Vision.Frontal(face) ? "frontal" : "not frontal")}");
         }
         Check(notFrontal.Length == 1 && ReferenceEquals(notFrontal[0], profile), "only the profile is not frontal: " + string.Join(" | ", faces.Select(Described)));
+        Check(rig.Vision.Turn(profile) > 1 && faces.Where(face => !ReferenceEquals(face, profile)).All(face => rig.Vision.Turn(face) < 0.5f),
+            "the profile is turned more than 1, the others less than 0.5: " + string.Join(" | ", faces.Select(Described)));
         Console.WriteLine("PASS vision: of group.jpg's 8 faces at 640, the profile is not frontal and the other 7 are: " + string.Join(" | ", faces.Select(Described)));
     }
 

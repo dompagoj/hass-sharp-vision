@@ -213,6 +213,13 @@ public class PeopleDetector : SharpDevice
     /// </summary>
     protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
 
+    /// <summary>
+    /// The faces of a frame that a check goes by: it counts and draws them, and recognises those clear enough. The faces
+    /// the detector found, the best first; a derived class may give others, as the tests do to place a face's landmarks.
+    /// </summary>
+    /// <param name="found">The faces the detector found in the frame.</param>
+    protected virtual IReadOnlyList<DetectedFace> FacesFound(IReadOnlyList<DetectedFace> found) => found;
+
     /// <summary>Downloads the vision library for this platform, once, and opens its detector.</summary>
     protected sealed override async Task Setup()
     {
@@ -371,7 +378,7 @@ public class PeopleDetector : SharpDevice
             }
             if (next == null) return;
             using var frame = next;
-            var foundFaces = detector!.Faces(frame, FaceInput, FaceScore);
+            var foundFaces = FacesFound(detector!.Faces(frame, FaceInput, FaceScore));
             IReadOnlyList<DetectedPerson> foundPeople = DetectPeople ? detector.People(frame, PersonInput, PersonScore) : [];
             var now = Now;
             if (RecogniseFaces) before = People.People;
@@ -403,7 +410,8 @@ public class PeopleDetector : SharpDevice
     // (FaceGroups.KnownNotToBe: the matcher itself knows nothing of the groups). Two faces of one frame are two people,
     // so a person is given to one face of the check, the best match; another face matched to them goes to the unknown
     // faces, as any face not recognised does, without suggesting them. The group of each face not recognised is known not
-    // to be the people the check recognised.
+    // to be the people the check recognised. A maybe of a turned face (Turned) is most likely its person seen from further
+    // aside than their samples: it goes to no group and is not counted, unless it is known not to be them.
     // Who is in frame for Recognised is worked out under lists with the matching, also in a check without a face to
     // compare or with the recogniser not open (Recognised is unavailable then), and set after the lock is let go.
     string?[] Recognise(SharpImage frame, IReadOnlyList<DetectedFace> found, DateTimeOffset now, TimeSpan hold)
@@ -451,8 +459,8 @@ public class PeopleDetector : SharpDevice
     // Under lists: matches a check's embedded faces against the people list as it is now, with the groups brought in line
     // with it first when it changed since they were last matched, and notes each, setting the names of those recognised.
     // Gives the failures of the faces that could not be noted, for the caller to log; the ids of the people given a face,
-    // the largest face's first; and how many faces were compared and given to no one (no match, a maybe, or a second face
-    // of a person, or one of a group known not to be them), for Recognised.
+    // the largest face's first; and how many faces were compared and given to no one (no match, a maybe of a face that is
+    // not turned, or a second face of a person, or one of a group known not to be them), for Recognised.
     Matching MatchAndNote(SharpImage frame, IReadOnlyList<DetectedFace> found, List<(int Index, FaceEmbedding Embedding)> embedded, string?[] names, DateTimeOffset now)
     {
         var failures = new List<Exception>();
@@ -469,12 +477,14 @@ public class PeopleDetector : SharpDevice
             .ToList();
         var recognised = given.Select(face => face.Match.Person!.Id).ToList();
         var named = given.Select(face => face.Index).ToHashSet();
+        // A maybe of a turned face is taken for its person, turned: neither noted nor counted.
+        var aside = matched.Where(face => face.Match.Kind == MatchKind.Maybe && !elsewhere.Contains(face.Index) && Turned(face.Face)).Select(face => face.Index).ToHashSet();
         foreach (var face in matched)
         {
             try
             {
                 if (named.Contains(face.Index)) names[face.Index] = Note(frame, face, everyone, now);
-                else
+                else if (!aside.Contains(face.Index))
                 {
                     // A maybe suggests its person, unless the face is known not to be them.
                     var suggested = face.Match is { Kind: MatchKind.Maybe, Person: { } maybe } && !elsewhere.Contains(face.Index) ? maybe.Id : null;
@@ -483,15 +493,20 @@ public class PeopleDetector : SharpDevice
             }
             catch (Exception e) when (!Stopping.IsCancellationRequested) { failures.Add(e); }
         }
-        return new(failures, recognised, matched.Count - given.Count);
+        return new(failures, recognised, matched.Count - given.Count - aside.Count);
     }
 
     // What MatchAndNote gives back beside the names: the failures to log, the ids of the people given a face, and the
     // number of faces compared and given to no one.
     sealed record Matching(List<Exception> Failures, IReadOnlyList<string> Given, int Unknown);
 
-    // A face clear enough to embed: large enough, and looking towards the camera.
-    bool Usable(DetectedFace face) => Vision.EyeDistance(face) >= rules.UsableEyes && Vision.Frontal(face);
+    // A face clear enough to embed: large enough, and looking towards the camera by the frontal rule or turned no further
+    // than the turn limit.
+    bool Usable(DetectedFace face) => Vision.EyeDistance(face) >= rules.UsableEyes && (Vision.Frontal(face) || Turned(face));
+
+    // A face the frontal rule turns away (its nose is beside its eyes) but that is turned no further than the turn limit,
+    // with its eyes still a fifth of its box apart: a three-quarter view, or a tilted head. A profile is turned further.
+    bool Turned(DetectedFace face) => !Vision.Frontal(face) && Vision.EyeDistance(face) >= face.Width / 5 && Vision.Turn(face) <= rules.TurnLimit;
 
     // A face embedded; null when it fits too badly to be compared at all.
     FaceEmbedding? Embed(IFaceRecognizer recognizer, SharpImage frame, DetectedFace face)

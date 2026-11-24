@@ -428,9 +428,10 @@ public static class Vision
     static float Square(float value) => value * value;
 
     /// <summary>
-    /// Whether a face looks towards the camera enough to be recognised: its eyes are at least a fifth of its box's width
-    /// apart, and its nose tip is between them across the picture. A face in profile has its eyes close together, or its
-    /// nose beside them.
+    /// Whether a face looks towards the camera: its eyes are at least a fifth of its box's width apart, and its nose tip is
+    /// between them across the picture. A face in profile has its eyes close together, or its nose beside them. A face
+    /// turned partly away, or a tilted head, can have its nose beside them too: <see cref="Turn"/> says how far it is
+    /// turned, and the People detector also compares a face this turns away that is turned little enough.
     /// </summary>
     /// <param name="face">The face.</param>
     public static bool Frontal(DetectedFace face)
@@ -438,6 +439,23 @@ public static class Vision
         ArgumentNullException.ThrowIfNull(face);
         float left = MathF.Min(face.RightEye.X, face.LeftEye.X), right = MathF.Max(face.RightEye.X, face.LeftEye.X);
         return EyeDistance(face) >= face.Width / 5 && face.NoseTip.X >= left && face.NoseTip.X <= right;
+    }
+
+    /// <summary>
+    /// How far a face is turned away from the camera: how far its nose tip lies from the midpoint of its eyes, along the
+    /// line between them, in eye distances. 0 for a face looking straight at the camera, 0.5 with the nose tip in line with
+    /// an eye, more the further it is turned, either way. A head tilted to one side, or upside down, is measured along its
+    /// own eyes, so the tilt does not count. Infinity when the eyes are in one place.
+    /// </summary>
+    /// <param name="face">The face.</param>
+    public static float Turn(DetectedFace face)
+    {
+        ArgumentNullException.ThrowIfNull(face);
+        float dx = face.LeftEye.X - face.RightEye.X, dy = face.LeftEye.Y - face.RightEye.Y;
+        var squared = dx * dx + dy * dy;
+        if (squared == 0) return float.PositiveInfinity;
+        float midX = (face.RightEye.X + face.LeftEye.X) / 2, midY = (face.RightEye.Y + face.LeftEye.Y) / 2;
+        return MathF.Abs((face.NoseTip.X - midX) * dx + (face.NoseTip.Y - midY) * dy) / squared;
     }
 
     /// <summary>

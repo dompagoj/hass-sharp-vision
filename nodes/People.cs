@@ -30,6 +30,13 @@ public sealed record RecognitionRules(double MatchScore, double MatchMargin, dou
     public static RecognitionRules Default { get; } = new(DefaultMatchScore, 0.10, 0.40, 0.60, 0.15, 16, 24, 7);
 
     /// <summary>
+    /// The furthest a face may be turned (<see cref="Vision.Turn"/>) to be compared when the frontal rule
+    /// (<see cref="Vision.Frontal"/>) turns it away: 0.55, <c>docs/calibration.md</c>'s. Not one of the constructor's
+    /// values, so rules made of those eight have this one.
+    /// </summary>
+    public double TurnLimit { get; init; } = 0.55;
+
+    /// <summary>
     /// These rules with another match score, and the suggest and learn scores a tenth under and over it, as the People
     /// detector's <i>Match score</i> setting moves all three.
     /// </summary>
