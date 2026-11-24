@@ -207,7 +207,7 @@ public sealed class PeopleList
 {
     /// <summary>The shared store the people list is kept in.</summary>
     public const string StoreName = "hass-sharp-vision.people";
-    /// <summary>The most named samples a person has.</summary>
+    /// <summary>The most named samples a person has; a new one beyond keeps the most different (<see cref="AddSamples"/>).</summary>
     public const int MostNamed = 20;
     /// <summary>The most learned samples a person has; a new one beyond replaces the oldest.</summary>
     public const int MostLearned = 20;
@@ -321,25 +321,31 @@ public sealed class PeopleList
         catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return null; }
     }
 
-    /// <summary>Adds a person, named with the samples given.</summary>
+    /// <summary>
+    /// Adds a person, named with the samples given. Beyond 20, each further one is judged in the order given as
+    /// <see cref="AddSamples"/> judges a named sample for a full person, and one not kept is not written at all.
+    /// </summary>
     /// <param name="firstName">The first name; trimmed, 1 to 64 characters.</param>
     /// <param name="lastName">The last name; trimmed, at most 64 characters; none when null or empty. The full name is no one else's, whatever its case.</param>
-    /// <param name="samples">1 to 20 faces of the person, which become named samples.</param>
+    /// <param name="samples">At least one face of the person; they become named samples.</param>
     /// <returns>The person added.</returns>
-    /// <exception cref="PeopleRefusal">A name is empty or too long, or the full name is taken; there are no samples or too many; the list is full.</exception>
+    /// <exception cref="PeopleRefusal">A name is empty or too long, or the full name is taken; there are no samples; the list is full.</exception>
     /// <exception cref="ArgumentException">A sample has no 128 values, no crop, or a crop over 1 MiB.</exception>
     public Person Add(string firstName, string? lastName, IEnumerable<NewSample> samples)
     {
         var name = CheckName(firstName, lastName);
         var full = name.Full;
-        var given = CheckSamples(samples);
-        if (given.Count == 0) throw new PeopleRefusal($"{full} needs a face to be named with.");
-        if (given.Count > MostNamed) throw NoRoom(full);
+        var offered = CheckSamples(samples);
+        if (offered.Count == 0) throw new PeopleRefusal($"{full} needs a face to be named with.");
         CheckFormat();
         RefuseTaken(ReadNames(), null, name);
 
         var id = NewId();
-        var listed = given.Select(sample => new StoredSample(NewId(), sample.At, sample.Camera, false, sample.Embedding.Fit)).ToList();
+        var faces = offered.Select(sample => (Id: NewId(), Face: sample)).ToList();
+        var byId = faces.ToDictionary(face => face.Id, face => face.Face, StringComparer.Ordinal);
+        var listed = new List<StoredSample>();
+        ListNamed(listed, faces.Select(face => new StoredSample(face.Id, face.Face.At, face.Face.Camera, false, face.Face.Embedding.Fit)), sampleId => byId[sampleId].Embedding.Values);
+        var given = listed.Select(sample => byId[sample.Id]).ToList();
         var record = new StoredPerson(DateTimeOffset.UtcNow, null, null, listed);
         Store(() => data.Set(UnfinishedKey(id), new Unfinished(record.Added, false)));
         try
@@ -365,24 +371,27 @@ public sealed class PeopleList
     }
 
     /// <summary>
-    /// Adds samples to a person. Named ones are refused all together when the person would have more than 20; a learned one
-    /// beyond 20 replaces the person's oldest learned sample. Learned ones are a change of the person's learned samples,
-    /// at the newest one's time (<see cref="Person.LearnedChanged"/>).
+    /// Adds samples to a person. A named one goes in while the person has fewer than 20 named samples; when they have 20,
+    /// the person keeps the 20 most different from each other (<see cref="ListNamed"/>): the new one takes the place of one
+    /// of their two most alike, or is not kept when it is at least as alike to one they have, and a sample that goes, or
+    /// is not kept, goes with its embedding and crop. Several are judged one after the other. A learned one beyond 20
+    /// replaces the person's oldest learned sample. Learned ones are a change of the person's learned samples, at the
+    /// newest one's time (<see cref="Person.LearnedChanged"/>).
     /// </summary>
-    /// <returns>The person with the samples.</returns>
-    /// <exception cref="PeopleRefusal">The person is no longer in the list, or has no room for the named samples.</exception>
+    /// <returns>The person with the samples kept.</returns>
+    /// <exception cref="PeopleRefusal">The person is no longer in the list.</exception>
     /// <exception cref="ArgumentException">A sample has no 128 values, no crop, or a crop over 1 MiB.</exception>
     public Person AddSamples(string personId, IEnumerable<NewSample> samples, bool learned)
     {
         var given = CheckSamples(samples);
         CheckFormat();
         if (!IsId(personId) || !ReadNames().TryGetValue(personId, out var stored) || stored == null) throw new PeopleRefusal(Gone);
-        var name = stored.Full;
-        if (!learned && given.Count > MostNamed) throw NoRoom(name);
         if (given.Count == 0) return Find(personId) ?? throw new PeopleRefusal(Gone);
 
         var listed = given.Select(sample => new StoredSample(NewId(), sample.At, sample.Camera, learned, sample.Embedding.Fit)).ToList();
-        var replaced = new List<string>();
+        var known = KnownEmbeddings(personId);
+        for (var i = 0; i < listed.Count; i++) known[listed[i].Id] = given[i].Embedding.Values;
+        var dropped = new List<string>();
         try
         {
             WriteSamples(personId, listed, given);
@@ -391,14 +400,15 @@ public sealed class PeopleList
                 // A person whose record is gone is listed again.
                 current ??= new StoredPerson(DateTimeOffset.UtcNow, null, null, []);
                 var samples = (current.Samples ?? []).ToList();
-                replaced.Clear();
-                if (!learned && samples.Count(sample => !sample.Learned) + listed.Count > MostNamed) throw NoRoom(name);
-                samples.AddRange(listed);
+                dropped.Clear();
+                if (learned) samples.AddRange(listed);
+                // A sample another detector listed meanwhile is read here, holding the store: an embedding never changes.
+                else dropped.AddRange(ListNamed(samples, listed, sampleId => known.TryGetValue(sampleId, out var values) ? values : ReadEmbedding(EmbeddingKey(personId, sampleId))));
                 while (samples.Count(sample => sample.Learned) > MostLearned)
                 {
                     var oldest = samples.Where(sample => sample.Learned).MinBy(sample => sample.At)!;
                     samples.Remove(oldest);
-                    replaced.Add(oldest.Id);
+                    dropped.Add(oldest.Id);
                 }
                 return learned ? current with { Samples = samples, LearnedChanged = Later(current.LearnedChanged, listed.Max(sample => sample.At)) } : current with { Samples = samples };
             });
@@ -408,7 +418,7 @@ public sealed class PeopleList
             foreach (var sample in listed) RemoveSampleKeys(personId, sample.Id);
             throw;
         }
-        foreach (var sampleId in replaced) RemoveSampleKeys(personId, sampleId);
+        foreach (var sampleId in dropped) RemoveSampleKeys(personId, sampleId);
         // Deleted meanwhile, by another detector: what was just written goes too.
         if (!ReadNames().ContainsKey(personId)) Forget(personId);
         Reload();
@@ -438,10 +448,10 @@ public sealed class PeopleList
     }
 
     /// <summary>
-    /// Merges one person into another: the samples of <paramref name="fromId"/> go to <paramref name="intoId"/>, named
-    /// first, each kind as far as its cap allows (the newest first), and <paramref name="fromId"/> is deleted with the
-    /// rest. The samples are written before the source is removed, so an interruption leaves both people readable, and a
-    /// second merge finishes the job.
+    /// Merges one person into another: the samples of <paramref name="fromId"/> go to <paramref name="intoId"/>, the named
+    /// ones judged one at a time, the newest first, as <see cref="AddSamples"/> judges them, and the learned ones as far
+    /// as their cap allows, the newest first; <paramref name="fromId"/> is deleted with the rest. The samples are written
+    /// before the source is removed, so an interruption leaves both people readable, and a second merge finishes the job.
     /// </summary>
     /// <exception cref="PeopleRefusal">The two are one person, or <paramref name="intoId"/> is no longer in the list.</exception>
     public void Merge(string fromId, string intoId)
@@ -549,9 +559,11 @@ public sealed class PeopleList
     // ---- The steps of a merge ----
 
     /// <summary>
-    /// A merge's first step: copies the source's samples the target does not list yet, named first and each kind up to
-    /// its cap, and lists them on the target, with the later last seen and the later learned change. The source is left
-    /// as it was.
+    /// A merge's first step: copies the source's samples the target does not list yet, and lists them on the target, with
+    /// the later last seen and the later learned change. The named ones are judged one at a time, the newest first, as
+    /// <see cref="AddSamples"/> judges them, so that the target keeps the 20 most different; the learned ones are listed
+    /// up to their cap, the newest first. A copy not listed, and a sample of the target's that went, lose their keys. The
+    /// source is left as it was.
     /// </summary>
     internal void MoveSamples(string fromId, string intoId)
     {
@@ -560,35 +572,39 @@ public sealed class PeopleList
         var target = ReadRecord(intoId);
         var listed = (target?.Samples ?? []).Select(sample => sample.Id).ToHashSet(StringComparer.Ordinal);
         var waiting = (source.Samples ?? []).Where(sample => IsId(sample.Id) && !listed.Contains(sample.Id)).ToList();
-        var namedRoom = MostNamed - (target?.Samples ?? []).Count(sample => !sample.Learned);
         var learnedRoom = MostLearned - (target?.Samples ?? []).Count(sample => sample.Learned);
-        var chosen = waiting.Where(sample => !sample.Learned).OrderByDescending(sample => sample.At).Take(Math.Max(0, namedRoom))
+        var chosen = waiting.Where(sample => !sample.Learned).OrderByDescending(sample => sample.At)
             .Concat(waiting.Where(sample => sample.Learned).OrderByDescending(sample => sample.At).Take(Math.Max(0, learnedRoom)))
             .ToList();
         var copied = new List<StoredSample>();
+        var known = KnownEmbeddings(intoId);
         foreach (var sample in chosen)
         {
             var embedding = TryBytes(EmbeddingKey(fromId, sample.Id));
-            if (embedding is not { Length: Values * sizeof(float) }) continue;
+            if (EmbeddingValues(embedding) is not { } values) continue;
             var crop = TryBytes(CropKey(fromId, sample.Id));
             Store(() =>
             {
-                data.SetBytes(EmbeddingKey(intoId, sample.Id), embedding);
+                data.SetBytes(EmbeddingKey(intoId, sample.Id), embedding!);
                 if (crop != null) data.SetBytes(CropKey(intoId, sample.Id), crop);
             });
             copied.Add(sample);
+            known[sample.Id] = values;
         }
+        var dropped = new List<string>();
         data.Update<StoredPerson>(RecordKey(intoId), current =>
         {
             current ??= source with { Samples = [], LastSeen = null, LastSeenAt = null, LearnedChanged = null };
             var samples = (current.Samples ?? []).ToList();
             var ids = samples.Select(sample => sample.Id).ToHashSet(StringComparer.Ordinal);
-            foreach (var sample in copied)
+            dropped.Clear();
+            var fresh = copied.Where(sample => !ids.Contains(sample.Id)).ToList();
+            // A sample another detector listed meanwhile is read here, holding the store: an embedding never changes.
+            dropped.AddRange(ListNamed(samples, fresh.Where(sample => !sample.Learned), sampleId => known.TryGetValue(sampleId, out var values) ? values : ReadEmbedding(EmbeddingKey(intoId, sampleId))));
+            foreach (var sample in fresh.Where(sample => sample.Learned))
             {
-                if (ids.Contains(sample.Id)) continue;
-                var cap = sample.Learned ? MostLearned : MostNamed;
-                if (samples.Count(s => s.Learned == sample.Learned) >= cap) continue;
-                samples.Add(sample);
+                if (samples.Count(s => s.Learned) >= MostLearned) dropped.Add(sample.Id);
+                else samples.Add(sample);
             }
             var later = source.LastSeen is { } seenThere && (current.LastSeen == null || seenThere > current.LastSeen);
             return current with
@@ -599,6 +615,88 @@ public sealed class PeopleList
                 LearnedChanged = Later(current.LearnedChanged, source.LearnedChanged),
             };
         });
+        foreach (var sampleId in dropped) RemoveSampleKeys(intoId, sampleId);
+    }
+
+    // ---- Which named samples a person keeps ----
+
+    /// <summary>
+    /// Lists named samples on a person's samples, one at a time in the order given, each judged against the samples as the
+    /// one before left them. While the person has fewer than <see cref="MostNamed"/> named samples, a sample goes in. When
+    /// they have that many, a listed one whose embedding cannot be read goes for it, the oldest first, as it recognises no
+    /// one; otherwise <see cref="Displaced"/> says which named sample goes for it, or that it is not kept. Learned samples
+    /// take no part.
+    /// </summary>
+    /// <param name="samples">The person's samples, named and learned, changed in place.</param>
+    /// <param name="incoming">The named samples to list, each with an id no sample of the person has.</param>
+    /// <param name="embedding">The values of the embedding of a sample listed or incoming, by its id; null when it cannot be read.</param>
+    /// <returns>The ids of the samples that are not listed after all: the incoming ones not kept, and the listed ones that went.</returns>
+    static List<string> ListNamed(List<StoredSample> samples, IEnumerable<StoredSample> incoming, Func<string, float[]?> embedding)
+    {
+        var dropped = new List<string>();
+        foreach (var sample in incoming)
+        {
+            var named = samples.Where(s => !s.Learned).ToList();
+            if (named.Count < MostNamed)
+            {
+                samples.Add(sample);
+                continue;
+            }
+            var faces = named.Select(s => (Sample: s, Values: embedding(s.Id))).ToList();
+            var going = faces.Where(face => face.Values == null).Select(face => face.Sample).MinBy(s => s.At);
+            if (going == null)
+            {
+                var index = embedding(sample.Id) is { } values
+                    ? Displaced([.. faces.Select(face => (new FaceEmbedding(face.Values!, face.Sample.Fit), face.Sample.At))], new FaceEmbedding(values, sample.Fit))
+                    : -1;
+                if (index < 0)
+                {
+                    dropped.Add(sample.Id);
+                    continue;
+                }
+                going = named[index];
+            }
+            samples.Remove(going);
+            dropped.Add(going.Id);
+            samples.Add(sample);
+        }
+        return dropped;
+    }
+
+    /// <summary>
+    /// Which of a full person's named samples a new one takes the place of, so that they keep the samples most different
+    /// from each other. The new one's likeness is its highest similarity to the named samples, and the closest pair is the
+    /// two named samples most alike. When the new one is at least as alike as the closest pair, it is the most redundant
+    /// and is not kept. Otherwise one of the pair goes: the one more alike to the samples that stay (its highest
+    /// similarity to the others and the new one, its pair's other left out), and on a tie the older.
+    /// </summary>
+    /// <param name="named">The person's named samples, at least two, with when each was seen.</param>
+    /// <param name="incoming">The new sample's embedding.</param>
+    /// <returns>The index in <paramref name="named"/> of the sample that goes; -1 when the new one is not kept.</returns>
+    internal static int Displaced(IReadOnlyList<(FaceEmbedding Embedding, DateTimeOffset At)> named, FaceEmbedding incoming)
+    {
+        ArgumentNullException.ThrowIfNull(named);
+        if (named.Count < 2) return -1;
+        double closest = double.NegativeInfinity;
+        int first = 0, second = 1;
+        for (var i = 0; i < named.Count; i++)
+        for (var j = i + 1; j < named.Count; j++)
+        {
+            double alike = named[i].Embedding.Similarity(named[j].Embedding);
+            if (alike > closest) (closest, first, second) = (alike, i, j);
+        }
+        var likeness = named.Max(sample => (double)sample.Embedding.Similarity(incoming));
+        if (likeness >= closest) return -1;
+        double Rest(int one, int other)
+        {
+            double most = named[one].Embedding.Similarity(incoming);
+            for (var k = 0; k < named.Count; k++)
+                if (k != one && k != other) most = Math.Max(most, named[one].Embedding.Similarity(named[k].Embedding));
+            return most;
+        }
+        var (a, b) = (Rest(first, second), Rest(second, first));
+        if (a != b) return a > b ? first : second;
+        return named[second].At < named[first].At ? second : first;
     }
 
     /// <summary>
@@ -790,6 +888,10 @@ public sealed class PeopleList
 
     Person? Find(string personId) => People.FirstOrDefault(person => person.Id == personId);
 
+    /// <summary>The values of a person's embeddings as the list has them in memory, by sample id; a sample's embedding never changes.</summary>
+    Dictionary<string, float[]> KnownEmbeddings(string personId) =>
+        Find(personId)?.Samples.ToDictionary(sample => sample.Id, sample => sample.Embedding.Values, StringComparer.Ordinal) ?? new(StringComparer.Ordinal);
+
     // ---- Writing ----
 
     /// <summary>Writes each sample's embedding and crop.</summary>
@@ -857,8 +959,6 @@ public sealed class PeopleList
             if (id != except && other != null && string.Equals(other.Full.Trim(), full, StringComparison.OrdinalIgnoreCase))
                 throw new PeopleRefusal($"There is already a person named {other.Full.Trim()}: choose them from the list.");
     }
-
-    static PeopleRefusal NoRoom(string name) => new($"{name} has no room for more samples.");
 
     /// <exception cref="ArgumentException">A sample has no 128 values, no crop, or a crop over 1 MiB.</exception>
     static List<NewSample> CheckSamples(IEnumerable<NewSample> samples)

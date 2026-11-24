@@ -280,14 +280,15 @@ it. It has two lists, and a third when asked:
   dialog lists the people you have named, each with their face, how many samples they have and when they were last
   seen, and a box to search them by name. Choose one with a click, or with the arrow keys and Enter; or choose **+ New
   person** under the list, fill in **First name** (and **Last name** if you like), and press **Use**. Then press
-  **Save**: the group's samples go to the person you chose, or make the new person. A suggested person is chosen
-  already, so **Save** alone accepts the suggestion. **Dismiss** deletes the group.
+  **Save**: the group's samples go to the person you chose, or make the new person; a person with 20 named samples
+  keeps the most different ([below](#how-many-samples-a-person-keeps)). A suggested person is chosen already, so
+  **Save** alone accepts the suggestion. **Dismiss** deletes the group.
 - **People**, by full name, each with their newest named face, how many samples they have (and how many learned), and
   when and at which camera they were last seen. **Save** renames them to the **First name** and **Last name** on their
   card. To merge two cards of one person, press **Merge into** on the card to remove, choose the person to keep in its
-  dialog, and press **Merge**: after asking, it moves the samples to the person chosen and removes the card's person.
-  **Merge into** and **Merge** are there when there is someone else to merge into. **Samples** shows the third list.
-  **Delete** removes the person and their samples, after asking.
+  dialog, and press **Merge**: after asking, it moves the samples to the person chosen, as many as they keep, and
+  removes the card's person. **Merge into** and **Merge** are there when there is someone else to merge into.
+  **Samples** shows the third list. **Delete** removes the person and their samples, after asking.
 - **Samples of …**, one card for each sample of the person chosen, named first, then learned, the newest first.
   **Remove** deletes a sample; the last sample a person was named with cannot be removed (delete the person instead).
   **Close** on the first card closes the list, and it closes when the person is deleted.
@@ -308,11 +309,25 @@ With **Learn new looks** on, a recognised face is kept as a **learned** sample o
 - it adds something: it is less than 0.9 alike to every sample the person has;
 - the person gained or lost no learned sample in the last 10 minutes.
 
-A person has at most 20 named and 20 learned samples, and the list at most 200 people. When a person has 20 learned
-samples, a new one replaces the oldest learned one; named samples are never replaced. A learned sample can be wrong:
-the rules make it rare, not impossible. Learned samples are marked on the page and can be removed one by one. A look
-that was removed can be learned again while it keeps being seen, 10 minutes after the removal at the earliest; to stop
-that, turn **Learn new looks** off, which stops all learning.
+A person has at most 20 learned samples: when they have 20, a new one replaces the oldest learned one. A learned
+sample can be wrong: the rules make it rare, not impossible. Learned samples are marked on the page and can be removed
+one by one. A look that was removed can be learned again while it keeps being seen, 10 minutes after the removal at the
+earliest; to stop that, turn **Learn new looks** off, which stops all learning.
+
+### How many samples a person keeps
+
+A person has at most 20 samples you named them with and 20 learned ones, and the list at most 200 people. Naming a face
+for a person who has 20 named samples is never refused: they keep the 20 most different from each other.
+
+- A new look, such as their face in sunglasses, takes the place of one of the two samples most alike to each other: of
+  those two, the one more alike to the rest, and on a tie the older. The one that goes is deleted with its picture.
+- A look they have already, one at least as alike to one of their samples as those two are to each other, is not
+  stored. The card goes all the same, and the naming counts as a sighting.
+- Each face of a card is judged in turn, against the samples as the one before left them. A merge into the person
+  judges the merged person's named samples the same way, the newest first.
+- Learned samples take no part, and stay as they are.
+
+A face named for the wrong person is unlike their others, so it is kept: remove it in **Samples of …**.
 
 ## Trust and privacy
 

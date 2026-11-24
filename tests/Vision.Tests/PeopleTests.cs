@@ -245,9 +245,17 @@ static class PeopleTests
             (nameof(ThePeopleOfAOneNameStoreKeepTheirNameAsTheFirstName), Sync(ThePeopleOfAOneNameStoreKeepTheirNameAsTheFirstName)),
             (nameof(TheCameraLabelIsTheFirstNameAndALetterWhenShared), Sync(TheCameraLabelIsTheFirstNameAndALetterWhenShared)),
             (nameof(SamplesAreCappedAndLearnedOnesReplaced), Sync(SamplesAreCappedAndLearnedOnesReplaced)),
+            (nameof(APersonWithRoomTakesEveryNamedSample), Sync(APersonWithRoomTakesEveryNamedSample)),
+            (nameof(AFullPersonGivenANewLookLosesTheOneOfTheClosestPairMoreLikeTheRest), Sync(AFullPersonGivenANewLookLosesTheOneOfTheClosestPairMoreLikeTheRest)),
+            (nameof(OnATieTheOlderOfTheClosestPairGoes), Sync(OnATieTheOlderOfTheClosestPairGoes)),
+            (nameof(AFullPersonGivenALookTheyHaveKeepsWhatTheyHad), Sync(AFullPersonGivenALookTheyHaveKeepsWhatTheyHad)),
+            (nameof(SeveralNamedSamplesAreJudgedOneAfterTheOther), Sync(SeveralNamedSamplesAreJudgedOneAfterTheOther)),
+            (nameof(LearnedSamplesTakeNoPartInWhichNamedOnesStay), Sync(LearnedSamplesTakeNoPartInWhichNamedOnesStay)),
+            (nameof(ANewPersonGivenMoreThanFitKeepsTheMostDifferent), Sync(ANewPersonGivenMoreThanFitKeepsTheMostDifferent)),
             (nameof(ACropOverOneMebibyteIsRefused), Sync(ACropOverOneMebibyteIsRefused)),
             (nameof(The201stPersonIsRefused), Sync(The201stPersonIsRefused)),
             (nameof(MergeMovesSamplesUpToTheCaps), Sync(MergeMovesSamplesUpToTheCaps)),
+            (nameof(AMergeIntoAFullPersonKeepsTheMostDifferent), Sync(AMergeIntoAFullPersonKeepsTheMostDifferent)),
             (nameof(AnInterruptedMergeLeavesBothReadable), Sync(AnInterruptedMergeLeavesBothReadable)),
             (nameof(TheLastNamedSampleIsKept), Sync(TheLastNamedSampleIsKept)),
             (nameof(DeleteRemovesEveryKey), Sync(DeleteRemovesEveryKey)),
@@ -581,9 +589,10 @@ static class PeopleTests
         string id = ana.Id;
         list.AddSamples(id, Samples(Seeded(119)), false);
         Check(((object[])Items(Only(list, "Ana").Samples)).Length == 20, "20 named samples");
-        Check(Refused(() => list.AddSamples(id, Samples(Seeded(120)), false), "the 21st named sample") == "Ana has no room for more samples.", "the 21st named sample is refused");
-        Check(Refused(() => list.Add(Named("Mia"), null, Samples(Enumerable.Range(130, 21).Select(seed => (object)Seeded(seed)).ToArray())), "21 samples at once")
-            == "Mia has no room for more samples.", "a person named with 21 samples is refused");
+        // A 21st named sample is not refused: she keeps 20 (which ones, the tests below pin).
+        Check(((object[])Items(list.AddSamples(id, Samples(Seeded(120)), false).Samples)).Length == 20, "the 21st named sample leaves her 20");
+        Check(((object[])Items(list.Add(Named("Mia"), null, Samples(Enumerable.Range(130, 21).Select(seed => (object)Seeded(seed)).ToArray())).Samples)).Length == 20,
+            "a person named with 21 samples keeps 20");
 
         // 20 learned samples, the oldest first, then a 21st, which replaces the oldest learned one.
         for (var i = 0; i < 20; i++) list.AddSamples(id, Samples(NewSample(Unit(200 + i), Crop(200 + i), T0.AddHours(1 + i))), true);
@@ -598,7 +607,173 @@ static class PeopleTests
         Check(after.Any(s => ((dynamic)s).At == T0.AddDays(2)), "the new learned sample is kept");
         Check(((object[])Items(Only(List(home.Restarted()), "Ana").Samples)).Length == 40, "40 samples are stored");
         Check(Refused(() => list.AddSamples("gone0000", Samples(Seeded(1)), true), "samples for no one") == "This person is no longer in the list.", "samples for a person no one has");
-        Console.WriteLine("PASS people: the 21st named sample is refused, and the 21st learned one replaces the oldest learned");
+        Console.WriteLine("PASS people: a person keeps 20 named samples, and the 21st learned one replaces the oldest learned");
+    }
+
+    // ---- Which named samples a full person keeps ----
+    //
+    // The vectors are built on the 128 axes, so that every similarity is exact: two vectors on different axes are 0 alike,
+    // and one at a cosine between two axes is that cosine from the first.
+
+    /// <summary>The unit vector along one of the 128 axes.</summary>
+    internal static float[] Axis(int axis)
+    {
+        var values = new float[128];
+        values[axis] = 1;
+        return values;
+    }
+
+    /// <summary>A unit vector between two axes, <paramref name="cosine"/> from the first: 0 alike to any vector of other axes.</summary>
+    internal static float[] Between(int first, int second, double cosine)
+    {
+        var values = new float[128];
+        values[first] = (float)cosine;
+        values[second] = (float)Math.Sqrt(1 - cosine * cosine);
+        return values;
+    }
+
+    /// <summary>A named sample of a vector, with the crop of <paramref name="seed"/> and a time <paramref name="seed"/> minutes after <see cref="T0"/>.</summary>
+    static dynamic Look(float[] values, int seed) => NewSample(values, Crop(seed), T0.AddMinutes(seed));
+
+    /// <summary>
+    /// Eighteen named samples on axes 0 to 17, each 0 alike to every other, then <paramref name="more"/>: a full person
+    /// when there are two more. Their seeds are 7000 to 7017.
+    /// </summary>
+    static object[] Spread(params object[] more) => [.. Enumerable.Range(0, 18).Select(axis => (object)Look(Axis(axis), 7000 + axis)), .. more];
+
+    /// <summary>The id of a person's sample seen at <paramref name="seed"/>'s time (<see cref="Look"/>); null when they have none.</summary>
+    static string? IdOf(dynamic person, int seed) =>
+        ((object[])Items(person.Samples)).Select(s => (dynamic)s).Where(s => s.At == T0.AddMinutes(seed)).Select(s => (string)s.Id).SingleOrDefault();
+
+    /// <summary>The seeds of a person's named samples (<see cref="Look"/>), in order.</summary>
+    static int[] NamedSeeds(object person) =>
+        [.. ((object[])Items(((dynamic)person).Samples)).Select(s => (dynamic)s).Where(s => !s.Learned).Select(s => (int)Math.Round(((DateTimeOffset)s.At - T0).TotalMinutes)).Order()];
+
+    /// <summary>Whether any file under the stores' root holds the crop of <paramref name="seed"/>.</summary>
+    static bool OnDisk(Home home, int seed)
+    {
+        var crop = Crop(seed);
+        return Directory.EnumerateFiles(home.Root, "*", SearchOption.AllDirectories).Any(file => File.ReadAllBytes(file).AsSpan().IndexOf(crop) >= 0);
+    }
+
+    /// <summary>The keys of a person's samples, in ordinal order.</summary>
+    static string[] SampleKeys(SharpData data, string personId) => [.. data.Keys($"samples/{personId}/")];
+
+    static void APersonWithRoomTakesEveryNamedSample()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        string id = list.Add(Named("Ana"), null, Samples(Enumerable.Range(0, 18).Select(axis => (object)Look(Axis(axis), 7100 + axis)).ToArray())).Id;
+        // Two faces nearly the same as two of hers, 0.99 alike: with room, each is stored as before, however alike.
+        var person = list.AddSamples(id, Samples(Look(Between(0, 30, 0.99), 7130), Look(Between(1, 31, 0.99), 7131)), false);
+        Check(NamedSeeds((object)person).SequenceEqual([.. Enumerable.Range(7100, 18), 7130, 7131]), "both are stored: " + string.Join(", ", NamedSeeds((object)person)));
+        Check(SampleKeys(data, id).Length == 40 && OnDisk(home, 7130) && OnDisk(home, 7131), "with their embeddings and crops");
+        Console.WriteLine("PASS people: a person with room takes every named sample given, however alike to one they have");
+    }
+
+    static void AFullPersonGivenANewLookLosesTheOneOfTheClosestPairMoreLikeTheRest()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        // The closest pair: 7019, older, and 7020, 0.86 alike to it and also 0.3 alike to the sample on axis 0.
+        var ana = list.Add(Named("Ana"), null, Samples(Spread(Look(Between(18, 19, 0.9), 7019), Look(Between(0, 18, 0.3), 7020))));
+        string id = ana.Id, closer = IdOf(ana, 7020)!;
+        Check(NamedSeeds((object)ana).Length == 20, "she is full");
+        // Sunglasses: a look unlike every one she has.
+        var person = list.AddSamples(id, Samples(Look(Axis(40), 7040)), false);
+        Check(NamedSeeds((object)person).SequenceEqual([.. Enumerable.Range(7000, 18), 7019, 7040]),
+            "the new look is kept, and of the closest pair the newer one goes, as it is the more alike to the rest: " + string.Join(", ", NamedSeeds((object)person)));
+        Check(list.Crop(closer) == null && data.Keys($"samples/{id}/{closer}/").Count == 0, "the sample gone leaves no key");
+        Check(!OnDisk(home, 7020) && OnDisk(home, 7019) && OnDisk(home, 7040), "and its crop is in no file, while the kept ones' are");
+        var stored = Only(List(home.Restarted()), "Ana");
+        Check(NamedSeeds((object)stored).SequenceEqual(NamedSeeds((object)person)) && SampleKeys(home.Restarted("check"), id).Length == 40, "it is stored so");
+        Console.WriteLine("PASS people: a full person given a look unlike theirs keeps it and loses the one of their closest pair more alike to the rest, crop and all");
+    }
+
+    static void OnATieTheOlderOfTheClosestPairGoes()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        // The closest pair, 0.9 alike, each 0 alike to the rest: the newer listed first.
+        var ana = list.Add(Named("Ana"), null, Samples(Spread(Look(Axis(18), 7020), Look(Between(18, 19, 0.9), 7019))));
+        string id = ana.Id, older = IdOf(ana, 7019)!;
+        var person = list.AddSamples(id, Samples(Look(Axis(40), 7040)), false);
+        Check(NamedSeeds((object)person).SequenceEqual([.. Enumerable.Range(7000, 18), 7020, 7040]), "the older of the two goes: " + string.Join(", ", NamedSeeds((object)person)));
+        Check(data.Keys($"samples/{id}/{older}/").Count == 0 && !OnDisk(home, 7019), "with its keys and crop");
+        Console.WriteLine("PASS people: when the two of the closest pair are as alike to the rest, the older goes");
+    }
+
+    static void AFullPersonGivenALookTheyHaveKeepsWhatTheyHad()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), null, Samples(Spread(Look(Axis(18), 7020), Look(Between(18, 19, 0.9), 7019))));
+        string id = ana.Id;
+        var before = SampleKeys(data, id);
+        var had = ((object[])Items(ana.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        // 0.95 alike to the one on axis 0; and exactly as alike to 7020 (0.9) as the closest pair are.
+        foreach (var look in new[] { Look(Between(0, 30, 0.95), 7030), Look(Between(18, 31, 0.9), 7031) })
+        {
+            var person = list.AddSamples(id, Samples(look), false);
+            Check(((object[])Items(person.Samples)).Select(s => (string)((dynamic)s).Id).SequenceEqual(had), "she keeps exactly what she had");
+        }
+        Check(SampleKeys(data, id).SequenceEqual(before), "and her keys are as they were: " + string.Join(", ", SampleKeys(data, id).Except(before)));
+        Check(!OnDisk(home, 7030) && !OnDisk(home, 7031), "neither look's crop is in any file");
+        Console.WriteLine("PASS people: a full person given a look at least as alike to one of theirs as their closest pair keeps what they had, and the look is not stored");
+    }
+
+    static void SeveralNamedSamplesAreJudgedOneAfterTheOther()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        // Two close pairs, 0.9 and 0.8 alike, each the older second; sixteen samples on axes of their own.
+        object[] given = [.. Enumerable.Range(0, 16).Select(axis => (object)Look(Axis(axis), 7000 + axis)),
+            Look(Axis(18), 7022), Look(Between(18, 19, 0.9), 7021), Look(Axis(20), 7024), Look(Between(20, 21, 0.8), 7023)];
+        string id = list.Add(Named("Ana"), null, Samples(given)).Id;
+        // A new look; one 0.85 alike to it, which is closer than the 0.8 pair once the first is in; and another new look.
+        var person = list.AddSamples(id, Samples(Look(Axis(40), 7040), Look(Between(40, 41, 0.85), 7041), Look(Axis(42), 7042)), false);
+        Check(NamedSeeds((object)person).SequenceEqual([.. Enumerable.Range(7000, 16), 7022, 7024, 7040, 7042]),
+            "the first takes the place of the older of the 0.9 pair, the second is not kept, the third takes the older of the 0.8 pair's: " + string.Join(", ", NamedSeeds((object)person)));
+        Check(SampleKeys(data, id).Length == 40 && !OnDisk(home, 7021) && !OnDisk(home, 7023) && !OnDisk(home, 7041), "nothing of the three not kept is left");
+        Console.WriteLine("PASS people: several named samples are judged one after the other, each against the samples as the one before left them");
+    }
+
+    static void LearnedSamplesTakeNoPartInWhichNamedOnesStay()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        string id = list.Add(Named("Ana"), null, Samples(Spread(Look(Axis(18), 7020), Look(Between(18, 19, 0.9), 7019)))).Id;
+        // Two learned samples closer to each other than any named pair, one of them the very look named next.
+        list.AddSamples(id, Samples(Look(Axis(40), 7050)), true);
+        var learned = list.AddSamples(id, Samples(Look(Between(40, 41, 0.99), 7051)), true);
+        var learnedIds = ((object[])LearnedOf(learned)).Select(s => (string)((dynamic)s).Id).ToArray();
+        var person = list.AddSamples(id, Samples(Look(Axis(40), 7040)), false);
+        Check(NamedSeeds((object)person).SequenceEqual([.. Enumerable.Range(7000, 18), 7020, 7040]),
+            "the look is kept though a learned sample is the same, and the named pair loses its older: " + string.Join(", ", NamedSeeds((object)person)));
+        Check(((object[])LearnedOf(person)).Select(s => (string)((dynamic)s).Id).SequenceEqual(learnedIds) && OnDisk(home, 7050) && OnDisk(home, 7051),
+            "the learned samples are untouched");
+        Console.WriteLine("PASS people: learned samples count neither for the new look's likeness nor for the closest pair, and stay as they were");
+    }
+
+    static object[] LearnedOf(dynamic person) => ((object[])Items(person.Samples)).Where(s => ((dynamic)s).Learned).ToArray();
+
+    static void ANewPersonGivenMoreThanFitKeepsTheMostDifferent()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        // Twenty, the closest pair 0.9 alike and the older second; then a new look; then one 0.95 alike to axis 0's.
+        var mia = list.Add(Named("Mia"), null, Samples(Spread(Look(Axis(18), 7020), Look(Between(18, 19, 0.9), 7019), Look(Axis(40), 7040), Look(Between(0, 30, 0.95), 7030))));
+        Check(NamedSeeds((object)mia).SequenceEqual([.. Enumerable.Range(7000, 18), 7020, 7040]), "she keeps the twenty most different: " + string.Join(", ", NamedSeeds((object)mia)));
+        Check(SampleKeys(data, (string)mia.Id).Length == 40 && !OnDisk(home, 7019) && !OnDisk(home, 7030), "and nothing of the two others is stored");
+        Check(NamedSeeds((object)Only(List(home.Restarted()), "Mia")).SequenceEqual(NamedSeeds((object)mia)), "she is stored so");
+        Console.WriteLine("PASS people: a new person named with more than 20 samples keeps the twenty most different, judged one after the other");
     }
 
     static void ACropOverOneMebibyteIsRefused()
@@ -635,7 +810,7 @@ static class PeopleTests
         for (var i = 0; i < 3; i++) list.AddSamples(ivanId, Samples(NewSample(Unit(600 + i), Crop(600 + i), T0.AddHours(i))), true);
         list.Seen(ivanId, T0.AddDays(1), "camera.porch");
         list.Seen(anaId, T0.AddHours(5), Camera);
-        var newestNamed = ((object[])Items(Only(list, "Ivan").Samples)).Where(s => !((dynamic)s).Learned).OrderByDescending(s => (DateTimeOffset)((dynamic)s).At).Take(5)
+        var named = ((object[])Items(Only(list, "Ana").Samples)).Concat((object[])Items(Only(list, "Ivan").Samples)).Where(s => !((dynamic)s).Learned)
             .Select(s => (string)((dynamic)s).Id).ToHashSet();
 
         list.Merge(ivanId, anaId);
@@ -643,7 +818,9 @@ static class PeopleTests
         var merged = Only(list, "Ana");
         var samples = ((object[])Items(merged.Samples));
         Check(samples.Count(s => !((dynamic)s).Learned) == 20 && samples.Count(s => ((dynamic)s).Learned) == 3, $"20 named and 3 learned: {samples.Length}");
-        Check(newestNamed.All(id => samples.Any(s => ((dynamic)s).Id == id)), "Ivan's newest named samples filled Ana's room");
+        // Which 20, AMergeIntoAFullPersonKeepsTheMostDifferent pins.
+        Check(samples.Where(s => !((dynamic)s).Learned).All(s => named.Contains((string)((dynamic)s).Id)), "the named ones are hers and his");
+        Check(data.Keys($"samples/{anaId}/").Count == 46, "and only the samples she lists have keys: " + data.Keys($"samples/{anaId}/").Count);
         Check(merged.LastSeen == T0.AddDays(1) && merged.LastSeenAt == "camera.porch", $"the later last seen is kept: {merged.LastSeen} {merged.LastSeenAt}");
         Check(samples.All(s => list.Crop((string)((dynamic)s).Id) != null), "every sample kept has its crop");
         Check(data.Keys($"people/{ivanId}").Count == 0 && data.Keys($"samples/{ivanId}/").Count == 0, "none of Ivan's keys is left: " + string.Join(", ", data.Keys()));
@@ -652,6 +829,28 @@ static class PeopleTests
         Check(Refused(() => list.Merge(anaId, anaId), "a merge into itself") == "A person cannot be merged with themselves.", "a merge into itself");
         Check(Refused(() => list.Merge(anaId, "gone0000"), "a merge into no one") == "This person is no longer in the list.", "a merge into no one");
         Console.WriteLine("PASS people: a merge moves samples up to the caps, named first, keeps the later last seen and removes the source");
+    }
+
+    static void AMergeIntoAFullPersonKeepsTheMostDifferent()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        string anaId = list.Add(Named("Ana"), null, Samples(Spread(Look(Axis(18), 7020), Look(Between(18, 19, 0.9), 7019)))).Id;
+        // Ivan: a look unlike all of Ana's, the newer; one 0.95 alike to her sample on axis 0; and a learned sample.
+        string ivanId = list.Add(Named("Ivan"), null, Samples(Look(Between(0, 30, 0.95), 7030), Look(Axis(40), 7040))).Id;
+        list.AddSamples(ivanId, Samples(Look(Axis(50), 7050)), true);
+
+        list.Merge(ivanId, anaId);
+        var ana = Only(list, "Ana");
+        Check(ByName(list, "Ivan") == null, "Ivan is merged away, not refused");
+        Check(NamedSeeds((object)ana).SequenceEqual([.. Enumerable.Range(7000, 18), 7020, 7040]),
+            "Ivan's new look takes the place of the older of Ana's closest pair, and the other is not kept: " + string.Join(", ", NamedSeeds((object)ana)));
+        Check(((object[])LearnedOf(ana)).Length == 1, "his learned sample is hers");
+        Check(SampleKeys(data, anaId).Length == 42 && data.Keys($"samples/{ivanId}/").Count == 0 && data.Keys($"people/{ivanId}").Count == 0,
+            "only what she lists has keys, and nothing of Ivan's is left: " + string.Join(", ", data.Keys("samples/")));
+        Check(!OnDisk(home, 7019) && !OnDisk(home, 7030) && OnDisk(home, 7040) && OnDisk(home, 7050), "neither crop of the two not kept is in any file");
+        Console.WriteLine("PASS people: a merge into a full person keeps the most different named samples, as naming does, and leaves nothing of the ones not kept");
     }
 
     static void AnInterruptedMergeLeavesBothReadable()

@@ -102,10 +102,11 @@ static class PeopleDetectorTests
                 (nameof(ThePageListsTheUnknownFacesToNameOrDismiss), ThePageListsTheUnknownFacesToNameOrDismiss),
                 (nameof(TheUnknownCardsKeepTheirPlaces), TheUnknownCardsKeepTheirPlaces),
                 (nameof(NamingAFaceIsASightingOfItsPerson), NamingAFaceIsASightingOfItsPerson),
+                (nameof(SavingAFaceForAFullPersonKeepsTheirMostDifferentSamples), SavingAFaceForAFullPersonKeepsTheirMostDifferentSamples),
                 (nameof(AStrangerIsDismissed), AStrangerIsDismissed),
                 (nameof(ThePageListsThePeopleToRenameMergeAndDelete), ThePageListsThePeopleToRenameMergeAndDelete),
                 (nameof(ThePageListsAPersonsSamplesToRemove), ThePageListsAPersonsSamplesToRemove),
-                (nameof(APressForWhatIsGoneOrFullIsRefused), APressForWhatIsGoneOrFullIsRefused),
+                (nameof(APressForWhatIsGoneIsRefused), APressForWhatIsGoneIsRefused),
                 (nameof(AChangeOnAnotherDetectorRedrawsThePage), AChangeOnAnotherDetectorRedrawsThePage),
                 (nameof(TheRecognisedSensorSaysWhoIsInFrame), TheRecognisedSensorSaysWhoIsInFrame),
                 (nameof(TheRecognisedSensorIsUnavailableUntilTheModelOpens), TheRecognisedSensorIsUnavailableUntilTheModelOpens),
@@ -1949,6 +1950,45 @@ static class PeopleDetectorTests
         Console.WriteLine("PASS people detector: naming a face is a sighting of its person at the group's last sighting here, written at once, and never moves last seen back");
     }
 
+    static async Task SavingAFaceForAFullPersonKeepsTheirMostDifferentSamples()
+    {
+        using var cameras = Cameras(("camera.porch", "Porch camera"));
+        var spots = await Spots();
+        using var fake = new Fake(spots);
+        // Each face of the porch a look on an axis of its own, unlike every sample of Ana's.
+        foreach (var spot in Enumerable.Range(0, spots.Length)) fake.Embeds(spot, PeopleTests.Axis(30 + spot));
+        Show();
+        await using var rig = await Rig.Start("page-full");
+        var list = PeopleOf(rig);
+        // Ana has 20 named samples: eighteen on axes of their own, and a pair 0.9 alike, the older second.
+        var at = DateTimeOffset.UtcNow.AddHours(-1);
+        var given = Enumerable.Range(0, 18).Select(axis => (object)PeopleTests.NewSample(PeopleTests.Axis(axis), PeopleTests.Crop(2000 + axis), at.AddMinutes(axis), "camera.elsewhere"))
+            .Append((object)PeopleTests.NewSample(PeopleTests.Axis(18), PeopleTests.Crop(2018), at.AddMinutes(30), "camera.elsewhere"))
+            .Append((object)PeopleTests.NewSample(PeopleTests.Between(18, 19, 0.9), PeopleTests.Crop(2019), at.AddMinutes(20), "camera.elsewhere"));
+        var ana = list.Add(First(Ana), Names(Ana).Last, PeopleTests.Samples([.. given]));
+        string anaId = ana.Id;
+        string older = ((object[])PeopleTests.Items(ana.Samples)).Select(s => (dynamic)s).Single(s => s.At == at.AddMinutes(20)).Id;
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "four new looks are drawn: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        var group = Shown(rig)[0];
+        string groupId = group.Id;
+        DateTimeOffset last = group.Last;
+
+        Check(await Press(rig, "unknown", groupId, "save", new { person = Picked(anaId) }) == "done", "Save for a person with 20 named samples is not refused");
+        var unknown = Member(rig.Detector(), "Unknown");
+        Check(unknown.Find(groupId) == null && CardOf(Page(rig), "unknown", groupId) == null && CardsOf(Page(rig), "unknown").Length == 3, "the card goes: " + Page(rig)?.ToJsonString());
+        var person = Reread(list, Ana);
+        var named = ((object[])PeopleTests.Items(person.Samples)).Select(s => (dynamic)s).Where(s => !s.Learned).ToArray();
+        Check(named.Length == 20 && named.Any(s => s.Camera == "camera.porch") && named.All(s => s.Id != older), "she keeps 20: the new look in, the older of her closest pair out");
+        Check(rig.Shared().Keys($"samples/{anaId}/{older}/").Count == 0 && rig.Shared().Keys($"samples/{anaId}/").Count == 40, "the sample gone leaves no key");
+        Check(person.LastSeen == last && person.LastSeenAt == "camera.porch", $"the naming is a sighting at the group's last: {person.LastSeen} at {person.LastSeenAt}");
+        Check(Detail(CardOf(Page(rig), "people", anaId)!)!.StartsWith("20 samples · last seen", StringComparison.Ordinal), "her card is drawn again: " + Page(rig)?.ToJsonString());
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: Save names a face for a person with 20 named samples: the look is kept in place of the older of their closest pair, the card goes, and it is a sighting");
+    }
+
     static async Task AStrangerIsDismissed()
     {
         using var fake = new Fake(await Spots());
@@ -2115,15 +2155,16 @@ static class PeopleDetectorTests
     // Each press is made against the page as the test set it up: a check redraws the page when the groups it shows change,
     // or when the people list changed while it ran, so the checks are held from the first change behind the page's back
     // on (one waits inside the fake recogniser), and a change made then is on the page only once a press redraws it.
-    static async Task APressForWhatIsGoneOrFullIsRefused()
+    static async Task APressForWhatIsGoneIsRefused()
     {
         var spots = await Spots();
         using var fake = new Fake(spots);
         Show();
         await using var rig = await Rig.Start("page-gone");
         var list = PeopleOf(rig);
-        // Ana has no room for more named samples; Ivan, Ivo and Eva are only named.
-        var ana = list.Add(First(Ana), Names(Ana).Last, PeopleTests.Samples([.. Enumerable.Range(0, 20).Select(i => (object)PeopleTests.NewSample(PeopleTests.Unit(2000 + i), PeopleTests.Crop(2000 + i), DateTimeOffset.UtcNow, "camera.elsewhere"))]));
+        // Ana, Ivan, Ivo and Eva are named. (A Save for a person with 20 named samples is not refused:
+        // SavingAFaceForAFullPersonKeepsTheirMostDifferentSamples.)
+        Named(list, Ana, 1);
         var ivan = Named(list, Ivan, 2);
         var ivo = Named(list, Ivo, 3);
         var eva = Named(list, Eva, 4);
@@ -2143,11 +2184,6 @@ static class PeopleDetectorTests
             list.Reload();
             return ((object[])PeopleTests.Items(list.People)).Length;
         }
-
-        // A person with 20 named samples: the group stays.
-        Check(await Press(rig, "unknown", ids[0], "save", new { person = Picked((string)ana.Id) }) == $"refused: {Ana} has no room for more samples.", "Save for a full person");
-        Check(unknown.Find(ids[0]) != null && CardOf(Page(rig), "unknown", ids[0]) != null, "the group stays, on the page too");
-        Check(((object[])PeopleTests.Items(Reread(list, Ana).Samples)).Length == 20, "Ana keeps her 20");
 
         // A person deleted on another detector, whom the page no longer offers: a press that still chooses him finds the
         // page changed, and nothing is done.
@@ -2192,7 +2228,7 @@ static class PeopleDetectorTests
         Check(fake.Held, "the checks were held throughout");
         Hide();
         fake.Release();
-        Console.WriteLine("PASS people detector: a press for a group or person that is gone, for a full person and for a group without a picture is refused in a sentence, and the page is redrawn; one that chooses a person the page no longer offers finds the page changed");
+        Console.WriteLine("PASS people detector: a press for a group or person that is gone and for a group without a picture is refused in a sentence, and the page is redrawn; one that chooses a person the page no longer offers finds the page changed");
     }
 
     static async Task AChangeOnAnotherDetectorRedrawsThePage()
