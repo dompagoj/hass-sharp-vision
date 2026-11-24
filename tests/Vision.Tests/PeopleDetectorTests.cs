@@ -88,6 +88,11 @@ static class PeopleDetectorTests
                 (nameof(ARecogniserThatThrowsFailsThatFaceOnly), ARecogniserThatThrowsFailsThatFaceOnly),
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
                 (nameof(StopClosesTheRecogniserAndARestartKeepsPeopleAndGroups), StopClosesTheRecogniserAndARestartKeepsPeopleAndGroups),
+                (nameof(ThePageListsTheUnknownFacesToNameOrDismiss), ThePageListsTheUnknownFacesToNameOrDismiss),
+                (nameof(ThePageListsThePeopleToRenameMergeAndDelete), ThePageListsThePeopleToRenameMergeAndDelete),
+                (nameof(ThePageListsAPersonsSamplesToRemove), ThePageListsAPersonsSamplesToRemove),
+                (nameof(APressForWhatIsGoneOrFullIsRefused), APressForWhatIsGoneOrFullIsRefused),
+                (nameof(AChangeOnAnotherDetectorRedrawsThePage), AChangeOnAnotherDetectorRedrawsThePage),
             ]);
         else if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
             failures.Add($"an hs_vision library is required (HS_VISION_REQUIRE_LIBRARY=1) and there is none for {Rid}");
@@ -125,7 +130,7 @@ static class PeopleDetectorTests
         }
         if (failures.Count > 0) throw new Exception($"People detector: {failures.Count} failing:\n" + string.Join("\n", failures));
         Console.WriteLine(VisionTests.LocalLibrary != null
-            ? $"PASS people detector: PeopleDetector.cs reports the faces and people a camera shows, holds seen, writes last seen sparingly, fails a check without a frame, and recognises, groups and learns faces ({VisionTests.LocalLibrary})"
+            ? $"PASS people detector: PeopleDetector.cs reports the faces and people a camera shows, holds seen, writes last seen sparingly, fails a check without a frame, recognises, groups and learns faces, and has a page to name, merge and delete them ({VisionTests.LocalLibrary})"
             : "PASS people detector: PeopleDetector.cs has its entities and settings, and an unsupported platform fails its start");
     }
 
@@ -840,7 +845,10 @@ static class PeopleDetectorTests
         Check(shared.Count == 0 && own.Count == 0, "no store key is written: " + string.Join(", ", shared.Concat(own)));
         var labels = rig.Labels();
         Check(labels.Length == 15 && labels.All(IsScore), "the camera draws each face's and person's score, no name: " + string.Join(", ", labels));
-        Console.WriteLine("PASS people detector: with Recognise faces off, nothing is opened or stored, and the faces and people are counted and drawn as before");
+        Check(Page(rig) == null, "the detector has no page: " + Page(rig)?.ToJsonString());
+        var counts = await rig.Ok(rig.Api.DeviceUiRequest, new { operation = "counts" });
+        Check(counts["attention"]!["porch"] == null, "and nothing waits: " + counts.ToJsonString());
+        Console.WriteLine("PASS people detector: with Recognise faces off, nothing is opened or stored, the detector has no page, and the faces and people are counted and drawn as before");
     }
 
     static async Task DetectPeopleOffLeavesThePersonEntitiesUnavailable()
@@ -1088,5 +1096,347 @@ static class PeopleDetectorTests
         await Until(() => fake.Closed("Porch") == 2, "the second stop closes the second recogniser");
         Check(fake.UsedClosed == 0, $"a closed recogniser is never asked: {fake.UsedClosed} times");
         Console.WriteLine("PASS people detector: Stop closes the recogniser, which no check uses after, and a restart keeps the people and the groups");
+    }
+
+    // ---- The page, read and pressed as the panel does ----
+
+    /// <summary>The page of the device <c>door</c> of <paramref name="definition"/>, as the panel reads it; null when it has none or the definition is not running.</summary>
+    static JsonObject? Page(Rig rig, string definition = "porch")
+    {
+        var read = Rig.Answer(rig.Api.DeviceUiRequest, new { operation = "read", definitionId = definition }).GetAwaiter().GetResult();
+        Check(read["ok"]!.GetValue<bool>(), "the page is read: " + read.ToJsonString());
+        var result = read["result"]!.AsObject();
+        if (!result["running"]!.GetValue<bool>()) return null;
+        return result["pages"]!.AsArray().Select(page => page!.AsObject()).SingleOrDefault(page => (string)page["nodeKey"]! == "door");
+    }
+
+    /// <summary>The list of the page with that id; null when it has none.</summary>
+    static JsonObject? ListOf(JsonObject? page, string id) =>
+        page?["lists"]!.AsArray().Select(list => list!.AsObject()).SingleOrDefault(list => (string)list["id"]! == id);
+
+    /// <summary>The cards of the page's list; none when it has no such list.</summary>
+    static JsonObject[] CardsOf(JsonObject? page, string list) => ListOf(page, list)?["cards"]!.AsArray().Select(card => card!.AsObject()).ToArray() ?? [];
+
+    static JsonObject? CardOf(JsonObject? page, string list, string id) => CardsOf(page, list).SingleOrDefault(card => (string)card["id"]! == id);
+
+    static string? Title(JsonObject card) => (string?)card["title"];
+    static string? Detail(JsonObject card) => (string?)card["detail"];
+    static JsonObject? FieldOf(JsonObject card, string key) => card["fields"]!.AsArray().Select(f => f!.AsObject()).SingleOrDefault(f => (string)f["key"]! == key);
+    static string[] FieldKeys(JsonObject card) => [.. card["fields"]!.AsArray().Select(f => (string)f!["key"]!)];
+    static string[] ActionIds(JsonObject card) => [.. card["actions"]!.AsArray().Select(a => (string)a!["id"]!)];
+    static JsonObject ActionOf(JsonObject card, string id) => card["actions"]!.AsArray().Select(a => a!.AsObject()).Single(a => (string)a["id"]! == id);
+    static string[] Texts(JsonNode? array) => array == null ? [] : [.. array.AsArray().Select(item => (string)item!)];
+
+    /// <summary>Presses an action of a card of <paramref name="definition"/>'s page with the values given: <c>done</c>, <c>changed</c>, or the status and its sentence.</summary>
+    static async Task<string> Press(Rig rig, string list, string card, string action, object values, string definition = "porch")
+    {
+        var acted = await rig.Ok(rig.Api.DeviceUiRequest, new { operation = "act", definitionId = definition, nodeKey = "door", list, card, action, values });
+        var message = acted["message"]?.GetValue<string>();
+        return message == null ? (string)acted["status"]! : $"{acted["status"]}: {message}";
+    }
+
+    /// <summary>The JPEG of a card's image, as the panel fetches it; null when the page has no such image.</summary>
+    static async Task<byte[]?> Picture(Rig rig, JsonObject card, string definition = "porch")
+    {
+        if (card["image"]?.GetValue<string>() is not { } hash) return null;
+        var answer = await Rig.Answer(rig.Api.DeviceUiRequest, new { operation = "image", definitionId = definition, nodeKey = "door", hash });
+        return answer["ok"]!.GetValue<bool>() ? Convert.FromBase64String((string)answer["result"]!["jpeg"]!) : null;
+    }
+
+    /// <summary>The cards waiting on the device <c>door</c> of <paramref name="definition"/>, as the Entities page counts them.</summary>
+    static async Task<int> Waiting(Rig rig, string definition = "porch")
+    {
+        var counts = await rig.Ok(rig.Api.DeviceUiRequest, new { operation = "counts" });
+        return counts["attention"]![definition]?["door"]?.GetValue<int>() ?? 0;
+    }
+
+    /// <summary>Home Assistant's entities, as <c>State</c> reads them, for the test: each camera of <paramref name="names"/> with its friendly name; any other is not there.</summary>
+    static IDisposable Cameras(params (string EntityId, string Name)[] cameras)
+    {
+        var before = PyInterop.Entity;
+        var names = cameras.ToDictionary(camera => camera.EntityId, camera => camera.Name, StringComparer.Ordinal);
+        PyInterop.Entity = id => names.TryGetValue(id, out var name)
+            ? new HasEntityState { EntityId = id, Domain = "camera", ObjectId = id["camera.".Length..], State = "idle", Attributes = new() { ["friendly_name"] = name } }
+            : null;
+        return new Restore(() => PyInterop.Entity = before);
+    }
+
+    sealed class Restore(Action undo) : IDisposable
+    {
+        public void Dispose() => undo();
+    }
+
+    // A time relative to now, as the page writes one drawn just now.
+    const string Moment = "a moment ago";
+
+    // Names no log line may hold, beside Ana and Ivan.
+    const string Mia = "Mia Kovac", Ivo = "Ivo Babic";
+
+    static void NoNameIsLogged(Rig rig) =>
+        Check(!rig.Home.Logs().Any(l => new[] { Ana, Ivan, Mia, Ivo }.Any(name => l.Contains(name, StringComparison.OrdinalIgnoreCase))), "no line names anyone: " + rig.Lines());
+
+    static async Task ThePageListsTheUnknownFacesToNameOrDismiss()
+    {
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("page-unknown");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        fake.Embeds(0, PeopleTests.At(PeopleTests.Unit(1), 0.8, 11));
+        fake.Embeds(1, PeopleTests.At(PeopleTests.Unit(2), 0.45, 12));
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 3, "the maybe and the two strangers are drawn: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+
+        var page = Page(rig);
+        Check(page!["lists"]!.AsArray().Select(l => (string)l!["id"]!).SequenceEqual(["unknown", "people"]), "the page has the unknown faces, then the people: " + page.ToJsonString());
+        var unknown = ListOf(page, "unknown")!;
+        Check((string)unknown["title"]! == "Unknown faces" && unknown["attention"]!.GetValue<bool>() && (string)unknown["empty"]! == "No unknown faces.", "the unknown list: " + unknown.ToJsonString());
+        var groups = Shown(rig);
+        var cards = CardsOf(page, "unknown");
+        Check(cards.Select(c => (string)c["id"]!).SequenceEqual(groups.Select(g => (string)g.Id)), "a card for each shown group, in the order shown (the newest sighting first): " + string.Join(",", cards.Select(c => (string)c["id"]!)));
+        Check(page["attention"]!.GetValue<int>() == 3 && await Waiting(rig) == 3, $"the three wait: {page["attention"]}, {await Waiting(rig)}");
+        var unknownFaces = Member(rig.Detector(), "Unknown");
+        foreach (var card in cards)
+        {
+            string id = (string)card["id"]!;
+            var group = groups.Single(g => (string)g.Id == id);
+            Check(System.Text.RegularExpressions.Regex.IsMatch(Title(card) ?? "", @"^Seen \d+ times · last (a moment|\d+ minutes?) ago$"), "the card says how often and when: " + Title(card));
+            Check((await Picture(rig, card))?.SequenceEqual((byte[])unknownFaces.Crop(id)) == true, "the card shows the group's crop");
+            Check(FieldKeys(card).SequenceEqual(["name"]), "one field, Name: " + card.ToJsonString());
+            var name = FieldOf(card, "name")!;
+            Check((string)name["label"]! == "Name" && (string)name["type"]! == "text" && name["required"]!.GetValue<bool>() && Texts(name["suggestions"]).SequenceEqual([Ana, Ivan]),
+                "Name is required and offers the known names: " + name.ToJsonString());
+            Check(ActionIds(card).SequenceEqual(["save", "dismiss"]) && (string)ActionOf(card, "save")["style"]! == "primary" && ActionOf(card, "save")["validate"]!.GetValue<bool>()
+                && !ActionOf(card, "dismiss")["validate"]!.GetValue<bool>() && ActionOf(card, "dismiss")["confirm"] == null, "Save, the main action, and Dismiss, which does not validate: " + card.ToJsonString());
+            if (group.SuggestedPersonId == (string)ivan.Id)
+                Check((string?)name["value"] == Ivan && Detail(card) == $"Might be {Ivan}", "the maybe has Ivan filled in and suggested: " + card.ToJsonString());
+            else
+                Check(name["value"] == null && Detail(card) == null, "a stranger's Name is empty and nothing is suggested: " + card.ToJsonString());
+        }
+        var maybe = groups.Single(g => g.SuggestedPersonId == (string)ivan.Id);
+        var (first, second) = (groups.First(g => g.SuggestedPersonId == null), groups.Last(g => g.SuggestedPersonId == null));
+
+        // Save with a new name: a person with the group's samples as named samples, and the group gone.
+        int faces = unknownFaces.Samples((string)first.Id).Count;
+        Check(await Press(rig, "unknown", (string)first.Id, "save", new { name = $"  {Mia} " }) == "done", "Save of a new name");
+        var mia = Reread(list, Mia);
+        var samples = (object[])PeopleTests.Items(mia.Samples);
+        Check(samples.Length == faces && faces > 0 && samples.All(s => !((dynamic)s).Learned), $"Mia has the group's {faces} faces as named samples: {samples.Length}");
+        page = Page(rig);
+        Check(CardOf(page, "unknown", (string)first.Id) == null && Shown(rig).Length == 2 && CardOf(page, "people", (string)mia.Id) is { } miaCard && Title(miaCard) == Mia,
+            "the group is gone, and Mia is listed: " + page?.ToJsonString());
+        Check(page!["attention"]!.GetValue<int>() == 2 && await Waiting(rig) == 2, "two wait");
+
+        // Save with a known name in another case: the group's samples go to that person.
+        faces = unknownFaces.Samples((string)second.Id).Count;
+        Check(await Press(rig, "unknown", (string)second.Id, "save", new { name = Ana.ToLowerInvariant() }) == "done", "Save of a known name in lower case");
+        var ana = Reread(list, Ana);
+        Check(((object[])PeopleTests.Items(ana.Samples)).Count(s => !((dynamic)s).Learned) == 1 + faces, $"Ana gains the group's {faces} faces as named samples");
+        Check(((object[])PeopleTests.Items(list.People)).Length == 3 && ana.Name == Ana, "no one new, and Ana keeps her name");
+        Check(CardOf(Page(rig), "unknown", (string)second.Id) == null, "the group is gone");
+
+        // Dismiss, with the required Name emptied: the group goes, and its samples with it.
+        Check(await Press(rig, "unknown", (string)maybe.Id, "dismiss", new { name = "" }) == "done", "Dismiss with Name empty");
+        page = Page(rig);
+        Check(CardsOf(page, "unknown").Length == 0 && Shown(rig).Length == 0 && page!["attention"]!.GetValue<int>() == 0 && await Waiting(rig) == 0, "nothing waits: " + page?.ToJsonString());
+        Check(rig.DeviceData().Keys("groups/").Count == 0, "no group's key is left: " + string.Join(", ", rig.DeviceData().Keys("groups/")));
+        Check(Reread(list, Ivan).Samples.Count == 1, "Ivan, only suggested, gained nothing");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: the page lists each shown group with its crop, its sightings and a required Name offering the known names (a maybe's filled in); Save makes a person or adds to one by name in any case, Dismiss removes the group, and the attention counts the groups");
+    }
+
+    static async Task ThePageListsThePeopleToRenameMergeAndDelete()
+    {
+        using var cameras = Cameras(("camera.porch", "Porch camera"));
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("page-people");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        list.AddSamples((string)ivan.Id, PeopleTests.Samples(PeopleTests.NewSample(PeopleTests.Unit(3), PeopleTests.Crop(3), DateTimeOffset.UtcNow.AddHours(-1), "camera.elsewhere")), false);
+        list.AddSamples((string)ivan.Id, PeopleTests.Samples(PeopleTests.NewSample(PeopleTests.At(PeopleTests.Unit(2), 0.7, 4), PeopleTests.Crop(4), DateTimeOffset.UtcNow.AddHours(-2), "camera.elsewhere")), true);
+        // Last seen five minutes ago at a camera Home Assistant no longer has.
+        list.Seen((string)ivan.Id, DateTimeOffset.UtcNow.AddMinutes(-5).AddSeconds(-10), "camera.gone");
+        fake.Embeds(0, PeopleTests.At(PeopleTests.Unit(1), 0.8, 11));
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardOf(Page(rig), "people", (string)ana.Id) is { } card && Detail(card) == $"1 sample · last seen {Moment} at Porch camera",
+            "Ana's card says she was seen just now at the camera's friendly name: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+
+        var page = Page(rig);
+        var people = ListOf(page, "people")!;
+        Check((string)people["title"]! == "People" && !people["attention"]!.GetValue<bool>() && (string)people["empty"]! == "Nobody is named yet.", "the people list: " + people.ToJsonString());
+        var cards = CardsOf(page, "people");
+        Check(cards.Select(Title).SequenceEqual([Ana, Ivan]) && cards.Select(c => (string)c["id"]!).SequenceEqual([(string)ana.Id, (string)ivan.Id]), "a card for each person, by name: " + people.ToJsonString());
+        var (anaCard, ivanCard) = (cards[0], cards[1]);
+        Check(Detail(ivanCard) == "3 samples (1 learned) · last seen 5 minutes ago at camera.gone", "Ivan's card counts his samples and names a camera that is gone by its id: " + Detail(ivanCard));
+        Check((await Picture(rig, anaCard))?.SequenceEqual(PeopleTests.Crop(1)) == true && (await Picture(rig, ivanCard))?.SequenceEqual(PeopleTests.Crop(2)) == true,
+            "each card shows the person's newest named sample's crop");
+        Check(FieldKeys(anaCard).SequenceEqual(["name", "into"]), "Name and Merge into: " + anaCard.ToJsonString());
+        var name = FieldOf(anaCard, "name")!;
+        var into = FieldOf(anaCard, "into")!;
+        Check((string)name["label"]! == "Name" && (string)name["value"]! == Ana && name["required"]!.GetValue<bool>(), "Name has her name and is required: " + name.ToJsonString());
+        Check((string)into["label"]! == "Merge into" && (string)into["type"]! == "select" && Texts(into["options"]).SequenceEqual([Ivan]) && (string)into["value"]! == Ivan,
+            "Merge into offers the others: " + into.ToJsonString());
+        Check(ActionIds(anaCard).SequenceEqual(["save", "merge", "samples", "delete"]), "Save, Merge, Samples and Delete: " + anaCard.ToJsonString());
+        Check((string)ActionOf(anaCard, "save")["style"]! == "primary" && (string?)ActionOf(anaCard, "merge")["confirm"] == $"Merge {Ana} into {Ivan}?"
+            && (string?)ActionOf(anaCard, "delete")["confirm"] == $"Delete {Ana} and their samples?" && (string)ActionOf(anaCard, "delete")["style"]! == "danger"
+            && !ActionOf(anaCard, "delete")["validate"]!.GetValue<bool>() && !ActionOf(anaCard, "samples")["validate"]!.GetValue<bool>(),
+            "Merge and Delete ask first, and Delete and Samples need no field: " + anaCard.ToJsonString());
+
+        // A rename to a name someone else has is refused in a sentence; to a free one, renames.
+        Check(await Press(rig, "people", (string)ivan.Id, "save", new { name = Ana.ToUpperInvariant() }) == $"refused: {Ana.ToUpperInvariant()} is already someone else's name.", "a rename to Ana's name");
+        Check(await Press(rig, "people", (string)ivan.Id, "save", new { name = $" {Ivo} " }) == "done", "a rename");
+        Check(Reread(list, Ivo).Id == (string)ivan.Id && Title(CardOf(Page(rig), "people", (string)ivan.Id)!) == Ivo, "Ivan is Ivo now, on the page too");
+
+        // Merge moves Ivo's samples to Ana and removes him.
+        Check(await Press(rig, "people", (string)ivan.Id, "merge", new { name = Ivo, into = Ana }) == "done", "Merge Ivo into Ana");
+        var merged = Reread(list, Ana);
+        var samples = (object[])PeopleTests.Items(merged.Samples);
+        Check(((object[])PeopleTests.Items(list.People)).Length == 1 && samples.Length == 4 && samples.Count(s => ((dynamic)s).Learned) == 1, $"Ana has the four samples, one learned: {samples.Length}");
+        page = Page(rig);
+        Check(CardsOf(page, "people") is [var only] && (string)only["id"]! == (string)ana.Id && Detail(only)!.StartsWith("4 samples (1 learned) · last seen", StringComparison.Ordinal),
+            "one card, Ana's, with the samples: " + page?.ToJsonString());
+        Check(FieldKeys(CardsOf(page, "people")[0]).SequenceEqual(["name"]) && ActionIds(CardsOf(page, "people")[0]).SequenceEqual(["save", "samples", "delete"]),
+            "alone, she has no Merge into and no Merge: " + page?.ToJsonString());
+
+        // Delete removes her with her samples.
+        Check(await Press(rig, "people", (string)ana.Id, "delete", new { }) == "done", "Delete");
+        list.Reload();
+        Check(((object[])PeopleTests.Items(list.People)).Length == 0 && rig.Shared().Keys("samples/").Count == 0, "nobody is left, nor a sample: " + string.Join(", ", rig.Shared().Keys("samples/")));
+        Check(CardsOf(Page(rig), "people").Length == 0, "the people list is empty: " + Page(rig)?.ToJsonString());
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: the page lists the people by name with their newest named crop, their samples and where they were last seen by the camera's friendly name; Save renames and refuses a taken name, Merge asks and moves, Delete asks and removes");
+    }
+
+    static async Task ThePageListsAPersonsSamplesToRemove()
+    {
+        using var fake = new Fake(await Spots());
+        await using var rig = await Rig.Start("page-samples");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        string anaId = ana.Id;
+        list.AddSamples(anaId, PeopleTests.Samples(PeopleTests.NewSample(PeopleTests.Unit(3), PeopleTests.Crop(3), DateTimeOffset.UtcNow.AddHours(-2).AddMinutes(-1), "camera.elsewhere")), false);
+        list.AddSamples(anaId, PeopleTests.Samples(PeopleTests.NewSample(PeopleTests.At(PeopleTests.Unit(1), 0.7, 4), PeopleTests.Crop(4), DateTimeOffset.UtcNow.AddHours(-1).AddMinutes(-1), "camera.elsewhere")), true);
+        var ivan = Named(list, Ivan, 2);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "people").Length == 2, "the two are drawn: " + Page(rig)?.ToJsonString());
+        Check(ListOf(Page(rig), "samples") == null, "no samples list before Samples");
+
+        Check(await Press(rig, "people", anaId, "samples", new { }) == "done", "Samples");
+        var page = Page(rig);
+        var shown = ListOf(page, "samples");
+        Check(shown != null && (string)shown["title"]! == $"Samples of {Ana}" && !shown["attention"]!.GetValue<bool>(), "the samples list: " + shown?.ToJsonString());
+        var held = (object[])PeopleTests.Items(Reread(list, Ana).Samples);
+        string IdOf(int seed) => (string)((dynamic)held.Single(s => PeopleTests.Cosine((float[])((dynamic)s).Embedding.Values, seed == 4 ? PeopleTests.At(PeopleTests.Unit(1), 0.7, 4) : PeopleTests.Unit(seed)) > 0.999)).Id;
+        var cards = CardsOf(page, "samples");
+        Check(cards.Select(c => (string)c["id"]!).SequenceEqual([IdOf(1), IdOf(3), IdOf(4)]), "named first, then learned, the newest first: " + shown!.ToJsonString());
+        Check(cards.Select(Title).SequenceEqual([$"Named · {Moment} at camera.elsewhere", "Named · 2 hours ago at camera.elsewhere", "Learned · 1 hour ago at camera.elsewhere"]),
+            "each says what it is, when and where: " + string.Join(" | ", cards.Select(Title)));
+        Check(ActionIds(cards[0]).SequenceEqual(["remove", "close"]) && cards.Skip(1).All(c => ActionIds(c).SequenceEqual(["remove"])) && cards.All(c => FieldKeys(c).Length == 0),
+            "each has Remove, and the first Close: " + shown.ToJsonString());
+        foreach (var (card, seed) in cards.Zip([1, 3, 4]))
+            Check((await Picture(rig, card))?.SequenceEqual(PeopleTests.Crop(seed)) == true, $"the card of seed {seed} shows its crop");
+
+        // Remove takes a sample; the last named one is refused.
+        Check(await Press(rig, "samples", IdOf(3), "remove", new { }) == "done", "Remove of a named sample");
+        Check(CardsOf(Page(rig), "samples").Select(c => (string)c["id"]!).SequenceEqual([IdOf(1), IdOf(4)]), "it is gone: " + Page(rig)?.ToJsonString());
+        Check(await Press(rig, "samples", IdOf(1), "remove", new { }) == "refused: The last sample a person was named with cannot be removed; delete the person instead.", "Remove of the last named sample");
+        Check(await Press(rig, "samples", IdOf(4), "remove", new { }) == "done", "Remove of the learned sample");
+        Check(((object[])PeopleTests.Items(Reread(list, Ana).Samples)).Length == 1, "Ana keeps her one named sample");
+        Check(Detail(CardOf(Page(rig), "people", anaId)!) == "1 sample · not seen yet", "her card counts it: " + Detail(CardOf(Page(rig), "people", anaId)!));
+
+        // Close takes the list away.
+        Check(await Press(rig, "samples", IdOf(1), "close", new { }) == "done", "Close");
+        Check(ListOf(Page(rig), "samples") == null, "the samples list is gone: " + Page(rig)?.ToJsonString());
+
+        // The list goes when another detector deletes the person, and when the person is deleted here.
+        Check(await Press(rig, "people", (string)ivan.Id, "samples", new { }) == "done", "Ivan's samples");
+        Check((string?)ListOf(Page(rig), "samples")?["title"] == $"Samples of {Ivan}", "Ivan's samples are shown");
+        list.Delete((string)ivan.Id);
+        await Until(() => ListOf(Page(rig), "samples") == null && CardsOf(Page(rig), "people").Length == 1, "Ivan's samples go with him: " + Page(rig)?.ToJsonString(), 2);
+        Check(await Press(rig, "people", anaId, "samples", new { }) == "done", "Ana's samples again");
+        Check(ListOf(Page(rig), "samples") != null, "they are shown");
+        Check(await Press(rig, "people", anaId, "delete", new { }) == "done", "Delete Ana");
+        Check(ListOf(Page(rig), "samples") == null && CardsOf(Page(rig), "people").Length == 0, "her samples go with her: " + Page(rig)?.ToJsonString());
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: Samples lists a person's samples, named first and the newest first, with Remove and Close; the last named one cannot be removed, and the list goes with Close and with its person");
+    }
+
+    static async Task APressForWhatIsGoneOrFullIsRefused()
+    {
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("page-gone");
+        var list = PeopleOf(rig);
+        // Ana has no room for more named samples; Ivan is only named.
+        var ana = list.Add(Ana, PeopleTests.Samples([.. Enumerable.Range(0, 20).Select(i => (object)PeopleTests.NewSample(PeopleTests.Unit(2000 + i), PeopleTests.Crop(2000 + i), DateTimeOffset.UtcNow, "camera.elsewhere"))]));
+        var ivan = Named(list, Ivan, 2);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "four strangers are drawn: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        var ids = CardsOf(Page(rig), "unknown").Select(c => (string)c["id"]!).ToArray();
+        var unknown = Member(rig.Detector(), "Unknown");
+
+        // A person with 20 named samples: the group stays.
+        Check(await Press(rig, "unknown", ids[0], "save", new { name = Ana }) == $"refused: {Ana} has no room for more samples.", "Save for a full person");
+        Check(unknown.Find(ids[0]) != null && CardOf(Page(rig), "unknown", ids[0]) != null, "the group stays, on the page too");
+        Check(((object[])PeopleTests.Items(Reread(list, Ana).Samples)).Length == 20, "Ana keeps her 20");
+
+        // Groups gone while the page still shows them: Save and Dismiss are refused, and the page drops them.
+        unknown.Remove(ids[1]);
+        unknown.Remove(ids[2]);
+        Check(CardOf(Page(rig), "unknown", ids[1]) != null, "the page still shows the group removed behind its back");
+        Check(await Press(rig, "unknown", ids[1], "save", new { name = Mia }) == "refused: This face is no longer in the list.", "Save of a group that is gone");
+        Check(CardOf(Page(rig), "unknown", ids[1]) == null && CardOf(Page(rig), "unknown", ids[2]) == null, "the refused press redrew the page: " + Page(rig)?.ToJsonString());
+        Check(await Press(rig, "unknown", ids[1], "save", new { name = Mia }) == "changed", "a press after that finds the card gone");
+        Check(list.Named(Mia) == null, "nobody was made");
+
+        // A group whose crops are gone is not named, and is drawn without a picture.
+        var device = rig.DeviceData();
+        foreach (var key in device.Keys($"groups/{ids[3]}/").Where(key => key.EndsWith("/crop", StringComparison.Ordinal))) device.Remove(key);
+        Check(await Press(rig, "unknown", ids[3], "save", new { name = Mia }) == "refused: This face has no picture left; dismiss it.", "Save of a group without a picture");
+        var pictureless = CardOf(Page(rig), "unknown", ids[3]);
+        Check(pictureless != null && pictureless["image"] == null, "its card has no image: " + pictureless?.ToJsonString());
+        Check(await Press(rig, "unknown", ids[3], "dismiss", new { name = "" }) == "done", "Dismiss of it");
+        list.Reload();
+        Check(list.Named(Mia) == null, "nobody was made");
+
+        // A person gone while the page still shows them.
+        Member(rig.Detector(), "People").Delete((string)ivan.Id);
+        Check(CardOf(Page(rig), "people", (string)ivan.Id) != null, "the page still shows Ivan");
+        Check(await Press(rig, "people", (string)ivan.Id, "save", new { name = Ivo }) == "refused: This person is no longer in the list.", "Save of a person who is gone");
+        Check(CardOf(Page(rig), "people", (string)ivan.Id) == null, "the refused press redrew the page");
+        list.Reload();
+        Check(list.Named(Ivo) == null && list.Named(Ivan) == null, "nobody is renamed");
+        NoNameIsLogged(rig);
+        Check(rig.Home.Logs(PyLogLevel.Error).Length == 0, "no press failed: " + rig.Lines());
+        Console.WriteLine("PASS people detector: a press for a group or person that is gone, for a full person and for a group without a picture is refused in a sentence, and the page is redrawn");
+    }
+
+    static async Task AChangeOnAnotherDetectorRedrawsThePage()
+    {
+        using var fake = new Fake(await Spots());
+        Source("camera.hall", Porch());
+        await using var rig = await Rig.Start("page-two");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await rig.Saved("hall", rig.Definition("Hall people", "Hall", Arguments("camera.hall", ("LearnNewLooks", false)), Faking("Hall")));
+        await Until(() => CardOf(Page(rig, "hall"), "people", (string)ana.Id) != null && CardOf(Page(rig), "people", (string)ana.Id) != null, "both draw Ana");
+        Check(await Press(rig, "people", (string)ana.Id, "save", new { name = Mia }, "hall") == "done", "a rename on the hall's page");
+        await Until(() => Title(CardOf(Page(rig), "people", (string)ana.Id)!) == Mia, "the porch's page shows the new name: " + Page(rig)?.ToJsonString(), 2);
+        // A change by another list on the store too.
+        var ivan = Named(list, Ivan, 2);
+        await Until(() => CardsOf(Page(rig), "people").Select(Title).SequenceEqual([Ivan, Mia]) && CardsOf(Page(rig, "hall"), "people").Select(Title).SequenceEqual([Ivan, Mia]),
+            "both pages list Ivan: " + Page(rig)?.ToJsonString(), 2);
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a change another detector makes to the people list is on this one's page within two seconds");
     }
 }

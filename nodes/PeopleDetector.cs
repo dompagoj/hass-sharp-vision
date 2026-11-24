@@ -15,10 +15,11 @@ public class PeopleDetectorCamera : SharpCamera
 /// seen; and a camera that shows each frame checked with what was found drawn on it. With <see cref="RecogniseFaces"/>
 /// on, it recognises the clear faces of each frame against the people list every People detector shares
 /// (<see cref="PeopleList"/>), groups the ones it does not know (<see cref="FaceGroups"/>), and learns new looks of the
-/// people it is sure of. Derive a C# device node's class from it, such as <c>public class FrontDoor : PeopleDetector { }</c>,
-/// and give it a camera. It downloads the vision library pinned by Vision.cs as the definition starts, and the face
-/// recognition model in the background once it has started. Setup, Start and Stop are its own; a derived class may still
-/// add entities in its constructor.
+/// people it is sure of; its page on the Device tab lists the unknown faces to name or dismiss, the people to rename,
+/// merge and delete, and a person's samples to remove. Derive a C# device node's class from it, such as
+/// <c>public class FrontDoor : PeopleDetector { }</c>, and give it a camera. It downloads the vision library pinned by
+/// Vision.cs as the definition starts, and the face recognition model in the background once it has started. Setup,
+/// Start and Stop are its own; a derived class may still add entities in its constructor.
 /// </summary>
 public abstract class PeopleDetector : SharpDevice
 {
@@ -36,6 +37,13 @@ public abstract class PeopleDetector : SharpDevice
     static readonly TimeSpan OpenAgainAfter = TimeSpan.FromMinutes(10);
     // How often at most the unknown groups are expired, and a face that failed to be recognised is logged.
     static readonly TimeSpan ExpireEvery = TimeSpan.FromMinutes(1), FailureLogEvery = TimeSpan.FromMinutes(1);
+    // How often the page is drawn again while it lists anything, so that its times ("5 minutes ago") and counts stay true.
+    static readonly TimeSpan RedrawEvery = TimeSpan.FromMinutes(1);
+    // The most samples of a person: every named and every learned one.
+    const int MostSamples = PeopleList.MostNamed + PeopleList.MostLearned;
+    // The sentences of a press for what is gone, or cannot be done.
+    const string FaceGone = "This face is no longer in the list.", PersonGone = "This person is no longer in the list.",
+        SampleGone = "This sample is no longer in the list.", NoPicture = "This face has no picture left; dismiss it.";
 
     readonly PeopleDetectorCamera camera;
     readonly Watch faces, people;
@@ -54,6 +62,16 @@ public abstract class PeopleDetector : SharpDevice
     string? openFailure;
     // Only the checks use these, one at a time.
     DateTimeOffset expireNext, failureLogged = DateTimeOffset.MinValue;
+
+    // Guards the page: each draw hands its lists to Ui under it; and samplesOf, drawnGroups and drawnTicket. Drawing runs
+    // from the checks, the minute's timer, the handlers and the people list's Changed, which can run at the same time.
+    readonly Lock page = new();
+    // The person whose samples the page shows; none when it shows none.
+    string? samplesOf;
+    // The shown groups and their suggestions as last drawn (Key), so that a check draws again only when they change.
+    string drawnGroups = "";
+    // Each draw's ticket, in the order they began: a draw hands its lists over only when no later one has.
+    long ticketsBegun, drawnTicket;
 
     /// <summary>The device with its camera and its six sensors, in this order: face seen, person seen, faces, people, last face seen, last person seen.</summary>
     protected PeopleDetector()
@@ -154,6 +172,8 @@ public abstract class PeopleDetector : SharpDevice
             People = new PeopleList(Shared(PeopleList.StoreName), ListsChanged);
             // The list may have changed while this detector was off, and the match score with the settings.
             Unknown.Rematch(People.People, rules);
+            Draw();
+            Every(RedrawEvery, Refresh, immediately: false);
             BeginOpening(DateTimeOffset.UtcNow);
         }
         Every(TimeSpan.FromSeconds(CheckEvery), Check);
@@ -176,10 +196,14 @@ public abstract class PeopleDetector : SharpDevice
         Log("People detector stopped", PyLogLevel.Debug);
     }
 
-    // The people list changed on another detector: the unknown groups are matched against it again.
+    // The people list changed on another detector: the unknown groups are matched against it again, and the page drawn.
     Task ListsChanged()
     {
+        // Another detector wrote while Start() was still making the list, before People was set: Start() matches and
+        // draws right after.
+        if (People == null) return Task.CompletedTask;
         Unknown.Rematch(People.People, rules);
+        Draw();
         return Task.CompletedTask;
     }
 
@@ -241,6 +265,8 @@ public abstract class PeopleDetector : SharpDevice
     async Task Check()
     {
         var hold = TimeSpan.FromSeconds(StayOnFor);
+        // The people list before the check: a check that writes to it (a last seen, a learned sample) replaces it.
+        IReadOnlyList<Person>? before = null;
         try
         {
             using var waiting = CancellationTokenSource.CreateLinkedTokenSource(Stopping);
@@ -256,6 +282,7 @@ public abstract class PeopleDetector : SharpDevice
             var foundFaces = detector!.Faces(frame, FaceInput, FaceScore);
             IReadOnlyList<DetectedPerson> foundPeople = DetectPeople ? detector.People(frame, PersonInput, PersonScore) : [];
             var now = DateTimeOffset.UtcNow;
+            if (RecogniseFaces) before = People.People;
             var names = RecogniseFaces ? Recognise(frame, foundFaces, now) : null;
             var drawing = Vision.DrawPeople(frame.Copy(), foundPeople);
             using (var drawn = names != null && NamesOnTheCamera ? Vision.DrawFaces(drawing, foundFaces, names) : Vision.DrawFaces(drawing, foundFaces)) camera.Show(drawn);
@@ -270,6 +297,8 @@ public abstract class PeopleDetector : SharpDevice
             if (DetectPeople) people.Failed(now, hold);
             throw;
         }
+        // After the entities, so that drawing the page cannot fail them.
+        if (before != null) Redraw(before);
     }
 
     // Recognises the usable faces of a frame, the largest first and at most MostEmbedded, and expires the unknown groups
@@ -361,6 +390,263 @@ public abstract class PeopleDetector : SharpDevice
         if (failure is PeopleRefusal || now - failureLogged < FailureLogEvery) return;
         failureLogged = now;
         Log($"A face could not be recognised: {failure.GetType().Name}: {failure.Message}", PyLogLevel.Warn);
+    }
+
+    // ---- The page ----
+
+    // Draws the page: the unknown faces, the people, and the samples of the person chosen, if any. The cards are built
+    // from snapshots and the stores outside the lock, then handed to Ui under it; a draw that a later one has overtaken
+    // hands nothing over, so the page never goes back to an older state. A person whose samples are open and who is gone
+    // closes them. A draw as the definition stops, when the stores and the page are closed, draws nothing.
+    void Draw()
+    {
+        try { DrawNow(); }
+        catch (ObjectDisposedException) when (Stopping.IsCancellationRequested) { }
+    }
+
+    void DrawNow()
+    {
+        var ticket = Interlocked.Increment(ref ticketsBegun);
+        string? open;
+        lock (page) open = samplesOf;
+        var now = DateTimeOffset.UtcNow;
+        var shown = Unknown.Shown;
+        var everyone = People.People;
+        var places = new Dictionary<string, string>(StringComparer.Ordinal);
+        var unknown = UnknownCards(shown, everyone, now);
+        var people = PersonCards(everyone, now, places);
+        var chosen = open == null ? null : everyone.FirstOrDefault(person => person.Id == open);
+        var samples = chosen == null ? null : SampleCards(chosen, now, places);
+        var unknownEmpty = Unknown.OfAnotherFormat ? "The unknown faces were saved by a newer hass-sharp-vision; update this one." : "No unknown faces.";
+        var peopleEmpty = People.Problem ?? "Nobody is named yet.";
+        lock (page)
+        {
+            if (ticket < drawnTicket) return;
+            drawnTicket = ticket;
+            drawnGroups = Key(shown);
+            Ui.List("unknown", "Unknown faces", unknown, attention: true, empty: unknownEmpty);
+            Ui.List("people", "People", people, empty: peopleEmpty);
+            if (chosen != null) Ui.List("samples", $"Samples of {chosen.Name}", samples!);
+            else
+            {
+                // Closed, or the person is gone: a person chosen since is drawn by the draw that follows the choice.
+                if (samplesOf == open) samplesOf = null;
+                Ui.Remove("samples");
+            }
+        }
+    }
+
+    // After a check: the page is drawn again when the shown groups or their suggestions changed, or the check wrote to the
+    // people list. A count or a time alone waits for the minute's redraw, as a check runs several times a second.
+    void Redraw(IReadOnlyList<Person> before)
+    {
+        string drawn;
+        lock (page) drawn = drawnGroups;
+        if (ReferenceEquals(before, People.People) && Key(Unknown.Shown) == drawn) return;
+        Draw();
+    }
+
+    // The minute's redraw, while the page lists anything whose time it shows.
+    Task Refresh()
+    {
+        if (Unknown.Shown.Count > 0 || People.People.Count > 0) Draw();
+        return Task.CompletedTask;
+    }
+
+    static string Key(IReadOnlyList<FaceGroup> shown) =>
+        string.Join(",", shown.Select(group => $"{group.Id}:{group.SuggestedPersonId}").Order(StringComparer.Ordinal));
+
+    // A card for each shown group, the newest sighting first: its largest face, how often and when it was seen, the person
+    // it might be, a Name to give it (the suggestion's filled in), Save and Dismiss.
+    List<UiCard> UnknownCards(IReadOnlyList<FaceGroup> shown, IReadOnlyList<Person> everyone, DateTimeOffset now)
+    {
+        var names = everyone.Select(person => person.Name).ToArray();
+        var cards = new List<UiCard>();
+        foreach (var group in shown.Take(FaceGroups.MostGroups))
+        {
+            var id = group.Id;
+            var suggested = group.SuggestedPersonId is { } personId ? everyone.FirstOrDefault(person => person.Id == personId) : null;
+            cards.Add(Card(id, Unknown.Crop(id))
+                .Text($"Seen {Count(group.Sightings, "time")} · last {Ago(group.Last, now)}", suggested == null ? null : $"Might be {suggested.Name}")
+                .Field("name", "Name", suggested?.Name, required: true, suggestions: names)
+                .Action("Save", values => Pressed(() => SaveFace(id, values["name"])), style: UiActionStyle.Primary)
+                .Action("Dismiss", _ => Pressed(() => DismissFace(id)), validate: false));
+        }
+        return cards;
+    }
+
+    // A card for each person, by name: their newest named face, their samples and where they were last seen, a Name to
+    // rename them with and Save; with someone else in the list, Merge into and Merge; Samples, and Delete.
+    List<UiCard> PersonCards(IReadOnlyList<Person> everyone, DateTimeOffset now, Dictionary<string, string> places)
+    {
+        var cards = new List<UiCard>();
+        foreach (var person in everyone.Take(PeopleList.MostPeople))
+        {
+            var id = person.Id;
+            var learned = person.Samples.Count(sample => sample.Learned);
+            var samples = Count(person.Samples.Count, "sample") + (learned > 0 ? $" ({learned} learned)" : "");
+            var seen = person.LastSeen is { } last ? $"last seen {Ago(last, now)}{At(person.LastSeenAt, places)}" : "not seen yet";
+            var face = person.Samples.Where(sample => !sample.Learned).OrderByDescending(sample => sample.At)
+                .Select(sample => People.Crop(sample.Id)).FirstOrDefault(crop => crop != null);
+            var others = everyone.Where(other => other.Id != id).Select(other => other.Name).ToArray();
+            var card = Card(id, face)
+                .Text(person.Name, $"{samples} · {seen}")
+                .Field("name", "Name", person.Name, required: true);
+            // A select needs an option, so Merge into and Merge are there only when there is someone to merge into.
+            if (others.Length > 0) card.Select("into", "Merge into", others, others[0]);
+            card.Action("Save", values => Pressed(() => Rename(id, values["name"])), style: UiActionStyle.Primary);
+            // A question is fixed when the card is drawn: it names the one other person, or the choice.
+            if (others.Length > 0)
+                card.Action("Merge", values => Pressed(() => Merge(id, values["into"])),
+                    confirm: others.Length == 1 ? $"Merge {person.Name} into {others[0]}?" : $"Merge {person.Name} into the person chosen in Merge into?");
+            cards.Add(card
+                .Action("Samples", _ => Pressed(() => OpenSamples(id)), validate: false)
+                .Action("Delete", _ => Pressed(() => Delete(id)), confirm: $"Delete {person.Name} and their samples?", style: UiActionStyle.Danger, validate: false));
+        }
+        return cards;
+    }
+
+    // A card for each sample of a person, named first, then learned, the newest first: its face, what it is, when and where
+    // it was seen, and Remove; the first has Close. A person without samples has one card, to close the list with.
+    List<UiCard> SampleCards(Person person, DateTimeOffset now, Dictionary<string, string> places)
+    {
+        var personId = person.Id;
+        var ordered = person.Samples.Where(sample => !sample.Learned).OrderByDescending(sample => sample.At)
+            .Concat(person.Samples.Where(sample => sample.Learned).OrderByDescending(sample => sample.At))
+            .Take(MostSamples);
+        var cards = new List<UiCard>();
+        foreach (var sample in ordered)
+        {
+            var sampleId = sample.Id;
+            var card = Card(sampleId, People.Crop(sampleId))
+                .Text($"{(sample.Learned ? "Learned" : "Named")} · {Ago(sample.At, now)}{At(sample.Camera, places)}")
+                .Action("Remove", _ => Pressed(() => RemoveSample(personId, sampleId)), style: UiActionStyle.Danger, validate: false);
+            if (cards.Count == 0) card.Action("Close", _ => Pressed(CloseSamples), validate: false);
+            cards.Add(card);
+        }
+        if (cards.Count == 0) cards.Add(new UiCard("none").Text($"{person.Name} has no samples left.").Action("Close", _ => Pressed(CloseSamples), validate: false));
+        return cards;
+    }
+
+    // A card with its picture, or without one when the crop is gone or is not a JPEG the page takes.
+    static UiCard Card(string id, byte[]? jpeg) =>
+        jpeg is { Length: >= 2 and <= PeopleList.LargestCrop } && jpeg[0] == 0xFF && jpeg[1] == 0xD8 ? new UiCard(id).Image(jpeg) : new UiCard(id);
+
+    static string Count(int count, string what) => $"{count} {what}{(count == 1 ? "" : "s")}";
+
+    // How long ago, in the largest whole unit up to days; a date beyond a week, as UTC has it.
+    static string Ago(DateTimeOffset at, DateTimeOffset now)
+    {
+        var ago = now - at;
+        if (ago < TimeSpan.FromMinutes(1)) return "a moment ago";
+        if (ago < TimeSpan.FromHours(1)) return Count((int)ago.TotalMinutes, "minute") + " ago";
+        if (ago < TimeSpan.FromDays(1)) return Count((int)ago.TotalHours, "hour") + " ago";
+        if (ago < TimeSpan.FromDays(7)) return Count((int)ago.TotalDays, "day") + " ago";
+        return at.UtcDateTime.ToString(at.Year == now.Year ? "d MMM" : "d MMM yyyy", CultureInfo.InvariantCulture);
+    }
+
+    // " at " the camera's friendly name, or its entity id when Home Assistant has no such camera now; nothing for none.
+    string At(string? camera, Dictionary<string, string> places)
+    {
+        if (string.IsNullOrEmpty(camera)) return "";
+        if (!places.TryGetValue(camera, out var place))
+        {
+            place = camera;
+            try
+            {
+                if (State(camera).Attributes.TryGetProperty("friendly_name", out var name) && name.ValueKind == System.Text.Json.JsonValueKind.String
+                    && name.GetString() is { Length: > 0 } friendly)
+                    place = friendly.Length > 100 ? friendly[..100] : friendly;
+            }
+            // A camera that is gone, or unavailable, is shown by its id.
+            catch (Exception) { }
+            places[camera] = place;
+        }
+        return $" at {place}";
+    }
+
+    // ---- The page's actions ----
+
+    // Runs a press's change and draws the page after it, also when it is refused. A PeopleRefusal's sentence, which may
+    // hold a name, is the card's and is not logged; nothing else here throws with a name.
+    Task Pressed(Action change)
+    {
+        try { change(); }
+        catch (PeopleRefusal refusal) { throw new UiRefusal(refusal.Message); }
+        finally { Draw(); }
+        return Task.CompletedTask;
+    }
+
+    // Names a group: its samples go to the person of that name, or to a new person, first, and the group after, so that a
+    // group an interruption leaves behind matches its person at the next start and goes.
+    void SaveFace(string groupId, string name)
+    {
+        if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
+        var samples = Unknown.Samples(groupId);
+        if (samples.Count == 0) throw new UiRefusal(NoPicture);
+        if (People.Named(name) is { } person) People.AddSamples(person.Id, samples, learned: false);
+        else People.Add(name, samples);
+        Unknown.Remove(groupId);
+        // Other groups of the same face are now recognised, and go too.
+        Unknown.Rematch(People.People, rules);
+    }
+
+    void DismissFace(string groupId)
+    {
+        if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
+        Unknown.Remove(groupId);
+    }
+
+    void Rename(string personId, string name)
+    {
+        Known(personId);
+        People.Rename(personId, name);
+    }
+
+    void Merge(string personId, string into)
+    {
+        Known(personId);
+        var target = People.Named(into) ?? throw new UiRefusal(PersonGone);
+        People.Merge(personId, target.Id);
+        Closed(personId);
+        Unknown.Rematch(People.People, rules);
+    }
+
+    void OpenSamples(string personId)
+    {
+        Known(personId);
+        lock (page) samplesOf = personId;
+    }
+
+    void CloseSamples()
+    {
+        lock (page) samplesOf = null;
+    }
+
+    void Delete(string personId)
+    {
+        Known(personId);
+        People.Delete(personId);
+        Closed(personId);
+        Unknown.Rematch(People.People, rules);
+    }
+
+    void RemoveSample(string personId, string sampleId)
+    {
+        var person = Known(personId);
+        if (!person.Samples.Any(sample => sample.Id == sampleId)) throw new UiRefusal(SampleGone);
+        People.RemoveSample(personId, sampleId);
+        Unknown.Rematch(People.People, rules);
+    }
+
+    // The person, as the people list has them now.
+    Person Known(string personId) => People.People.FirstOrDefault(person => person.Id == personId) ?? throw new UiRefusal(PersonGone);
+
+    // A person merged away or deleted: their samples are not shown any more.
+    void Closed(string personId)
+    {
+        lock (page)
+            if (samplesOf == personId) samplesOf = null;
     }
 
     // What is seen of faces, or of people: whether one is, how many, and when one last was. Each entity is set only when

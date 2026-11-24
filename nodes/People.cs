@@ -244,6 +244,23 @@ public sealed class PeopleList
         get { lock (gate) return people; }
     }
 
+    /// <summary>
+    /// Why the list can be neither read nor changed, in a sentence for the user: the store is of a newer format, or it or
+    /// its names cannot be read. Null when the list can be. Read from the store each time.
+    /// </summary>
+    public string? Problem
+    {
+        get
+        {
+            var format = ReadFormat();
+            if (format == -1) return Unreadable;
+            if (format is not (null or Format)) return Newer;
+            try { ReadNames(); }
+            catch (PeopleRefusal refusal) { return refusal.Message; }
+            return null;
+        }
+    }
+
     /// <summary>Reads the list from the store again; an embedding already read is not read again.</summary>
     public void Reload()
     {
@@ -898,6 +915,9 @@ public sealed class FaceGroups
 
     /// <summary>The groups seen at least <see cref="ShownAt"/> times, the newest sighting first: a snapshot, replaced by each change.</summary>
     public IReadOnlyList<FaceGroup> Shown => Volatile.Read(ref shown);
+
+    /// <summary>Whether the store is of another format, or its format cannot be read: then it has no groups and is never written.</summary>
+    public bool OfAnotherFormat => !ours;
 
     /// <summary>Every group, shown or not, by first sighting.</summary>
     internal IReadOnlyList<FaceGroup> All

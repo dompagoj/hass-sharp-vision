@@ -752,11 +752,13 @@ static class PeopleTests
         var data = home.Open("def-a");
         var list = List(data);
         string id = list.Add(Named("Ana"), Samples(Seeded(5300))).Id;
+        Check(list.Problem == null, "a list of its own format has no problem");
         data.Set("format", 2);
         var before = Contents(data);
         var newer = List(home.Restarted());
         Check(((object[])Items(newer.People)).Length == 0, "a store of a newer format is not read");
         const string Newer = "The people list was saved by a newer hass-sharp-vision; update this one to change it.";
+        Check(newer.Problem == Newer, "its problem says so: " + newer.Problem);
         Check(Refused(() => newer.Add(Named("Ivan"), Samples(Seeded(5301))), "an add") == Newer, "an add is refused");
         list.Reload();
         Check(Refused(() => list.Rename(id, "Mia"), "a rename") == Newer, "a rename is refused");
@@ -769,9 +771,10 @@ static class PeopleTests
         data.Set("format", "one");
         var unreadable = List(home.Restarted());
         Check(((object[])Items(unreadable.People)).Length == 0, "a format that is not a number is not read either");
+        Check(unreadable.Problem == "The people list cannot be read; delete it in Stored data to start again.", "its problem says so: " + unreadable.Problem);
         Check(Refused(() => unreadable.Add(Named("Ivan"), Samples(Seeded(5303))), "an add") == "The people list cannot be read; delete it in Stored data to start again.",
             "nor written");
-        Console.WriteLine("PASS people: a store of a newer format is neither read nor written, and the refusal says so");
+        Console.WriteLine("PASS people: a store of a newer format is neither read nor written, and the refusal and the list's problem say so");
     }
 
     static void UnreadableNamesAreNeitherReadNorWritten()
@@ -784,6 +787,7 @@ static class PeopleTests
         var before = Contents(data);
         var damaged = List(home.Restarted());
         Check(((object[])Items(damaged.People)).Length == 0, "unreadable names give no one");
+        Check(damaged.Problem == "The people list cannot be read; delete it in Stored data to start again.", "its problem says so: " + damaged.Problem);
         var refused = Refused(() => damaged.Add(Named("Ivan"), Samples(Seeded(5401))), "an add");
         Check(refused == "The people list cannot be read; delete it in Stored data to start again.", "the refusal: " + refused);
         Check(Contents(data) == before, "nothing was written");
@@ -931,6 +935,7 @@ static class PeopleTests
         }
 
         public dynamic[] Shown => ((IEnumerable<object>)groups.Shown).Select(group => (dynamic)group).ToArray();
+        public bool OfAnotherFormat => groups.OfAnotherFormat;
         public dynamic[] Samples(string id) => ((IEnumerable<object>)groups.Samples(id)).Select(sample => (dynamic)sample).ToArray();
         public dynamic Find(string id) => groups.Find(id);
         public byte[]? Crop(string id) => groups.Crop(id);
@@ -1233,12 +1238,14 @@ static class PeopleTests
         var a = Unit(7800);
         for (var i = 0; i < 3; i++) groups.See(a, T0.AddSeconds(i));
         string id = groups.Shown.Single().Id;
+        Check(!groups.OfAnotherFormat, "a store of its own format is not of another");
         foreach (var format in new object[] { 2, "one" })
         {
             data.Set("format", format);
             var before = Contents(home.RestartedDevice());
             var newer = Groups(home.RestartedDevice());
             Check(newer.All.Length == 0 && newer.Shown.Length == 0, $"a store of format {format} is not read");
+            Check(newer.OfAnotherFormat, $"a store of format {format} is of another");
             for (var i = 0; i < 3; i++) newer.See(a, T0.AddMinutes(1 + i));
             newer.See(Unit(7801), T0.AddMinutes(5));
             newer.Rematch((object)People());
