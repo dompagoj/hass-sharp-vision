@@ -87,6 +87,7 @@ static class PeopleDetectorTests
                 (nameof(FacesAreRecognisedSuggestedOrGrouped), FacesAreRecognisedSuggestedOrGrouped),
                 (nameof(ATurnedFaceIsComparedAsAFrontalOneIsButForAMaybe), ATurnedFaceIsComparedAsAFrontalOneIsButForAMaybe),
                 (nameof(ATurnedMaybeAGroupIsAlikeToIsThatGroups), ATurnedMaybeAGroupIsAlikeToIsThatGroups),
+                (nameof(ATurnedFaceHasWiderLimitsThanAFrontalOne), ATurnedFaceHasWiderLimitsThanAFrontalOne),
                 (nameof(TheCameraShowsTheRecognisedName), TheCameraShowsTheRecognisedName),
                 (nameof(TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked), TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked),
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
@@ -1112,8 +1113,8 @@ static class PeopleDetectorTests
         var spots = await Spots();
         var small = Array.FindIndex(spots, spot => spot.Frontal && !spot.Usable);
         var profile = Array.FindIndex(spots, spot => !spot.Frontal);
-        Check(small >= 0 && profile >= 0 && spots[profile].Turn > TurnLimit && spots.Count(spot => spot.Usable) >= 5 && spots[0].Usable,
-            "the group photo has a face too small, a profile turned beyond the limit and five usable faces, the largest among them: " + string.Join(" | ", spots.Select(s => s.ToString())));
+        Check(small >= 0 && profile >= 0 && spots[profile].Turn > TurnLimit && spots.Count(spot => spot.Usable) >= 5 && spots[0].Usable && spots[0].Frontal,
+            "the group photo has a face too small, a profile turned beyond the limit and five usable faces, the largest among them and frontal: " + string.Join(" | ", spots.Select(s => s.ToString())));
         using var fake = new Fake(spots);
         Show();
         await using var rig = await Rig.Start("unusable");
@@ -1289,6 +1290,53 @@ static class PeopleDetectorTests
             $"it is neither a sighting of B's card nor a group of its own: {seen} to {Sightings()}, {groups} to {AllGroups(unknown).Length} groups, " + Sensor(rig));
         NoNameIsLogged(rig);
         Console.WriteLine("PASS people detector: a turned face that is a maybe of a person but more alike to a card known not to be them is that card's and counts, and a turned maybe no card is alike to is neither");
+    }
+
+    // A turned face may fit worse than a frontal one and be turned further than 0.55: of the five largest usable faces, the
+    // largest is turned 0.75, beyond the limit, and never embedded; the next four are. Ana's face turned 0.60 that fits at
+    // 9 is recognised and learned; a stranger's turned 0.65 is an unknown face; but Ivan's face turned 0.60 that fits at
+    // 10.5, and his frontal face that fits at 9, are compared with no one, grouped nor counted.
+    static async Task ATurnedFaceHasWiderLimitsThanAFrontalOne()
+    {
+        var spots = await Spots();
+        int[] usable = [.. Enumerable.Range(0, spots.Length).Where(i => spots[i].Usable)];
+        Check(usable.Length >= 5 && spots[usable[1]].Eyes >= (double)PeopleTests.DefaultRules.LearnEyes && usable[..4].All(i => spots[i].Eyes >= spots[i].Width / 5) && spots[usable[4]].Frontal,
+            "the group photo has five usable faces, the second largest large enough to learn, the four largest with their eyes a fifth of their box apart, the fifth frontal: " + string.Join(" | ", spots.Select(s => s.ToString())));
+        var (beyond, ana, stranger, worse, frontal) = (usable[0], usable[1], usable[2], usable[3], usable[4]);
+        var limits = (Turn: (float)TurnLimit, Fit: (float)(double)PeopleTests.DefaultRules.TurnedFitLimit, Frontal: (float)(double)PeopleTests.DefaultRules.FitLimit);
+        Check(limits == (0.70f, 10f, 7f), $"the limits are 0.70 and 10 for a turned face, 7 for a frontal one: {limits}");
+        using var fake = new Fake(spots);
+        fake.Turns(beyond, 0.75f);
+        fake.Turns(ana, 0.60f);
+        fake.Turns(stranger, -0.65f);
+        fake.Turns(worse, 0.60f);
+        fake.Embeds(ana, FaceOf(1), fit: 9);
+        fake.Embeds(worse, FaceOf(2), fit: 10.5f);
+        fake.Embeds(frontal, FaceOf(2), fit: 9);
+        Show();
+        await using var rig = await Rig.Start("turned-limits");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        Named(list, Ivan, 2);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(), Faking("Porch")));
+
+        await Until(() => LearnedOf(Reread(list, Ana)).Length > 0, "Ana gains a learned sample: " + rig.Lines(), 10);
+        await Until(() => Shown(rig).Length == 1, "the stranger is a card: " + Shown(rig).Length, 10);
+        var from = fake.Embedded().Length;
+        await Until(() => fake.Embedded().Length >= from + 4 * 4, "four checks more", 10);
+        var checks = fake.Embedded().Chunk(4).ToArray();
+        Check(checks.All(check => check.SequenceEqual([ana, stranger, worse, frontal])),
+            $"each check embeds the four faces after the one turned beyond the limit ({ana},{stranger},{worse},{frontal}): " + string.Join(" | ", checks.Select(c => string.Join(",", c))));
+        Check(fake.Placed().Where(p => p.Spot != beyond).All(p => PastTheFrontalRule(p.Face)), "the turned faces are past the frontal rule");
+
+        var learned = LearnedOf(Reread(list, Ana));
+        Check(learned.Length == 1 && PeopleTests.Cosine((float[])((dynamic)learned[0]).Embedding.Values, FaceOf(1)) > 0.999, "Ana's turned face is her learned sample");
+        Check(Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 1 | {Ana}", "Ana is in frame with one unknown face, the stranger's: " + Sensor(rig));
+        var unknown = Member(rig.Detector(), "Unknown");
+        Check(AllGroups(unknown).Length == 1 && HoldsFace(unknown, Shown(rig)[0], PeopleTests.Unit(1000 + stranger)), "the one group is the stranger's: " + AllGroups(unknown).Length);
+        Check(Reread(list, Ivan).LastSeen == null, "Ivan's faces, the turned one fitting at 10.5 and the frontal one at 9, are never recognised");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a face the frontal rule turns away is compared turned up to 0.70 and fitting within 10, and learned by the same rules; one turned 0.75, one fitting at 10.5 and a frontal face fitting at 9 are not");
     }
 
     static async Task TheCameraShowsTheRecognisedName()

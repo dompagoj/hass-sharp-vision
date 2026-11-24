@@ -340,15 +340,15 @@ static class PeopleTests
     {
         var rules = DefaultRules;
         Check(rules.MatchScore == 0.50 && rules.MatchMargin == 0.10 && rules.SuggestScore == 0.40 && rules.LearnScore == 0.60 && rules.LearnMargin == 0.15
-            && rules.UsableEyes == 16.0 && rules.LearnEyes == 24.0 && rules.FitLimit == 7.0 && rules.TurnLimit == 0.55, "the defaults are docs/calibration.md's: " + rules);
+            && rules.UsableEyes == 16.0 && rules.LearnEyes == 24.0 && rules.FitLimit == 7.0 && rules.TurnLimit == 0.70 && rules.TurnedFitLimit == 10.0, "the defaults are docs/calibration.md's: " + rules);
         Check(rules.WithMatchScore(0.50).Equals(rules), "a match score of 0.50 gives the defaults back: " + rules.WithMatchScore(0.50));
         var moved = rules.WithMatchScore(0.70);
         Check(moved.SuggestScore == 0.60 && moved.MatchScore == 0.70 && moved.LearnScore == 0.80, "0.70 moves the suggest and learn scores with it: " + moved);
-        Check(moved.MatchMargin == 0.10 && moved.LearnMargin == 0.15 && moved.UsableEyes == 16.0 && moved.LearnEyes == 24.0 && moved.FitLimit == 7.0 && moved.TurnLimit == 0.55,
+        Check(moved.MatchMargin == 0.10 && moved.LearnMargin == 0.15 && moved.UsableEyes == 16.0 && moved.LearnEyes == 24.0 && moved.FitLimit == 7.0 && moved.TurnLimit == 0.70 && moved.TurnedFitLimit == 10.0,
             "nothing else moves: " + moved);
-        // The eight values of the constructor keep their meaning, and the turn limit is the default's unless given.
+        // The eight values of the constructor keep their meaning, and the limits for turned faces are the default's unless given.
         var made = Rules(0.50);
-        Check(made.Equals(rules) && made.TurnLimit == 0.55, "rules made of the eight values have the default turn limit: " + made);
+        Check(made.Equals(rules) && made.TurnLimit == 0.70 && made.TurnedFitLimit == 10.0, "rules made of the eight values have the default limits for turned faces: " + made);
         Console.WriteLine("PASS people: the rules are the calibrated defaults, and a match score moves the suggest and learn scores a tenth either side");
     }
 

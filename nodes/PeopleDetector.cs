@@ -506,15 +506,20 @@ public class PeopleDetector : SharpDevice
 
     // A face the frontal rule turns away (its nose is beside its eyes) but that is turned no further than the turn limit,
     // with its eyes still a fifth of its box apart: a three-quarter view, or a tilted head. A profile is turned further.
+    // It is compared up to the wider fit limit for turned faces (FitLimit).
     bool Turned(DetectedFace face) => !Vision.Frontal(face) && Vision.EyeDistance(face) >= face.Width / 5 && Vision.Turn(face) <= rules.TurnLimit;
 
     // A face embedded; null when it fits too badly to be compared at all.
     FaceEmbedding? Embed(IFaceRecognizer recognizer, SharpImage frame, DetectedFace face)
     {
         var embedding = recognizer.Embed(frame, face);
-        // Too far from where an aligned face has its landmarks to be compared at all.
-        return embedding.Fit <= rules.FitLimit ? embedding : null;
+        // Too far from where an aligned face has its landmarks to be compared at all: a frontal face's limit, or the wider
+        // one of a face the frontal rule turns away, whose points lie further from a frontal face's.
+        return embedding.Fit <= FitLimit(face) ? embedding : null;
     }
+
+    // The worst fit a usable face is compared with: the frontal one's, or the turned one's.
+    double FitLimit(DetectedFace face) => Vision.Frontal(face) ? rules.FitLimit : rules.TurnedFitLimit;
 
     // A recognised face, noted as a sighting of its person, and learned when it meets the rules. Gives what the camera
     // names its person by among everyone (PeopleList.Label). Nothing of it is logged. A face not recognised is cut, by

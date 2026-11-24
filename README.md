@@ -156,11 +156,12 @@ A face is recognised only when it is clear enough:
 - it is at least 16 pixels between the eyes, in the frame as the device checks it;
 - it is not turned too far from the camera: its eyes are at least a fifth of its box's width apart, and its nose tip is
   either between them across the picture or, along the line between the eyes, no further from their midpoint than
-  0.55 of the distance between them (0.5 is the nose tip in line with an eye). So a face turned partly away is used,
-  and so is a tilted head, measured along its own eyes; a profile is not;
-- its five points (eyes, nose tip, mouth corners) line up with a face's: one that fits badly is not used. The further a
-  face is turned, the worse it fits: on the calibration's photos a third of the faces turned 0.50 to 0.55 fit too badly,
-  and every one turned more than 0.60.
+  0.70 of the distance between them (0.5 is the nose tip in line with an eye; it measures the points, not an angle).
+  So a three-quarter view is used, and so is a tilted head, measured along its own eyes; a profile is not;
+- its five points (eyes, nose tip, mouth corners) line up with a face's: one that fits badly is not used. A turned face
+  (its nose tip beside its eyes) may fit somewhat worse than one looking at the camera, as its points lie further from a
+  frontal face's (a fit of 10 instead of 7, in the aligned crop's pixels): on the calibration's photos every face turned
+  more than 0.60 fits worse than 7, and nearly every one fits within 10.
 
 At most four faces are recognised in a check, the largest first. Every other face still counts for Face seen and Faces,
 and is drawn with its score (with **Boxes on the camera** on).
@@ -329,6 +330,8 @@ With **Learn new looks** on, a recognised face is kept as a **learned** sample o
 - it adds something: it is less than 0.9 alike to every sample the person has;
 - the person gained or lost no learned sample in the last 10 minutes.
 
+A turned face ([above](#which-faces-are-used)) is learned by the same rules, so a person can gain a look from aside.
+
 A person has at most 20 learned samples: when they have 20, a new one replaces the oldest learned one. A learned
 sample can be wrong: the rules make it rare, not impossible. Learned samples are marked on the page and can be removed
 one by one. A look that was removed can be learned again while it keeps being seen, 10 minutes after the removal at the
@@ -381,10 +384,12 @@ People who look alike, relatives above all, score closer than the calibration's 
 test photo, two different men score 0.52 to 0.56 at about 18 pixels between the eyes, above the default **Match
 score**.
 
-Turned faces were measured on the same photos: up to the limit of 0.55 they matched their own person as often as
-frontal faces did, and strangers' as seldom, but LFW has few of them (78 turned 0.45 to 0.55 that fit) and only four
-turned further that fit, too few to say how a face turned further does. Two strangers turned alike
-are a little more alike than two frontal ones, so a person named from a turned card is likelier to be suggested for a
+Turned faces were measured on the same photos: the 76 faces of 67 people that the turn limit of 0.70 and the fit of 10
+let in beside the frontal ones matched their own person as often as frontal faces did (96.9 % of pairs against 95.4 %,
+at 24 pixels between the eyes), and strangers' as seldom. But LFW has few of them, and fewer the further they are
+turned: 16 faces of 15 people turned 0.55 to 0.70, 9 turned 0.70 to 0.80 (which already matched less often), and almost
+none beyond. Nothing in it says how a face seen from above or in the dark does turned. Two strangers turned alike are a
+little more alike than two frontal ones, so a person named from a turned card is likelier to be suggested for a
 stranger turned the same way.
 
 Faces, their crops, their embeddings and the names you give them are biometric and personal data:

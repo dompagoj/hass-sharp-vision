@@ -17,7 +17,10 @@ using System.Text.Json.Serialization;
 /// <param name="LearnMargin">How far a learned face's score must be above the second-best person's.</param>
 /// <param name="UsableEyes">The fewest pixels between the eyes of a face that is embedded at all.</param>
 /// <param name="LearnEyes">The fewest pixels between the eyes of a face that is learned.</param>
-/// <param name="FitLimit">The worst alignment fit (<see cref="FaceEmbedding.Fit"/>) a face is used with.</param>
+/// <param name="FitLimit">
+/// The worst alignment fit (<see cref="FaceEmbedding.Fit"/>) a face the frontal rule takes is used with; a turned one's is
+/// <see cref="RecognitionRules.TurnedFitLimit"/>.
+/// </param>
 public sealed record RecognitionRules(double MatchScore, double MatchMargin, double SuggestScore, double LearnScore, double LearnMargin, double UsableEyes, double LearnEyes, double FitLimit)
 {
     /// <summary>
@@ -31,10 +34,18 @@ public sealed record RecognitionRules(double MatchScore, double MatchMargin, dou
 
     /// <summary>
     /// The furthest a face may be turned (<see cref="Vision.Turn"/>) to be compared when the frontal rule
-    /// (<see cref="Vision.Frontal"/>) turns it away: 0.55, <c>docs/calibration.md</c>'s. Not one of the constructor's
+    /// (<see cref="Vision.Frontal"/>) turns it away: 0.70, <c>docs/calibration.md</c>'s. Not one of the constructor's
     /// values, so rules made of those eight have this one.
     /// </summary>
-    public double TurnLimit { get; init; } = 0.55;
+    public double TurnLimit { get; init; } = 0.70;
+
+    /// <summary>
+    /// The worst alignment fit (<see cref="FaceEmbedding.Fit"/>) a face the frontal rule turns away is used with, where
+    /// <see cref="FitLimit"/> is a frontal face's: 10, <c>docs/calibration.md</c>'s. A turned face's points lie further
+    /// from a frontal face's, which the alignment is made for. Not one of the constructor's values, as
+    /// <see cref="TurnLimit"/> is not.
+    /// </summary>
+    public double TurnedFitLimit { get; init; } = 10;
 
     /// <summary>
     /// These rules with another match score, and the suggest and learn scores a tenth under and over it, as the People
