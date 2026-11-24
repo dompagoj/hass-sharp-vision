@@ -1943,9 +1943,13 @@ static class PeopleDetectorTests
         Console.WriteLine("PASS people detector: Samples lists a person's samples, named first and the newest first, with Remove and Close; the last named one cannot be removed, and the list goes with Close and with its person");
     }
 
+    // Each press is made against the page as the test set it up: a check redraws the page when the groups it shows change,
+    // or when the people list changed while it ran, so the checks are held from the first change behind the page's back
+    // on (one waits inside the fake recogniser), and a change made then is on the page only once a press redraws it.
     static async Task APressForWhatIsGoneOrFullIsRefused()
     {
-        using var fake = new Fake(await Spots());
+        var spots = await Spots();
+        using var fake = new Fake(spots);
         Show();
         await using var rig = await Rig.Start("page-gone");
         var list = PeopleOf(rig);
@@ -1960,6 +1964,11 @@ static class PeopleDetectorTests
         await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
         var ids = CardsOf(Page(rig), "unknown").Select(c => (string)c["id"]!).ToArray();
         var unknown = Member(rig.Detector(), "Unknown");
+        // The next check with faces waits in its first embedding until the end; its faces, uncompared, change nothing then.
+        foreach (var spot in Enumerable.Range(0, spots.Length)) Uncompared(fake, spot);
+        fake.HoldAt();
+        Show();
+        await Until(() => fake.Held, "a check waits in the fake recogniser", 10);
         int People()
         {
             list.Reload();
@@ -2011,6 +2020,9 @@ static class PeopleDetectorTests
         Check(NoOne(list, Ivo) && NoOne(list, Ivan), "nobody is renamed");
         NoNameIsLogged(rig);
         Check(rig.Home.Logs(PyLogLevel.Error).Length == 0, "no press failed: " + rig.Lines());
+        Check(fake.Held, "the checks were held throughout");
+        Hide();
+        fake.Release();
         Console.WriteLine("PASS people detector: a press for a group or person that is gone, for a full person and for a group without a picture is refused in a sentence, and the page is redrawn; one that chooses a person the page no longer offers finds the page changed");
     }
 
