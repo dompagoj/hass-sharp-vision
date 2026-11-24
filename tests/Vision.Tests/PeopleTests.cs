@@ -68,7 +68,7 @@ static class PeopleTests
         var array = Array.CreateInstance(Type("FaceSample"), samples.Length);
         for (var i = 0; i < samples.Length; i++)
             array.SetValue(Activator.CreateInstance(Type("FaceSample"), $"{id}s{i}", (object)Embedding(samples[i]), DateTimeOffset.UnixEpoch, Camera, false), i);
-        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null)!;
+        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null, null)!;
     }
 
     static dynamic People(params object[] people)
@@ -271,6 +271,10 @@ static class PeopleTests
             (nameof(ASmallFaceIsNotLearned), Sync(ASmallFaceIsNotLearned)),
             (nameof(AFaceThatAddsNothingIsNotLearned), Sync(AFaceThatAddsNothingIsNotLearned)),
             (nameof(OneLearnedSampleInTenMinutes), Sync(OneLearnedSampleInTenMinutes)),
+            (nameof(ARemovedLearnedSampleStartsTheTenMinutesAgain), Sync(ARemovedLearnedSampleStartsTheTenMinutesAgain)),
+            (nameof(AnAddedLearnedSampleStartsTheTenMinutes), Sync(AnAddedLearnedSampleStartsTheTenMinutes)),
+            (nameof(AMergeKeepsTheLaterLearnedChange), Sync(AMergeKeepsTheLaterLearnedChange)),
+            (nameof(ARecordWithoutTheLearnedChangeGoesByTheNewestLearnedSample), Sync(ARecordWithoutTheLearnedChangeGoesByTheNewestLearnedSample)),
         };
         var failures = new List<string>();
         var log = PyInterop.Log;
@@ -1284,7 +1288,7 @@ static class PeopleTests
         var array = Array.CreateInstance(Type("FaceSample"), samples.Length);
         for (var i = 0; i < samples.Length; i++)
             array.SetValue(Activator.CreateInstance(Type("FaceSample"), $"{id}s{i}", (object)Embedding(samples[i].Values), samples[i].At, Camera, samples[i].Learned), i);
-        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null)!;
+        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null, null)!;
     }
 
     /// <summary>Whether a face of <paramref name="eyes"/> pixels between the eyes, recognised in <paramref name="people"/> by the default rules, is learned.</summary>
@@ -1353,6 +1357,113 @@ static class PeopleTests
             "a person who gained a learned sample nine minutes ago gains none");
         Check(Learns(face, 30, People(PersonOf("ana", (At(face, 0.75, 8061), false, T0), (At(face, 0.2, 8062), true, Now.AddMinutes(-10))), ivan), Now), "ten minutes later one is");
         Console.WriteLine("PASS people: a person gains at most one learned sample in ten minutes");
+    }
+
+    /// <summary>Whether <paramref name="face"/>, recognised in a list's people as the person <paramref name="personId"/> by the default rules, is learned at <paramref name="now"/>.</summary>
+    static bool LearnsIn(dynamic list, string personId, float[] face, DateTimeOffset now)
+    {
+        var people = (object)list.People;
+        var match = Match(face, people);
+        Check(match.Kind.ToString() == "Recognised" && match.Person.Id == personId, $"the face is recognised as the person: {match}");
+        return (bool)Invoke(Type("FaceMatcher").GetMethod("Learns")!, null, (object)Embedding(face), 30.0, (object)match, now, (object)DefaultRules)!;
+    }
+
+    static void ARemovedLearnedSampleStartsTheTenMinutesAgain()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        var face = Unit(8100);
+        var ana = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8101), Crop(8101), T0), NewSample(Unit(8102), Crop(8102), T0)));
+        string id = ana.Id;
+        var learnedAt = DateTimeOffset.UtcNow.AddDays(-1);
+        var learned = list.AddSamples(id, Samples(NewSample(Unit(8103), Crop(8103), learnedAt)), true);
+        string learnedId = ((object[])Items(learned.Samples)).Select(s => (dynamic)s).Single(s => s.Learned).Id;
+        Check(LearnsIn(list, id, face, DateTimeOffset.UtcNow), "a day after her learned sample, the face would be learned");
+
+        var before = DateTimeOffset.UtcNow;
+        list.RemoveSample(id, learnedId);
+        var after = DateTimeOffset.UtcNow;
+        Check(((object[])Items(Only(list, "Ana").Samples)).All(s => !((dynamic)s).Learned), "the learned sample is gone");
+        Check(!LearnsIn(list, id, face, before.AddMinutes(10) - TimeSpan.FromSeconds(1)), "the face is not learned within ten minutes of the removal");
+        Check(LearnsIn(list, id, face, after.AddMinutes(10)), "it is ten minutes after the removal");
+        DateTimeOffset? changed = Only(list, "Ana").LearnedChanged;
+        Check(changed is { } at && at >= before && at <= after, $"the removal's time is kept: {changed}");
+        Check(Only(List(home.Restarted()), "Ana").LearnedChanged == changed, "and stored, so every detector of the store reads it");
+
+        // A named sample removed is not a change of the learned ones.
+        string named = ((object[])Items(ana.Samples)).Select(s => (dynamic)s).Single(s => ((float[])s.Embedding.Values).SequenceEqual(Unit(8102))).Id;
+        list.RemoveSample(id, named);
+        Check(Only(list, "Ana").LearnedChanged == changed, "removing a named sample leaves it: " + Only(list, "Ana").LearnedChanged);
+        Console.WriteLine("PASS people: removing a learned sample starts the ten minutes again, as the person's record keeps, and removing a named one does not");
+    }
+
+    static void AnAddedLearnedSampleStartsTheTenMinutes()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        var face = Unit(8110);
+        string id = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8111), Crop(8111), T0))).Id;
+        Check(Only(list, "Ana").LearnedChanged == null, "a person named only has no learned change");
+        var at = DateTimeOffset.UtcNow.AddDays(-1);
+        list.AddSamples(id, Samples(NewSample(Unit(8112), Crop(8112), at)), true);
+        Check(Only(list, "Ana").LearnedChanged == at, "a learned sample added is the change, at its time: " + Only(list, "Ana").LearnedChanged);
+        Check(!LearnsIn(list, id, face, at.AddMinutes(10) - TimeSpan.FromSeconds(1)) && LearnsIn(list, id, face, at.AddMinutes(10)), "the next is learned ten minutes later, as before");
+        list.AddSamples(id, Samples(NewSample(Unit(8113), Crop(8113), at.AddHours(2))), false);
+        Check(Only(list, "Ana").LearnedChanged == at, "a named sample added leaves it");
+        Console.WriteLine("PASS people: a learned sample added is the person's learned change, and the next waits ten minutes from it");
+    }
+
+    static void AMergeKeepsTheLaterLearnedChange()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        var face = Unit(8120);
+        var day = DateTimeOffset.UtcNow.AddDays(-1);
+        string anaId = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8121), Crop(8121), T0))).Id;
+        var ivan = list.Add(Named("Ivan"), Samples(NewSample(Unit(8122), Crop(8122), T0)));
+        string ivanId = ivan.Id;
+        list.AddSamples(anaId, Samples(NewSample(Unit(8123), Crop(8123), day)), true);
+        var ivanLearned = list.AddSamples(ivanId, Samples(NewSample(Unit(8124), Crop(8124), day.AddHours(1))), true);
+        string ivanLearnedId = ((object[])Items(ivanLearned.Samples)).Select(s => (dynamic)s).Single(s => s.Learned).Id;
+        var before = DateTimeOffset.UtcNow;
+        list.RemoveSample(ivanId, ivanLearnedId);
+        var after = DateTimeOffset.UtcNow;
+
+        // Ivan's removal is later than Ana's learned sample: Ana has it after the merge.
+        list.Merge(ivanId, anaId);
+        Check(list.Named("Ivan") == null, "Ivan is merged away");
+        Check(!LearnsIn(list, anaId, face, before.AddMinutes(10) - TimeSpan.FromSeconds(1)), "the merged person learns nothing within ten minutes of Ivan's removal");
+        Check(LearnsIn(list, anaId, face, after.AddMinutes(10)), "and learns ten minutes after it");
+        DateTimeOffset? changed = Only(list, "Ana").LearnedChanged;
+        Check(changed is { } at && at >= before && at <= after, $"the later of the two is kept: {changed}");
+
+        // Merged into someone whose change is later, theirs is kept.
+        var mia = list.Add(Named("Mia"), Samples(NewSample(Unit(8125), Crop(8125), T0)));
+        string miaId = mia.Id;
+        var later = DateTimeOffset.UtcNow.AddDays(1);
+        list.AddSamples(miaId, Samples(NewSample(Unit(8126), Crop(8126), later)), true);
+        list.Merge(anaId, miaId);
+        Check(Only(List(home.Restarted()), "Mia").LearnedChanged == later, "the target's later change is kept: " + Only(list, "Mia").LearnedChanged);
+        Console.WriteLine("PASS people: a merge keeps the later of the two people's learned changes");
+    }
+
+    static void ARecordWithoutTheLearnedChangeGoesByTheNewestLearnedSample()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var face = Unit(8130);
+        string id = list.Add(Named("Ana"), Samples(NewSample(At(face, 0.75, 8131), Crop(8131), T0))).Id;
+        var at = DateTimeOffset.UtcNow.AddDays(-1);
+        list.AddSamples(id, Samples(NewSample(Unit(8132), Crop(8132), at.AddMinutes(-30))), true);
+        list.AddSamples(id, Samples(NewSample(Unit(8133), Crop(8133), at)), true);
+        // As 1.1.0's development builds wrote it: the record has no learned change.
+        data.Update<System.Text.Json.Nodes.JsonObject>($"people/{id}", record => { record!.Remove("learnedChanged"); return record; });
+        var old = List(home.Restarted());
+        Check(Only(old, "Ana").LearnedChanged == null, "a record without the field reads as none");
+        Check(((object[])Items(Only(old, "Ana").Samples)).Length == 3, "and loads with its samples");
+        Check(!LearnsIn(old, id, face, at.AddMinutes(10) - TimeSpan.FromSeconds(1)) && LearnsIn(old, id, face, at.AddMinutes(10)), "the newest learned sample's time is used");
+        Console.WriteLine("PASS people: a person's record without the learned change loads, and the newest learned sample's time is used");
     }
 
     // ---- Privacy ----

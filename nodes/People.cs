@@ -40,7 +40,11 @@ public sealed record RecognitionRules(double MatchScore, double MatchMargin, dou
 /// <param name="Samples">The person's face samples, named and learned.</param>
 /// <param name="LastSeen">When a detector last recognised the person; null when none has.</param>
 /// <param name="LastSeenAt">The camera's entity id where the person was last seen.</param>
-public sealed record Person(string Id, string Name, DateTimeOffset Added, IReadOnlyList<FaceSample> Samples, DateTimeOffset? LastSeen, string? LastSeenAt);
+/// <param name="LearnedChanged">
+/// When a learned sample of the person was last added or removed; null when none has been, or the record was written
+/// before this was kept. <see cref="FaceMatcher.Learns"/> goes by the later of this and the newest learned sample's time.
+/// </param>
+public sealed record Person(string Id, string Name, DateTimeOffset Added, IReadOnlyList<FaceSample> Samples, DateTimeOffset? LastSeen, string? LastSeenAt, DateTimeOffset? LearnedChanged);
 
 /// <summary>A face of a person, as its embedding; its crop is read with <see cref="PeopleList.Crop"/>.</summary>
 /// <param name="Id">The sample's id.</param>
@@ -87,7 +91,7 @@ public static class FaceMatcher
     /// </summary>
     public const double Alike = 0.9;
 
-    /// <summary>How long after a person's last learned sample the next one may be learned.</summary>
+    /// <summary>How long after a person's learned samples last changed (one added or removed) the next one may be learned.</summary>
     public static readonly TimeSpan LearnedEvery = TimeSpan.FromMinutes(10);
 
     /// <summary>
@@ -130,8 +134,9 @@ public static class FaceMatcher
     /// at least <see cref="RecognitionRules.MatchScore"/> from one of the person's named samples, so that a learned sample
     /// never qualifies another and the learned ones cannot drift away from the faces the user named; it has at least
     /// <see cref="RecognitionRules.LearnEyes"/> pixels between the eyes; it is under <see cref="Alike"/> from every sample
-    /// the person has; and the person gained no learned sample in the <see cref="LearnedEvery"/> before
-    /// <paramref name="now"/>.
+    /// the person has; and the person gained or lost no learned sample in the <see cref="LearnedEvery"/> before
+    /// <paramref name="now"/>, counted from the later of <see cref="Person.LearnedChanged"/> and their newest learned
+    /// sample's time, so that a learned sample the user removes is not learned again at once.
     /// </summary>
     /// <param name="face">The face's embedding.</param>
     /// <param name="eyes">The pixels between the face's eyes.</param>
@@ -147,7 +152,7 @@ public static class FaceMatcher
         var samples = person.Samples;
         if (!samples.Any(sample => !sample.Learned && sample.Embedding.Similarity(face) >= rules.MatchScore)) return false;
         if (samples.Any(sample => sample.Embedding.Similarity(face) >= Alike)) return false;
-        var learned = samples.Where(sample => sample.Learned).Select(sample => (DateTimeOffset?)sample.At).Max();
+        var learned = samples.Where(sample => sample.Learned).Select(sample => (DateTimeOffset?)sample.At).Append(person.LearnedChanged).Max();
         return learned is not { } last || now - last >= LearnedEvery;
     }
 }
@@ -160,7 +165,8 @@ public static class FaceMatcher
 /// <para>
 /// The store's keys: <c>format</c>, 1; <c>names</c>, a JSON object from each person's id to their name, which every
 /// create, rename, merge and delete changes with one <see cref="SharpData.Update{T}"/>, so that two detectors lose no
-/// change and never give two people one name; <c>people/&lt;id&gt;</c>, the person without embeddings and crops;
+/// change and never give two people one name; <c>people/&lt;id&gt;</c>, the person without embeddings and crops, with
+/// when a learned sample of theirs was last added or removed (a record without it has none);
 /// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats;
 /// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/crop</c>, the JPEG; and <c>unfinished/&lt;personId&gt;</c> while an add, a
 /// delete or a merge's removal of that person runs: when it began, and whether it removes them.
@@ -325,12 +331,13 @@ public sealed class PeopleList
         }
         Finished(id);
         Reload();
-        return Find(id) ?? new Person(id, trimmed, record.Added, given.Select((sample, i) => Sample(listed[i], sample.Embedding.Values)).ToArray(), null, null);
+        return Find(id) ?? new Person(id, trimmed, record.Added, given.Select((sample, i) => Sample(listed[i], sample.Embedding.Values)).ToArray(), null, null, null);
     }
 
     /// <summary>
     /// Adds samples to a person. Named ones are refused all together when the person would have more than 20; a learned one
-    /// beyond 20 replaces the person's oldest learned sample.
+    /// beyond 20 replaces the person's oldest learned sample. Learned ones are a change of the person's learned samples,
+    /// at the newest one's time (<see cref="Person.LearnedChanged"/>).
     /// </summary>
     /// <returns>The person with the samples.</returns>
     /// <exception cref="PeopleRefusal">The person is no longer in the list, or has no room for the named samples.</exception>
@@ -362,7 +369,7 @@ public sealed class PeopleList
                     samples.Remove(oldest);
                     replaced.Add(oldest.Id);
                 }
-                return current with { Samples = samples };
+                return learned ? current with { Samples = samples, LearnedChanged = Later(current.LearnedChanged, listed.Max(sample => sample.At)) } : current with { Samples = samples };
             });
         }
         catch
@@ -434,7 +441,10 @@ public sealed class PeopleList
         Reload();
     }
 
-    /// <summary>Removes a sample of a person, with its embedding and crop. Nothing when it is gone already.</summary>
+    /// <summary>
+    /// Removes a sample of a person, with its embedding and crop. Nothing when it is gone already. A learned one is a change
+    /// of the person's learned samples, now (<see cref="Person.LearnedChanged"/>).
+    /// </summary>
     /// <exception cref="PeopleRefusal">It is the person's last named sample.</exception>
     public void RemoveSample(string personId, string sampleId)
     {
@@ -450,7 +460,7 @@ public sealed class PeopleList
             if (!sample.Learned && samples.Count(s => !s.Learned) == 1) throw new PeopleRefusal(LastNamed);
             samples.Remove(sample);
             removed = true;
-            return current with { Samples = samples };
+            return sample.Learned ? current with { Samples = samples, LearnedChanged = Later(current.LearnedChanged, DateTimeOffset.UtcNow) } : current with { Samples = samples };
         });
         // Deleted meanwhile: the null written in its place goes.
         if (written == null) data.Remove(RecordKey(personId));
@@ -485,7 +495,8 @@ public sealed class PeopleList
 
     /// <summary>
     /// A merge's first step: copies the source's samples the target does not list yet, named first and each kind up to
-    /// its cap, and lists them on the target, with the later last seen. The source is left as it was.
+    /// its cap, and lists them on the target, with the later last seen and the later learned change. The source is left
+    /// as it was.
     /// </summary>
     internal void MoveSamples(string fromId, string intoId)
     {
@@ -514,7 +525,7 @@ public sealed class PeopleList
         }
         data.Update<StoredPerson>(RecordKey(intoId), current =>
         {
-            current ??= source with { Samples = [], LastSeen = null, LastSeenAt = null };
+            current ??= source with { Samples = [], LastSeen = null, LastSeenAt = null, LearnedChanged = null };
             var samples = (current.Samples ?? []).ToList();
             var ids = samples.Select(sample => sample.Id).ToHashSet(StringComparer.Ordinal);
             foreach (var sample in copied)
@@ -530,6 +541,7 @@ public sealed class PeopleList
                 Samples = samples,
                 LastSeen = later ? source.LastSeen : current.LastSeen,
                 LastSeenAt = later ? source.LastSeenAt : current.LastSeenAt,
+                LearnedChanged = Later(current.LearnedChanged, source.LearnedChanged),
             };
         });
     }
@@ -624,11 +636,14 @@ public sealed class PeopleList
                 var values = known.TryGetValue(key, out var cached) ? cached : ReadEmbedding(key);
                 if (values != null) samples.Add(Sample(sample, values));
             }
-            loaded.Add(new Person(id, name, record?.Added ?? DateTimeOffset.MinValue, samples.AsReadOnly(), record?.LastSeen, record?.LastSeenAt));
+            loaded.Add(new Person(id, name, record?.Added ?? DateTimeOffset.MinValue, samples.AsReadOnly(), record?.LastSeen, record?.LastSeenAt, record?.LearnedChanged));
         }
         loaded.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase) is var order and not 0 ? order : string.CompareOrdinal(a.Id, b.Id));
         return loaded.AsReadOnly();
     }
+
+    /// <summary>The later of two times; the one there is when the other is null.</summary>
+    static DateTimeOffset? Later(DateTimeOffset? a, DateTimeOffset? b) => a is { } x && b is { } y ? (x >= y ? x : y) : a ?? b;
 
     static FaceSample Sample(StoredSample sample, float[] values) =>
         new(sample.Id, new FaceEmbedding(values, sample.Fit), sample.At, sample.Camera ?? "", sample.Learned);
@@ -811,8 +826,11 @@ public sealed class PeopleList
     static string CropKey(string personId, string sampleId) => $"samples/{personId}/{sampleId}/crop";
     static string UnfinishedKey(string personId) => $"unfinished/{personId}";
 
-    /// <summary>A person as <c>people/&lt;id&gt;</c> keeps them: without their name, embeddings and crops.</summary>
-    internal sealed record StoredPerson(DateTimeOffset Added, DateTimeOffset? LastSeen, string? LastSeenAt, List<StoredSample>? Samples);
+    /// <summary>
+    /// A person as <c>people/&lt;id&gt;</c> keeps them: without their name, embeddings and crops. A record written before
+    /// <see cref="LearnedChanged"/> was kept reads it as null.
+    /// </summary>
+    internal sealed record StoredPerson(DateTimeOffset Added, DateTimeOffset? LastSeen, string? LastSeenAt, List<StoredSample>? Samples, DateTimeOffset? LearnedChanged = null);
 
     /// <summary>A sample as its person's record lists it: its embedding and crop are keys of their own.</summary>
     internal sealed record StoredSample(string Id, DateTimeOffset At, string Camera, bool Learned, float Fit);

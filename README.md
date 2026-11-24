@@ -205,12 +205,13 @@ With **Learn new looks** on, a recognised face is kept as a **learned** sample o
   the only reason another is learned;
 - it is at least 24 pixels between the eyes;
 - it adds something: it is less than 0.9 alike to every sample the person has;
-- the person gained no learned sample in the last 10 minutes.
+- the person gained or lost no learned sample in the last 10 minutes.
 
 A person has at most 20 named and 20 learned samples, and the list at most 200 people. When a person has 20 learned
 samples, a new one replaces the oldest learned one; named samples are never replaced. A learned sample can be wrong:
-the rules make it rare, not impossible. Learned samples are marked on the page and can be removed one by one, and
-**Learn new looks** turns learning off.
+the rules make it rare, not impossible. Learned samples are marked on the page and can be removed one by one. A look
+that was removed can be learned again while it keeps being seen, 10 minutes after the removal at the earliest; to stop
+that, turn **Learn new looks** off, which stops all learning.
 
 ## Trust and privacy
 

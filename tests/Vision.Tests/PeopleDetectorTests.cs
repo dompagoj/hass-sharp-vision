@@ -87,6 +87,7 @@ static class PeopleDetectorTests
                 (nameof(FacesAreRecognisedSuggestedOrGrouped), FacesAreRecognisedSuggestedOrGrouped),
                 (nameof(TheCameraShowsTheRecognisedName), TheCameraShowsTheRecognisedName),
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
+                (nameof(ARemovedLearnedSampleIsNotLearnedAgainAtOnce), ARemovedLearnedSampleIsNotLearnedAgainAtOnce),
                 (nameof(GroupsOlderThanTheKeepTimeAreGoneAfterACheck), GroupsOlderThanTheKeepTimeAreGoneAfterACheck),
                 (nameof(ARecogniserThatThrowsFailsThatFaceOnly), ARecogniserThatThrowsFailsThatFaceOnly),
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
@@ -1016,6 +1017,37 @@ static class PeopleDetectorTests
         using var picture = SharpImage.Load(crop);
         Check(Math.Max(picture.Width, picture.Height) == 160, $"its crop is a JPEG 160 px on its long side: {picture.Width} × {picture.Height}");
         Console.WriteLine($"PASS people detector: with Learn new looks on, two faces of one person in a check add one learned sample, with its {picture.Width} × {picture.Height} crop; off, none");
+    }
+
+    // As seen live: a learned sample removed on the page, while the same face stays in view, was learned again at the
+    // next check. The ten minutes go from the removal; the test moves the person's clock past them by writing the
+    // removal's time ten minutes back into the shared store, as another detector's write reaches this one.
+    static async Task ARemovedLearnedSampleIsNotLearnedAgainAtOnce()
+    {
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("unlearn");
+        var list = PeopleOf(rig);
+        string anaId = Named(list, Ana, 1).Id;
+        fake.Embeds(0, PeopleTests.At(PeopleTests.Unit(1), 0.8, 21));
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(), Faking("Porch")));
+        await Until(() => LearnedOf(Reread(list, Ana)).Length == 1, "Ana gains a learned sample: " + rig.Lines(), 10);
+        string learnedId = ((dynamic)LearnedOf(Reread(list, Ana))[0]).Id;
+
+        Check(await Press(rig, "people", anaId, "samples", new { }) == "done", "Samples of Ana");
+        Check(await Press(rig, "samples", learnedId, "remove", new { }) == "done", "Remove of the learned sample");
+        var from = fake.Embedded("Porch").Length;
+        await Until(() => fake.Embedded("Porch").Length >= from + 10 * 4, "ten checks more, with Ana's face in each", 10);
+        Check(LearnedOf(Reread(list, Ana)).Length == 0, "the face is not learned again within ten minutes of the removal: " + LearnedOf(Reread(list, Ana)).Length);
+
+        rig.Shared().Update<JsonObject>($"people/{anaId}", record =>
+        {
+            record!["learnedChanged"] = DateTimeOffset.UtcNow.AddMinutes(-10).ToString("o", CultureInfo.InvariantCulture);
+            return record;
+        });
+        await Until(() => LearnedOf(Reread(list, Ana)).Length == 1, "ten minutes after the removal it is learned again: " + rig.Lines(), 10);
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a learned sample removed on the page while its face stays in view is not learned again until ten minutes after the removal");
     }
 
     static async Task GroupsOlderThanTheKeepTimeAreGoneAfterACheck()
