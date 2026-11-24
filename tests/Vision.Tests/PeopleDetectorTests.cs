@@ -39,6 +39,9 @@ static class PeopleDetectorTests
     /// <summary>The people list's shared store.</summary>
     const string PeopleStore = "hass-sharp-vision.people";
 
+    /// <summary>The People detector's own node, of the library saved as <c>people_detector</c>.</summary>
+    const string ClassKind = "library:people_detector:global%3A%3ANodeLib.PeopleDetector";
+
     /// <summary>The fake stream source of <c>camera.porch</c>: 640 × 426 (group.jpg's size) at 20 frames a second, the still while it exists.</summary>
     static string Porch(string more = "") => $"fake://w=640,h=426,fps=20,{more}still={still}";
 
@@ -93,6 +96,7 @@ static class PeopleDetectorTests
                 (nameof(ThePageListsAPersonsSamplesToRemove), ThePageListsAPersonsSamplesToRemove),
                 (nameof(APressForWhatIsGoneOrFullIsRefused), APressForWhatIsGoneOrFullIsRefused),
                 (nameof(AChangeOnAnotherDetectorRedrawsThePage), AChangeOnAnotherDetectorRedrawsThePage),
+                (nameof(TheClassNodeDetectsAndRecognises), TheClassNodeDetectsAndRecognises),
             ]);
         else if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
             failures.Add($"an hs_vision library is required (HS_VISION_REQUIRE_LIBRARY=1) and there is none for {Rid}");
@@ -259,6 +263,28 @@ static class PeopleDetectorTests
             {
                 ["kind"] = "graph",
                 ["graph"] = new JsonObject { ["version"] = 5, ["name"] = name, ["nodes"] = new JsonArray(Device(type, code ?? $"public class {type} : PeopleDetector {{ }}", arguments)), ["edges"] = new JsonArray() },
+            },
+        };
+
+        /// <summary>
+        /// A definition of one node <c>door</c> of the People detector's own kind, the class of library
+        /// <c>people_detector</c>: no code and no signature, as the editor drops it.
+        /// </summary>
+        public static JsonObject ClassNodeDefinition(string name, JsonObject arguments) => new()
+        {
+            ["name"] = name, ["settings"] = new JsonArray(),
+            ["logic"] = new JsonObject
+            {
+                ["kind"] = "graph",
+                ["graph"] = new JsonObject
+                {
+                    ["version"] = 5, ["name"] = name, ["edges"] = new JsonArray(),
+                    ["nodes"] = new JsonArray(new JsonObject
+                    {
+                        ["id"] = "door", ["kind"] = ClassKind, ["position"] = new JsonObject { ["x"] = 0, ["y"] = 0 },
+                        ["config"] = new JsonObject { ["key"] = "door", ["name"] = "Door", ["arguments"] = arguments },
+                    }),
+                },
             },
         };
 
@@ -1438,5 +1464,39 @@ static class PeopleDetectorTests
             "both pages list Ivan: " + Page(rig)?.ToJsonString(), 2);
         NoNameIsLogged(rig);
         Console.WriteLine("PASS people detector: a change another detector makes to the people list is on this one's page within two seconds");
+    }
+
+    // ---- The class's own node ----
+
+    // The People detector's own node, with no code: the class itself runs, with the real recogniser and the SFace model
+    // downloaded from the loopback server. Each face of the group photo embeds the same in every check, so an unknown face
+    // is shown after three; named on the page, it is recognised from then on and its name is drawn.
+    static async Task TheClassNodeDetectsAndRecognises()
+    {
+        if (VisionTests.LocalModel == null)
+        {
+            if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
+                throw new Exception("the SFace model is required with the library (HS_VISION_REQUIRE_LIBRARY=1) and there is none: run native/fetch-model.sh, or set HS_VISION_MODEL");
+            Console.WriteLine("SKIP people detector: no SFace model for the class's own node (native/fetch-model.sh, or HS_VISION_MODEL)");
+            return;
+        }
+        Show();
+        await using var rig = await Rig.Start("class-node", VisionTests.LocalRecognizerSource);
+        var saved = await rig.Saved("porch", Rig.ClassNodeDefinition("Porch people", Arguments(more: ("LearnNewLooks", false))));
+        Check(saved["active"]!.GetValue<bool>(), "the definition of the class's node runs: " + saved.ToJsonString() + " | " + rig.Lines());
+        Check(rig.Detector().GetType().Name == "PeopleDetector", "the node's device is the class itself: " + rig.Detector().GetType());
+        await Until(() => rig.Latest("faces")?.Number == 8 && rig.Latest("people")?.Number == 7 && rig.Latest("face_seen")?.IsOn == true && rig.Latest("person_seen")?.IsOn == true,
+            "the group photo publishes 8 faces, 7 people and both seen: " + string.Join(" | ", Keys.Skip(1).Select(k => rig.Shown(k))), 10);
+        await Until(() => CardsOf(Page(rig), "unknown").Length > 0, "an unknown face is on the page: " + rig.Lines(), 30);
+        Check(rig.Server.Requests().Count(r => r.Path == "/" + VisionTests.ModelName) == 1, "the model is downloaded once: " + string.Join(", ", rig.Server.Requests().Select(r => r.Path)));
+
+        var group = CardsOf(Page(rig), "unknown")[0];
+        Check(await Press(rig, "unknown", (string)group["id"]!, "save", new { name = Ana }) == "done", "Save of a name for the unknown face");
+        await Until(() => rig.Labels().Contains(Ana), "the camera names the face: " + string.Join(", ", rig.Labels()), 10);
+        var list = PeopleOf(rig);
+        await Until(() => Reread(list, Ana).LastSeen != null, "Ana is seen", 10);
+        Check(Reread(list, Ana).LastSeenAt == "camera.porch", "at camera.porch");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: the class's own node detects, groups an unknown face with the real model, and recognises it once it is named");
     }
 }

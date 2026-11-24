@@ -16,12 +16,14 @@ public class PeopleDetectorCamera : SharpCamera
 /// on, it recognises the clear faces of each frame against the people list every People detector shares
 /// (<see cref="PeopleList"/>), groups the ones it does not know (<see cref="FaceGroups"/>), and learns new looks of the
 /// people it is sure of; its page on the Device tab lists the unknown faces to name or dismiss, the people to rename,
-/// merge and delete, and a person's samples to remove. Derive a C# device node's class from it, such as
-/// <c>public class FrontDoor : PeopleDetector { }</c>, and give it a camera. It downloads the vision library pinned by
-/// Vision.cs as the definition starts, and the face recognition model in the background once it has started. Setup,
-/// Start and Stop are its own; a derived class may still add entities in its constructor.
+/// merge and delete, and a person's samples to remove. Drop it in an entity definition as a node of its own and give it
+/// a camera; or derive a C# device node's class from it, such as <c>public class FrontDoor : PeopleDetector { }</c>. It
+/// downloads the vision library pinned by Vision.cs as the definition starts, and the face recognition model in the
+/// background once it has started. Setup, Start and Stop are its own; a derived class may still add entities in its
+/// constructor.
 /// </summary>
-public abstract class PeopleDetector : SharpDevice
+[Node("People detector", Category = "Vision")]
+public class PeopleDetector : SharpDevice
 {
     // The side each model is given the frame at: faces at 640 find smaller faces than at 320; people at 416.
     const int FaceInput = 640, PersonInput = 416;
@@ -74,7 +76,7 @@ public abstract class PeopleDetector : SharpDevice
     long ticketsBegun, drawnTicket;
 
     /// <summary>The device with its camera and its six sensors, in this order: face seen, person seen, faces, people, last face seen, last person seen.</summary>
-    protected PeopleDetector()
+    public PeopleDetector()
     {
         Manufacturer = "HassSharp";
         Model = "People detector";

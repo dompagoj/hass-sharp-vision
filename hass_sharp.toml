@@ -2,13 +2,19 @@
 id = "vision"                                     # stored under this id when free
 name = "Vision.cs"                                # library file name in the panel
 path = "nodes/Vision.cs"
-description = "Face and person detection on a native library (YuNet and YOLOX-nano on tract), and the Detect faces node"
+description = "Face and person detection on a native library (YuNet and YOLOX-nano on tract), face recognition with SFace, and the Detect faces node"
 
 [[library]]
-id = "people_detector"
+id = "people"
+name = "People.cs"
+path = "nodes/People.cs"
+description = "The people list every People detector shares, and the unknown faces each one groups"
+
+[[library]]
+id = "people_detector"                            # the id the People detector's node kind in front_door_people.json names
 name = "PeopleDetector.cs"
 path = "nodes/PeopleDetector.cs"
-description = "People detector: a device that watches a camera and reports faces and people seen"
+description = "People detector: a device node that watches a camera, reports faces and people seen, and recognises faces"
 
 [[entity]]
 name = "Front door people"
