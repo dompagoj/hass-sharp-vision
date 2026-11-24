@@ -1138,11 +1138,20 @@ const TURNS: [f32; 12] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7, 0.
 /// The most a face is turned to be a frontal one, the other face of a pair: the first two buckets.
 const FRONTAL_TURN: f32 = 0.2;
 /// The limits on [`turn`] looked at for the faces the frontal rule turns away.
-const LIMITS: [f32; 6] = [0.4, 0.45, 0.5, 0.55, 0.6, 0.7];
+const LIMITS: [f32; 8] = [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8];
+/// The buckets of [`turn`] the faces turned 0.4 or more are counted in by their fit: each from its value up to the next
+/// one's, the last without end.
+const FIT_TURNS: [f32; 6] = [0.4, 0.5, 0.55, 0.6, 0.7, 0.8];
+/// The buckets of the fit: each over the one before it up to its value, the first from 0, the last without end.
+const FITS: [f32; 3] = [7.0, 10.0, 15.0];
 /// The People detector's lines at its default match score, and its fit limit.
 const MATCH_SCORE: f32 = 0.5;
 const SUGGEST_SCORE: f32 = 0.4;
+const LEARN_SCORE: f32 = 0.6;
 const FIT_LIMIT: f32 = 7.0;
+/// The People detector's limits for a face the frontal rule turns away: its turn, and its fit.
+const TURN_LIMIT: f32 = 0.7;
+const TURNED_FIT_LIMIT: f32 = 10.0;
 
 /// How far a face is turned from the camera: how far its nose tip lies from the midpoint of its eyes along the line
 /// between them, in eye distances, as `Vision.Turn` in `nodes/Vision.cs` measures it. 0 for a face looking straight at the
@@ -1216,12 +1225,13 @@ fn spearman(a: &[f32], b: &[f32]) -> f64 {
     cov / (va * vb).sqrt()
 }
 
-/// Counts of pairs, and of those at or above the suggest and the match score.
+/// Counts of pairs, and of those at or above the suggest, the match and the learn score.
 #[derive(Default, Clone, Copy)]
 struct Tally {
     pairs: usize,
     suggest: usize,
     matched: usize,
+    learned: usize,
 }
 
 impl Tally {
@@ -1229,12 +1239,14 @@ impl Tally {
         self.pairs += 1;
         self.suggest += (score >= SUGGEST_SCORE) as usize;
         self.matched += (score >= MATCH_SCORE) as usize;
+        self.learned += (score >= LEARN_SCORE) as usize;
     }
 
     fn merge(&mut self, other: &Tally) {
         self.pairs += other.pairs;
         self.suggest += other.suggest;
         self.matched += other.matched;
+        self.learned += other.learned;
     }
 
     /// A share of the pairs, to a tenth of a per cent.
@@ -1257,21 +1269,34 @@ impl Tally {
 }
 
 /// One face at a size, as the turned faces are measured: how far it is turned, whether the frontal rule takes it,
-/// whether it fits within the limit, and (when it does) its pairs with the frontal pictures of the same person and of
-/// everyone else.
+/// whether its eyes are a fifth of its box apart, how well it fits, and its pairs with the frontal pictures of the same
+/// person and of everyone else.
 struct Turned {
     image: usize,
     turn: f32,
     frontal: bool,
-    fits: bool,
+    wide: bool,
+    fit: f32,
     same: Tally,
     different: Tally,
-    /// The mean score of its pairs with frontal pictures of the same person, when it has one.
+    /// The mean score of its pairs with frontal pictures of the same person, when it has one and fits within
+    /// [`FIT_LIMIT`].
     mean_same: Option<f32>,
 }
 
-/// Faces of [`Turned`] together: how many, how many fit within the limit, how many people those are, their pairs, and
-/// how many of them score at or above the match score with a frontal picture of someone else.
+impl Turned {
+    /// Whether the People detector compares the face, by its rule for frontal faces and for turned ones.
+    fn compared(&self) -> bool {
+        if self.frontal {
+            self.fit <= FIT_LIMIT
+        } else {
+            self.wide && self.turn <= TURN_LIMIT && self.fit <= TURNED_FIT_LIMIT
+        }
+    }
+}
+
+/// Faces of [`Turned`] together: how many, how many are compared, how many people those are, their pairs, and how many
+/// of them score at or above the match score with a frontal picture of someone else.
 #[derive(Default)]
 struct Group {
     faces: usize,
@@ -1283,9 +1308,10 @@ struct Group {
 }
 
 impl Group {
-    fn add(&mut self, s: &Study, face: &Turned) {
+    /// Counts a face, and its pairs when it is compared.
+    fn add(&mut self, s: &Study, face: &Turned, compared: bool) {
         self.faces += 1;
-        if !face.fits {
+        if !compared {
             return;
         }
         self.compared += 1;
@@ -1308,6 +1334,27 @@ impl Group {
     }
 }
 
+/// The name of a bucket of `values`: from its value up to the next one's, the last without end.
+fn span_name(values: &[f32], b: usize) -> String {
+    match values.get(b + 1) {
+        Some(to) => format!("{:.2} to {to:.2}", values[b]),
+        None => format!("{:.2} and over", values[b]),
+    }
+}
+
+/// The bucket of [`FITS`] a fit falls in.
+fn fit_bucket(fit: f32) -> usize {
+    FITS.iter().position(|&to| fit <= to).unwrap_or(FITS.len())
+}
+
+fn fit_bucket_name(b: usize) -> String {
+    match b {
+        0 => format!("{:.0} or less", FITS[0]),
+        _ if b < FITS.len() => format!("over {:.0} to {:.0}", FITS[b - 1], FITS[b]),
+        _ => format!("over {:.0}", FITS[FITS.len() - 1]),
+    }
+}
+
 /// How SFace does with faces turned away from the camera, by how far they are turned ([`turn`]).
 fn turned_faces(s: &Study) {
     let records = s.records;
@@ -1316,16 +1363,18 @@ fn turned_faces(s: &Study) {
     let rejected: Vec<usize> = (0..faces.len()).filter(|&k| !frontal(faces[k])).collect();
     let narrow = faces.iter().filter(|f| f.eyes < f.rect[2] / 5.0).count();
     let fits = |k: usize| faces[k].fit <= FIT_LIMIT;
+    let wide = |k: usize| faces[k].eyes >= faces[k].rect[2] / 5.0;
     println!("## Turned faces");
     println!();
-    println!("How far a face is turned is how far its nose tip lies from the midpoint of its eyes, along the line between them, in eye distances: 0 looking straight at the camera, 0.5 with the nose in line with one eye. A frontal face, the other face of each pair below, is one turned less than {FRONTAL_TURN:.1}. Only a face that fits within {FIT_LIMIT:.0} is compared, as the People detector compares them.");
+    println!("How far a face is turned is how far its nose tip lies from the midpoint of its eyes, along the line between them, in eye distances: 0 looking straight at the camera, 0.5 with the nose in line with one eye. A frontal face, the other face of each pair below, is one turned less than {FRONTAL_TURN:.1} that fits within {FIT_LIMIT:.0}. The People detector compares a face the frontal rule takes when it fits within {FIT_LIMIT:.0}, and one the rule turns away when its eyes are a fifth of its box apart, it is turned at most {TURN_LIMIT:.2} and it fits within {TURNED_FIT_LIMIT:.0}.");
     println!();
     println!(
-        "Of the {} faces found, the frontal rule (eyes a fifth of the box apart, the nose between them across the picture) turns away {} ({}), {} of which fit within {FIT_LIMIT:.0}; {narrow} of all faces have their eyes closer than a fifth of the box. Turn of the faces it turns away, by quantile (1 %, 10 %, 50 %, 90 %, 99 %, highest): {}. Turn of all faces, by quantile (50 %, 90 %, 99 %, 99.9 %, highest): {}.",
+        "Of the {} faces found, the frontal rule (eyes a fifth of the box apart, the nose between them across the picture) turns away {} ({}), {} of which fit within {FIT_LIMIT:.0} and {} within {TURNED_FIT_LIMIT:.0}; {narrow} of all faces have their eyes closer than a fifth of the box. Turn of the faces it turns away, by quantile (1 %, 10 %, 50 %, 90 %, 99 %, highest): {}. Turn of all faces, by quantile (50 %, 90 %, 99 %, 99.9 %, highest): {}.",
         faces.len(),
         rejected.len(),
         percent(rejected.len() as f64 / faces.len() as f64),
         rejected.iter().filter(|&&k| fits(k)).count(),
+        rejected.iter().filter(|&&k| faces[k].fit <= TURNED_FIT_LIMIT).count(),
         quantiles(rejected.iter().map(|&k| turns[k]).collect(), &[0.01, 0.1, 0.5, 0.9, 0.99, 1.0]).join(", "),
         quantiles(turns.clone(), &[0.5, 0.9, 0.99, 0.999, 1.0]).join(", ")
     );
@@ -1346,19 +1395,41 @@ fn turned_faces(s: &Study) {
             let within: Vec<usize> = rejected
                 .iter()
                 .copied()
-                .filter(|&k| turns[k] <= limit)
+                .filter(|&k| wide(k) && turns[k] <= limit)
                 .collect();
             format!(
-                "{limit:.2}, {} ({} fitting within {FIT_LIMIT:.0})",
+                "{limit:.2}, {} ({} fitting within {FIT_LIMIT:.0}, {} within {TURNED_FIT_LIMIT:.0})",
                 within.len(),
-                within.iter().filter(|&&k| fits(k)).count()
+                within.iter().filter(|&&k| fits(k)).count(),
+                within.iter().filter(|&&k| faces[k].fit <= TURNED_FIT_LIMIT).count()
             )
         })
         .collect();
     println!(
-        "Of the {} faces it turns away, a limit on the turn takes, at {}.",
+        "Of the {} faces it turns away, a limit on the turn takes those with their eyes a fifth of the box apart: at {}.",
         rejected.len(),
         taken.join("; at ")
+    );
+    println!();
+    let worse: Vec<f32> = (0..faces.len())
+        .filter(|&k| turns[k] >= FIT_TURNS[0] && !fits(k))
+        .map(|k| faces[k].fit)
+        .collect();
+    println!(
+        "The {} faces turned {:.2} or more that do not fit within {FIT_LIMIT:.0} fit, by quantile (50 %, 90 %, highest): {}.",
+        worse.len(),
+        FIT_TURNS[0],
+        quantiles(worse.clone(), &[0.5, 0.9, 1.0]).join(", ")
+    );
+    println!();
+    let further: Vec<f32> = (0..faces.len())
+        .filter(|&k| turns[k] >= 0.6 && !fits(k) && faces[k].fit <= TURNED_FIT_LIMIT)
+        .map(|k| turns[k])
+        .collect();
+    println!(
+        "The {} faces turned 0.60 or more that fit over {FIT_LIMIT:.0} to {TURNED_FIT_LIMIT:.0} are turned, by quantile (10 %, 50 %, 90 %, highest): {}.",
+        further.len(),
+        quantiles(further.clone(), &[0.1, 0.5, 0.9, 1.0]).join(", ")
     );
     println!();
 
@@ -1393,25 +1464,24 @@ fn turned_faces(s: &Study) {
                     image: i,
                     turn: turn(&face.landmarks),
                     frontal: frontal(face),
-                    fits: face.fit <= FIT_LIMIT,
+                    wide: face.eyes >= face.rect[2] / 5.0,
+                    fit: face.fit,
                     same: Tally::default(),
                     different: Tally::default(),
                     mean_same: None,
                 };
-                if turned.fits {
-                    let (e, person) = (s.embedding(i, k).unwrap(), s.person(i));
-                    let mut sum = 0f32;
-                    for &j in frontals[person].iter().filter(|&&j| j != i) {
-                        let score = dot(e, s.embedding(j, k).unwrap());
-                        turned.same.add(score);
-                        sum += score;
-                    }
-                    if turned.same.pairs > 0 {
-                        turned.mean_same = Some(sum / turned.same.pairs as f32);
-                    }
-                    for &j in all_frontal.iter().filter(|&&j| s.person(j) != person) {
-                        turned.different.add(dot(e, s.embedding(j, k).unwrap()));
-                    }
+                let (e, person) = (s.embedding(i, k).unwrap(), s.person(i));
+                let mut sum = 0f32;
+                for &j in frontals[person].iter().filter(|&&j| j != i) {
+                    let score = dot(e, s.embedding(j, k).unwrap());
+                    turned.same.add(score);
+                    sum += score;
+                }
+                if turned.same.pairs > 0 && turned.fit <= FIT_LIMIT {
+                    turned.mean_same = Some(sum / turned.same.pairs as f32);
+                }
+                for &j in all_frontal.iter().filter(|&&j| s.person(j) != person) {
+                    turned.different.add(dot(e, s.embedding(j, k).unwrap()));
                 }
                 turned
             })
@@ -1419,11 +1489,11 @@ fn turned_faces(s: &Study) {
 
         let mut groups: Vec<Group> = (0..TURNS.len()).map(|_| Group::default()).collect();
         for face in &measured {
-            groups[bucket(face.turn)].add(s, face);
+            groups[bucket(face.turn)].add(s, face, face.fit <= FIT_LIMIT);
         }
         println!("### Turned faces at {size} px");
         println!();
-        println!("Each face of the bucket against every frontal picture of the same person (of their {PER_PERSON} drawn) and of everyone else (of theirs). Same ≥ and Different ≥ are the shares of those pairs at or above the score; Crossing are the faces of the bucket that score at or above {MATCH_SCORE:.2} with at least one frontal picture of someone else, of {} pictures of {} people.", all_frontal.len(), frontals.iter().filter(|f| !f.is_empty()).count());
+        println!("Each face of the bucket that fits within {FIT_LIMIT:.0} against every frontal picture of the same person (of their {PER_PERSON} drawn) and of everyone else (of theirs). Same ≥ and Different ≥ are the shares of those pairs at or above the score; Crossing are the faces of the bucket that score at or above {MATCH_SCORE:.2} with at least one frontal picture of someone else, of {} pictures of {} people.", all_frontal.len(), frontals.iter().filter(|f| !f.is_empty()).count());
         println!();
         println!("| Turn | Faces | Fit within {FIT_LIMIT:.0} | People | Same-person pairs | Same ≥ {SUGGEST_SCORE:.2} | Same ≥ {MATCH_SCORE:.2} | Different-person pairs | Different ≥ {SUGGEST_SCORE:.2} | Different ≥ {MATCH_SCORE:.2} | Crossing |");
         println!("|---|---|---|---|---|---|---|---|---|---|---|");
@@ -1453,7 +1523,7 @@ fn turned_faces(s: &Study) {
         for b in 0..TURNS.len() {
             let inside: Vec<usize> = measured
                 .iter()
-                .filter(|f| f.fits && bucket(f.turn) == b)
+                .filter(|f| f.fit <= FIT_LIMIT && bucket(f.turn) == b)
                 .map(|f| f.image)
                 .collect();
             let (mut same, mut different) = (Tally::default(), Tally::default());
@@ -1479,45 +1549,102 @@ fn turned_faces(s: &Study) {
         }
         println!();
 
-        // What a limit takes beyond the frontal rule.
-        let mut taken_by_rule = Group::default();
-        for face in measured.iter().filter(|f| f.frontal) {
-            taken_by_rule.add(s, face);
-        }
-        println!("The faces the frontal rule turns away that a limit on the turn would take, beside those the rule takes; the faces taken that do not fit within {FIT_LIMIT:.0} are still not compared:");
+        // The faces turned 0.4 or more by their fit, every one paired whatever its fit.
+        println!("The faces turned {:.2} or more by their fit, each paired whatever its fit; Turned away are those of them the frontal rule turns away:", FIT_TURNS[0]);
         println!();
-        println!("| Faces | Count | Fit within {FIT_LIMIT:.0} | People | Same-person pairs | Same ≥ {MATCH_SCORE:.2} | Different-person pairs | Different ≥ {SUGGEST_SCORE:.2} | Different ≥ {MATCH_SCORE:.2} | Crossing |");
+        println!("| Turn | Fit | Faces | Turned away | People | Same-person pairs | Same ≥ {MATCH_SCORE:.2} | Different-person pairs | Different ≥ {SUGGEST_SCORE:.2} | Different ≥ {MATCH_SCORE:.2} |");
         println!("|---|---|---|---|---|---|---|---|---|---|");
+        for t in 0..FIT_TURNS.len() {
+            for f in 0..=FITS.len() {
+                let mut g = Group::default();
+                let mut away = 0;
+                for face in measured.iter().filter(|face| {
+                    FIT_TURNS.iter().rposition(|&from| face.turn >= from) == Some(t)
+                        && fit_bucket(face.fit) == f
+                }) {
+                    g.add(s, face, true);
+                    away += !face.frontal as usize;
+                }
+                println!(
+                    "| {} | {} | {} | {away} | {} | {} | {} | {} | {} | {} |",
+                    span_name(&FIT_TURNS, t),
+                    fit_bucket_name(f),
+                    g.faces,
+                    g.people.len(),
+                    g.same.pairs,
+                    g.same.share(g.same.matched),
+                    g.different.pairs,
+                    g.different.fine(g.different.suggest),
+                    g.different.fine(g.different.matched)
+                );
+            }
+        }
+        println!();
+
+        // What a limit takes beyond the frontal rule.
+        println!("The faces the frontal rule turns away, with their eyes a fifth of the box apart, that a limit on the turn would take, beside those the rule takes; Compared are those that fit within the limit for them ({FIT_LIMIT:.0} for the faces the rule takes, {TURNED_FIT_LIMIT:.0} for the others, unless the row says), whose pairs are counted:");
+        println!();
+        println!("| Faces | Count | Compared | People | Same-person pairs | Same ≥ {MATCH_SCORE:.2} | Same ≥ {LEARN_SCORE:.2} | Different-person pairs | Different ≥ {SUGGEST_SCORE:.2} | Different ≥ {MATCH_SCORE:.2} | Crossing |");
+        println!("|---|---|---|---|---|---|---|---|---|---|---|");
         let row = |name: String, g: &Group| {
             println!(
-                "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 g.faces,
                 g.compared,
                 g.people.len(),
                 g.same.pairs,
                 g.same.share(g.same.matched),
+                g.same.share(g.same.learned),
                 g.different.pairs,
                 g.different.fine(g.different.suggest),
                 g.different.fine(g.different.matched),
                 g.crossing()
             )
         };
-        row("Taken by the frontal rule".into(), &taken_by_rule);
-        for limit in LIMITS {
-            let mut taken = Group::default();
-            for face in measured.iter().filter(|f| !f.frontal && f.turn <= limit) {
-                taken.add(s, face);
+        let group = |pick: &dyn Fn(&Turned) -> bool, compared: &dyn Fn(&Turned) -> bool| {
+            let mut g = Group::default();
+            for face in measured.iter().filter(|f| pick(f)) {
+                g.add(s, face, compared(face));
             }
+            g
+        };
+        let away = |f: &Turned| !f.frontal && f.wide;
+        row(
+            "Taken by the frontal rule".into(),
+            &group(&|f| f.frontal, &|f| f.fit <= FIT_LIMIT),
+        );
+        for limit in LIMITS {
             row(
                 format!("Turned away by it, turned at most {limit:.2}"),
-                &taken,
+                &group(&|f| away(f) && f.turn <= limit, &|f| {
+                    f.fit <= TURNED_FIT_LIMIT
+                }),
             );
         }
-        let mut beyond = Group::default();
-        for face in measured.iter().filter(|f| !f.frontal) {
-            beyond.add(s, face);
+        for (from, to) in [(0.0, 0.55), (0.55, TURN_LIMIT), (TURN_LIMIT, 0.8)] {
+            let name = if from == 0.0 {
+                format!("Turned away by it, turned at most {to:.2}")
+            } else {
+                format!("Turned away by it, turned over {from:.2} to {to:.2}")
+            };
+            let pick = |f: &Turned| away(f) && f.turn > from && f.turn <= to;
+            row(
+                format!("{name}, fitting within {FIT_LIMIT:.0}"),
+                &group(&pick, &|f| f.fit <= FIT_LIMIT),
+            );
+            row(
+                format!("{name}, fitting over {FIT_LIMIT:.0} to {TURNED_FIT_LIMIT:.0}"),
+                &group(&pick, &|f| f.fit > FIT_LIMIT && f.fit <= TURNED_FIT_LIMIT),
+            );
         }
-        row("Turned away by it, all".into(), &beyond);
+        row(
+            "Turned away by it, all".into(),
+            &group(&away, &|f| f.fit <= TURNED_FIT_LIMIT),
+        );
+        row(
+            "Compared by the People detector".into(),
+            &group(&|_| true, &Turned::compared),
+        );
         println!();
 
         let scored: Vec<&Turned> = measured.iter().filter(|f| f.mean_same.is_some()).collect();
@@ -1528,7 +1655,7 @@ fn turned_faces(s: &Study) {
             .map(|f| nose_ratio(&records[f.image].face.as_ref().unwrap().landmarks))
             .collect();
         println!(
-            "Over the {} faces with a frontal picture of the same person, the rank correlation (Spearman's) of each measure with the face's mean score against those pictures: the turn {:.3}, the ratio of the eyes' distances to the nose {:.3}.",
+            "Over the {} faces fitting within {FIT_LIMIT:.0} with a frontal picture of the same person, the rank correlation (Spearman's) of each measure with the face's mean score against those pictures: the turn {:.3}, the ratio of the eyes' distances to the nose {:.3}.",
             mean.len(),
             spearman(&by_turn, &mean),
             spearman(&by_ratio, &mean)
@@ -1815,6 +1942,51 @@ mod tests {
         // A tilted head turned little, whose nose is left of both eyes across the picture.
         let tilted = face((30.0, 30.0), (60.0, 60.0), (25.0, 60.0));
         assert!(!frontal(&tilted) && turn(&tilted.landmarks) < 0.1);
+    }
+
+    #[test]
+    fn a_face_is_compared_as_the_people_detector_compares_it() {
+        let face = |frontal, wide, turn, fit| Turned {
+            image: 0,
+            turn,
+            frontal,
+            wide,
+            fit,
+            same: Tally::default(),
+            different: Tally::default(),
+            mean_same: None,
+        };
+        // A face the frontal rule takes: fitting within 7, however it is turned.
+        assert!(face(true, true, 0.9, 7.0).compared());
+        assert!(!face(true, true, 0.1, 7.5).compared());
+        // One it turns away: its eyes a fifth of its box apart, turned at most 0.70 and fitting within 10.
+        assert!(face(false, true, 0.70, 10.0).compared());
+        assert!(face(false, true, 0.65, 9.0).compared());
+        assert!(!face(false, true, 0.75, 1.0).compared());
+        assert!(!face(false, true, 0.30, 10.5).compared());
+        assert!(!face(false, false, 0.30, 1.0).compared());
+    }
+
+    #[test]
+    fn a_fit_falls_in_the_bucket_up_to_its_value() {
+        let names: Vec<String> = [1.0, 7.0, 7.5, 10.0, 12.0, 15.0, 15.5]
+            .iter()
+            .map(|&fit| fit_bucket_name(fit_bucket(fit)))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "7 or less",
+                "7 or less",
+                "over 7 to 10",
+                "over 7 to 10",
+                "over 10 to 15",
+                "over 10 to 15",
+                "over 15"
+            ]
+        );
+        assert_eq!(span_name(&FIT_TURNS, 0), "0.40 to 0.50");
+        assert_eq!(span_name(&FIT_TURNS, FIT_TURNS.len() - 1), "0.80 and over");
     }
 
     #[test]
