@@ -119,6 +119,13 @@ static class PeopleDetectorTests
                 (nameof(TheRecognisedSensorFollowsRenamesMergesAndDeletes), TheRecognisedSensorFollowsRenamesMergesAndDeletes),
                 (nameof(TheLastRecognisedOutlivesARestart), TheLastRecognisedOutlivesARestart),
                 (nameof(TheRecognisedStateIsCutAtAWholeName), TheRecognisedStateIsCutAtAWholeName),
+                (nameof(PicturesOffKeepNothing), PicturesOffKeepNothing),
+                (nameof(AnArrivalsPictureIsOnDiskWhenRecognisedNamesIt), AnArrivalsPictureIsOnDiskWhenRecognisedNamesIt),
+                (nameof(TwoArrivalsOfOneCheckHaveTwoPictures), TwoArrivalsOfOneCheckHaveTwoPictures),
+                (nameof(AtMostTwentyPicturesAreKeptAndNoneOlderThanADay), AtMostTwentyPicturesAreKeptAndNoneOlderThanADay),
+                (nameof(APersonDeletedOrMergedAwayLosesTheirPictures), APersonDeletedOrMergedAwayLosesTheirPictures),
+                (nameof(APictureThatCannotBeSavedLeavesRecognitionGoing), APictureThatCannotBeSavedLeavesRecognitionGoing),
+                (nameof(TheLastPictureOutlivesARestartWhileItsFileIsThere), TheLastPictureOutlivesARestartWhileItsFileIsThere),
                 (nameof(TheClassNodeDetectsAndRecognises), TheClassNodeDetectsAndRecognises),
             ]);
         else if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
@@ -221,10 +228,50 @@ static class PeopleDetectorTests
             {
                 var (at, when) = (clock.Elapsed, DateTimeOffset.UtcNow);
                 var snapshots = JsonNode.Parse(batch)!.AsArray().Select(node => new Pushed(at, when, node!.AsObject())).ToArray();
+                // At the push, before anything else: each picture a Recognised names is on disk by then.
+                if (MediaRoot != null)
+                    foreach (var snapshot in snapshots.Where(p => p.UniqueId.EndsWith(":recognised", StringComparison.Ordinal) && p.Available))
+                        foreach (var path in Named(snapshot))
+                            if (!File.Exists(OnDisk(path)))
+                                lock (recording) missing.Add($"{path} in {snapshot}");
                 lock (recording) pushed.AddRange(snapshots);
                 push(batch);
             };
         }
+
+        // Guarded by recording: each picture a Recognised named when it was pushed whose file was not on disk.
+        readonly List<string> missing = [];
+
+        /// <summary>
+        /// Home Assistant's media folder, the entry <c>local</c>, when the rig was started with one (<see cref="Start"/>);
+        /// a picture served at <c>/media/local/&lt;rest&gt;</c> is at <c>&lt;MediaRoot&gt;/&lt;rest&gt;</c>.
+        /// </summary>
+        public string? MediaRoot { get; private set; }
+
+        /// <summary>Where on disk a path Home Assistant serves from the entry <c>local</c> is.</summary>
+        public string OnDisk(string path)
+        {
+            const string local = "/media/local/";
+            Check(MediaRoot != null && path.StartsWith(local, StringComparison.Ordinal), $"{path} is served from the media folder's entry local");
+            return Path.Combine([MediaRoot!, .. path[local.Length..].Split('/')]);
+        }
+
+        /// <summary>The folder of the media files of the device <c>door</c> of <paramref name="definition"/>.</summary>
+        public string MediaOf(string definition = "porch") => Path.Combine(MediaRoot ?? throw new Exception("the rig has no media folder"), "hass_sharp", definition, "door");
+
+        /// <summary>The names of the media files of the device <c>door</c> of <paramref name="definition"/>, in ordinal order; none without its folder.</summary>
+        public string[] MediaFiles(string definition = "porch")
+        {
+            var folder = MediaOf(definition);
+            return Directory.Exists(folder) ? [.. Directory.EnumerateFiles(folder).Select(file => Path.GetFileName(file)).Where(name => !name.StartsWith('.')).Order(StringComparer.Ordinal)] : [];
+        }
+
+        /// <summary>Each picture a pushed Recognised named whose file was not on disk at that push.</summary>
+        public string[] Missing() { lock (recording) return [.. missing]; }
+
+        /// <summary>The paths of pictures a Recognised snapshot names: in <c>pictures</c>, <c>last_recognised_picture</c> and <c>unknown_picture</c>.</summary>
+        public static string[] Named(Pushed snapshot) =>
+            [.. Pictures(snapshot).Append(LastPicture(snapshot)).Append(UnknownPicture(snapshot)).OfType<string>()];
 
         public LoopbackServer Server { get; }
         public EntityTestHome Home { get; }
@@ -235,13 +282,15 @@ static class PeopleDetectorTests
 
         /// <summary>
         /// The rig, with library <c>vision</c> of <paramref name="vision"/> (else <see cref="VisionTests.LocalSource"/>),
-        /// <c>people</c> of <c>nodes/People.cs</c> and <c>people_detector</c> of <paramref name="people"/> (else as committed).
+        /// <c>people</c> of <c>nodes/People.cs</c> and <c>people_detector</c> of <paramref name="people"/> (else as committed);
+        /// with Home Assistant's media folder, <see cref="MediaRoot"/>, when <paramref name="media"/>, else with none.
         /// </summary>
-        public static async Task<Rig> Start(string name, Func<LoopbackServer, string>? vision = null, string? people = null)
+        public static async Task<Rig> Start(string name, Func<LoopbackServer, string>? vision = null, string? people = null, bool media = false)
         {
             var rig = new Rig(name);
             try
             {
+                if (media) rig.MediaRoot = rig.Home.MediaFolder(rig.Api);
                 await rig.Api.Init();
                 rig.Api.SetEntityDescriptions(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ha-entity-components.json")), started: true);
                 rig.vision = (vision ?? VisionTests.LocalSource)(rig.Server);
@@ -455,7 +504,7 @@ static class PeopleDetectorTests
         Check(preview.Valid && preview.Diagnostics.IsEmpty, "Vision.cs, People.cs and PeopleDetector.cs preview valid: " + string.Join(" | ", preview.Diagnostics.Select(d => $"{d.SourceId} {d.StartLine}:{d.StartColumn} {d.Message}")));
 
         await using var rig = await Rig.Start("entities", Elsewhere);
-        // The C# device's inputs: the thirteen settings, with their bounds; the camera alone is required.
+        // The C# device's inputs: the fourteen settings, with their bounds; the camera alone is required.
         var signature = rig.Preview(new CustomNodeSource("c", "public class Porch : PeopleDetector { }", "csharp_device")).Snapshot.Custom["c"].Signature!;
         var settings = signature["settings"]!.AsArray().Select(s => s!.AsObject()).ToArray();
         string Shape(JsonObject s) => string.Join(",", new[] { "key", "label", "type", "domain", "minimum", "maximum", "required" }.Select(k => s[k]?.ToJsonString() ?? "-"));
@@ -471,6 +520,7 @@ static class PeopleDetectorTests
             "\"MatchScore\",\"Match score\",\"number\",-,0.3,0.9,-",
             "\"LearnNewLooks\",\"Learn new looks\",\"boolean\",-,-,-,-",
             "\"KeepUnknownFacesFor\",\"Keep unknown faces for\",\"integer\",-,1,365,-",
+            "\"KeepPictures\",\"Keep recognition pictures\",\"boolean\",-,-,-,-",
             "\"BoxesOnTheCamera\",\"Boxes on the camera\",\"boolean\",-,-,-,-",
             "\"FacePointsOnTheCamera\",\"Face points on the camera\",\"boolean\",-,-,-,-",
             "\"NamesOnTheCamera\",\"Names on the camera\",\"boolean\",-,-,-,-",
@@ -505,7 +555,7 @@ static class PeopleDetectorTests
             {
                 public Probe()
                 {
-                    var lines = new List<string> { string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{CheckEvery}|{StayOnFor}|{FaceScore}|{PersonScore}|{DetectPeople}|{RecogniseFaces}|{MatchScore}|{LearnNewLooks}|{KeepUnknownFacesFor}|{BoxesOnTheCamera}|{FacePointsOnTheCamera}|{NamesOnTheCamera}|{Manufacturer}|{Model}") };
+                    var lines = new List<string> { string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{CheckEvery}|{StayOnFor}|{FaceScore}|{PersonScore}|{DetectPeople}|{RecogniseFaces}|{MatchScore}|{LearnNewLooks}|{KeepUnknownFacesFor}|{KeepPictures}|{BoxesOnTheCamera}|{FacePointsOnTheCamera}|{NamesOnTheCamera}|{Manufacturer}|{Model}") };
                     foreach (var e in Entities)
                         lines.Add($"{e.Key}|{e.Name}|{e.GetType().Name}|{e.DeviceClass}|{e.Icon}|{e.RestoreState}|{(e as SharpSensor)?.StateClass}");
                     AppContext.SetData("HassSharp.PeopleDetectorTests.Probe", string.Join("\n", lines));
@@ -517,7 +567,7 @@ static class PeopleDetectorTests
         var seen = AppContext.GetData(ProbeKey) as string ?? throw new Exception("the probe's constructor did not run: " + rig.Lines());
         string[] entities =
         [
-            "0.5|10|0.7|0.45|True|True|0.5|True|7|True|True|True|HassSharp|People detector",
+            "0.5|10|0.7|0.45|True|True|0.5|True|7|False|True|True|True|HassSharp|People detector",
             "camera||PeopleDetectorCamera|||False|",
             "face_seen|Face seen|SharpBinarySensor|occupancy||False|",
             "person_seen|Person seen|SharpBinarySensor|occupancy||False|",
@@ -528,7 +578,7 @@ static class PeopleDetectorTests
             "recognised|Recognised|SharpSensor||mdi:account-eye|False|",
         ];
         Check(seen.Split('\n').SequenceEqual(entities), "the defaults, the metadata and the entities in order:\n" + seen);
-        Console.WriteLine("PASS people detector: the libraries preview valid, the device's thirteen inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its eight entities in order");
+        Console.WriteLine("PASS people detector: the libraries preview valid, the device's fourteen inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its eight entities in order");
     }
 
     static async Task UnsupportedPlatformFailsTheStart()
@@ -2938,6 +2988,471 @@ static class PeopleDetectorTests
         Check(state == $"{full[0]}, {full[1]}, …" && state.Length <= 255, $"the state is the first two and \", …\", {state.Length} characters: {state}");
         Check(Sensor(rig) == $"{state} | [{string.Join(", ", full)}] | [{string.Join(", ", firsts)}] | 0 | {full[0]}", "the attributes name all three: " + Sensor(rig));
         Console.WriteLine($"PASS people detector: with three people of 100-character names in frame, Recognised is cut at a whole name to {state.Length} characters, and its people name all three");
+    }
+
+    // ---- Recognition pictures ----
+
+    /// <summary>A Recognised snapshot's <c>pictures</c>: a path, or null, for each person of <c>people</c>; none when it has no such list.</summary>
+    static string?[] Pictures(Pushed? pushed) => pushed?.Attributes["pictures"] is JsonArray items ? [.. items.Select(item => (string?)item)] : [];
+
+    /// <summary>A Recognised snapshot's <c>last_recognised_picture</c>; null when it has none.</summary>
+    static string? LastPicture(Pushed? pushed) => (string?)pushed?.Attributes["last_recognised_picture"];
+
+    /// <summary>A Recognised snapshot's <c>unknown_picture</c>; null when it has none.</summary>
+    static string? UnknownPicture(Pushed? pushed) => (string?)pushed?.Attributes["unknown_picture"];
+
+    /// <summary>Whether a Recognised snapshot has the three picture attributes, and they are empty: <c>pictures</c> an empty list, the two others null.</summary>
+    static bool NoPictures(Pushed? pushed) => pushed != null && pushed.Attributes["pictures"] is JsonArray { Count: 0 }
+        && pushed.Attributes.ContainsKey("last_recognised_picture") && LastPicture(pushed) == null
+        && pushed.Attributes.ContainsKey("unknown_picture") && UnknownPicture(pushed) == null;
+
+    /// <summary>The three picture attributes of a Recognised snapshot, in a line, for a failure's message.</summary>
+    static string PicturesOf(Pushed? pushed) =>
+        $"[{string.Join(", ", Pictures(pushed).Select(path => path ?? "null"))}] | {LastPicture(pushed) ?? "null"} | {UnknownPicture(pushed) ?? "null"}";
+
+    // A picture of the device door of porch: served from the media folder's entry local, and named by the UTC time of its
+    // check and 16 random hex digits, with nothing of a person.
+    static readonly System.Text.RegularExpressions.Regex PicturePath = new(@"^/media/local/hass_sharp/porch/door/(?<at>\d{8}T\d{6})-[0-9a-f]{16}\.jpg\z");
+
+    /// <summary>
+    /// Checks that <paramref name="path"/> is a picture of porch's detector (<see cref="PicturePath"/>), named by a time
+    /// within a minute of <paramref name="near"/>, and on disk the JPEG of a face's crop, 160 pixels on its long side.
+    /// </summary>
+    static void IsPicture(Rig rig, string? path, DateTimeOffset near, string what)
+    {
+        var match = path == null ? null : PicturePath.Match(path);
+        Check(match is { Success: true }, $"{what} has a picture named by its time and random digits: {path ?? "none"}");
+        var at = DateTime.ParseExact(match!.Groups["at"].Value, "yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+        Check(Math.Abs((at - near.UtcDateTime).TotalSeconds) < 60, $"{what}'s picture is named by the UTC time of its check: {path}, near {near:O}");
+        var file = rig.OnDisk(path!);
+        Check(File.Exists(file), $"{what}'s picture is on disk: {file}");
+        using var image = SharpImage.Load(File.ReadAllBytes(file));
+        Check(Math.Max(image.Width, image.Height) == 160, $"{what}'s picture is a face's crop, 160 pixels on its long side: {image.Width} × {image.Height}");
+    }
+
+    /// <summary>The detector's own index of its pictures, in its data: each picture's name and the person it shows, by id (none for an unknown face).</summary>
+    static (string Name, string? PersonId)[] Index(Rig rig) =>
+        rig.DeviceData().Get<JsonArray>("pictures") is { } index ? [.. index.Select(entry => ((string)entry!["name"]!, (string?)entry["personId"]))] : [];
+
+    // Every picture a Recognised named was on disk when it was pushed, and nothing of a face or a name is logged.
+    static void NothingMissingAndNoNameLogged(Rig rig)
+    {
+        Check(rig.Missing().Length == 0, "every picture Recognised named was on disk when it was pushed: " + string.Join(" | ", rig.Missing()));
+        NoNameIsLogged(rig);
+    }
+
+    // Keep recognition pictures off, its default: the pictures kept before are cleared at the start, but not a file of the
+    // node's that is no picture's, none is written for an arrival or an unknown face, and Recognised's three picture
+    // attributes are there and empty. Without a media folder there
+    // is nothing to clear, and no line says anything of it.
+    static async Task PicturesOffKeepNothing()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four.Skip(1)) Uncompared(fake, spot);
+        fake.Embeds(four[0], FaceOf(1));
+        Show();
+        await using (var rig = await Rig.Start("pictures-off", media: true))
+        {
+            var list = PeopleOf(rig);
+            Named(list, Ana, 1);
+            // What the detector kept while the setting was on, and a file a class deriving it keeps of its own.
+            Directory.CreateDirectory(rig.MediaOf());
+            File.WriteAllBytes(Path.Combine(rig.MediaOf(), "20261123T080000-0123456789abcdef.jpg"), [0xFF, 0xD8, 0xFF, 0xD9]);
+            File.WriteAllText(Path.Combine(rig.MediaOf(), "own.txt"), "not a picture");
+            await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+            await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", () => "Recognised names Ana: " + rig.Shown("recognised"), 10);
+            fake.Embeds(four[3], PeopleTests.Unit(1000 + four[3]));
+            await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 1 | {Ana}", () => "and a stranger: " + Sensor(rig));
+            await Checks(clock, 5);
+            var shown = rig.Of("recognised").Where(p => p.Available).ToArray();
+            Check(shown.Length > 0 && shown.All(NoPictures), "Recognised's pictures is an empty list, and its two others null: " + string.Join(" | ", shown.Select(PicturesOf)));
+            Check(rig.MediaFiles().SequenceEqual(["own.txt"]), "the picture kept before is cleared, none is written, and the derived class's own file is left: " + string.Join(", ", rig.MediaFiles()));
+            NothingMissingAndNoNameLogged(rig);
+        }
+
+        await using (var rig = await Rig.Start("pictures-off-no-folder"))
+        {
+            var list = PeopleOf(rig);
+            Named(list, Ana, 1);
+            await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+            await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 1 | {Ana}", () => "Recognised names Ana, and a stranger: " + rig.Shown("recognised"), 10);
+            Check(NoPictures(rig.Latest("recognised")), "without a media folder, the same: " + PicturesOf(rig.Latest("recognised")));
+            Check(!rig.Home.Logs().Any(l => l.Contains("picture", StringComparison.OrdinalIgnoreCase) || l.Contains("media", StringComparison.OrdinalIgnoreCase)),
+                "no line says anything of pictures or the media folder: " + rig.Lines());
+            NoNameIsLogged(rig);
+        }
+        Console.WriteLine("PASS people detector: with Keep recognition pictures off, the pictures kept before are cleared, none is written, and Recognised's picture attributes are empty; without a media folder, silently");
+    }
+
+    // Keep recognition pictures on: Ana's arrival keeps the crop of her face, on disk when the state that names it is
+    // pushed, named by the time and random digits; the checks of her visit after keep nothing more, and Stay on for holds
+    // her picture with her. A stranger's arrival (unknown_faces rising from 0) has a picture of its own while unknown faces
+    // are in frame; once they are gone, a stranger who comes again is a new arrival with a new picture.
+    static async Task AnArrivalsPictureIsOnDiskWhenRecognisedNamesIt()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four) Uncompared(fake, spot);
+        Show();
+        await using var rig = await Rig.Start("pictures-arrival", media: true);
+        rig.SendsEveryPublishOf("recognised");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 10), ("KeepPictures", true)]), Faking("Porch")));
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", () => "Recognised is Nobody: " + rig.Shown("recognised"), 10);
+        Check(NoPictures(rig.Latest("recognised")), "with nobody in frame, pictures is an empty list and the two others null: " + PicturesOf(rig.Latest("recognised")));
+
+        // Ana arrives: one publish, with her picture as pictures' one and as the last recognised's.
+        var from = rig.Mark;
+        var arrives = clock.Now;
+        fake.Embeds(four[1], FaceOf(1));
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", () => "Recognised names Ana: " + rig.Shown("recognised", from));
+        var arrival = rig.Latest("recognised");
+        var picture = LastPicture(arrival);
+        IsPicture(rig, picture, arrives, "Ana's arrival");
+        Check(Pictures(arrival).SequenceEqual([picture]) && UnknownPicture(arrival) == null, "pictures has her picture, and unknown_picture none: " + PicturesOf(arrival));
+        Check(rig.Of("recognised", from).Length == 1, "her arrival is one publish, with its picture: " + rig.Shown("recognised", from));
+        Check(rig.MediaFiles().SequenceEqual([Path.GetFileName(picture!)]), "the media folder has her picture alone: " + string.Join(", ", rig.MediaFiles()));
+        var bytes = File.ReadAllBytes(rig.OnDisk(picture!));
+        await Checks(clock, 20);
+        Check(rig.Of("recognised", from).Length == 1 && rig.MediaFiles().Length == 1 && File.ReadAllBytes(rig.OnDisk(picture!)).SequenceEqual(bytes),
+            "20 checks more of her visit publish nothing and keep no other picture: " + rig.Shown("recognised", from) + " | " + string.Join(", ", rig.MediaFiles()));
+
+        // A stranger beside her: unknown_faces rises from 0, with the stranger's picture, and its checks after keep nothing more.
+        from = rig.Mark;
+        var strangerArrives = clock.Now;
+        fake.Embeds(four[3], PeopleTests.Unit(1000 + four[3]));
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 1 | {Ana}", () => "a stranger beside her: " + rig.Shown("recognised", from));
+        var stranger = UnknownPicture(rig.Latest("recognised"));
+        IsPicture(rig, stranger, strangerArrives, "the stranger's arrival");
+        Check(stranger != picture && Pictures(rig.Latest("recognised")).SequenceEqual([picture]) && LastPicture(rig.Latest("recognised")) == picture,
+            "Ana keeps hers: " + PicturesOf(rig.Latest("recognised")));
+        await Checks(clock, 10);
+        Check(rig.Of("recognised", from).Length == 1 && rig.MediaFiles().Length == 2, "the stranger's checks after keep nothing more: " + rig.Shown("recognised", from) + " | " + string.Join(", ", rig.MediaFiles()));
+
+        // Both out of frame: held with their pictures for Stay on for; after it, Ana's picture stays her arrival's as the
+        // last recognised's, and unknown_picture goes with the unknown faces.
+        from = rig.Mark;
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        await Checks(clock, 5);
+        Check(rig.Of("recognised", from).Length == 0, "Recognised holds, with its pictures: " + rig.Shown("recognised", from));
+        clock.Advance(TimeSpan.FromSeconds(10.1));
+        await Until(() => Sensor(rig) == $"Nobody | [] | [] | 0 | {Ana}", () => "both go: " + rig.Shown("recognised", from));
+        var gone = rig.Latest("recognised");
+        Check(Pictures(gone).Length == 0 && LastPicture(gone) == picture && UnknownPicture(gone) == null, "pictures empties, the last recognised keeps hers, and unknown_picture goes: " + PicturesOf(gone));
+
+        // A stranger again, alone: a new unknown arrival, with a new picture.
+        from = rig.Mark;
+        foreach (var spot in four.Take(3)) Uncompared(fake, spot);
+        var again = clock.Now;
+        Show();
+        await Until(() => Sensor(rig) == $"Unknown | [] | [] | 1 | {Ana}", () => "a stranger alone: " + rig.Shown("recognised", from));
+        var second = UnknownPicture(rig.Latest("recognised"));
+        IsPicture(rig, second, again, "the stranger's second arrival");
+        Check(second != stranger && rig.MediaFiles().Length == 3, "a picture of its own: " + PicturesOf(rig.Latest("recognised")) + " | " + string.Join(", ", rig.MediaFiles()));
+        NothingMissingAndNoNameLogged(rig);
+        Console.WriteLine("PASS people detector: an arrival's picture is on disk when Recognised names it, one a visit, held with them; an unknown arrival has its own while unknown faces are in frame");
+    }
+
+    // Ana and Ivan arrive in one check, Ivan's face the larger: pictures has each one's in people's order, Ivan's is the
+    // last recognised's, and the detector's index says which picture shows whom.
+    static async Task TwoArrivalsOfOneCheckHaveTwoPictures()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four.Skip(2)) Uncompared(fake, spot);
+        fake.Embeds(four[0], FaceOf(2));
+        fake.Embeds(four[1], FaceOf(1));
+        Show();
+        await using var rig = await Rig.Start("pictures-two", media: true);
+        rig.SendsEveryPublishOf("recognised");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        var arrives = clock.Now;
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("KeepPictures", true)]), Faking("Porch")));
+        await Until(() => Sensor(rig) == $"{Ana}, {Ivan} | [{Ana}, {Ivan}] | [{First(Ana)}, {First(Ivan)}] | 0 | {Ivan}", () => "Recognised names both: " + rig.Shown("recognised"), 10);
+        var both = rig.Of("recognised").First(p => p.Available);
+        Check(both.Text == $"{Ana}, {Ivan}", "they arrive in one check, the first Recognised has both: " + rig.Shown("recognised"));
+        var pictures = Pictures(both);
+        Check(pictures.Length == 2 && pictures[0] != pictures[1] && LastPicture(both) == pictures[1], "two pictures, Ivan's the last recognised's: " + PicturesOf(both));
+        IsPicture(rig, pictures[0], arrives, "Ana's arrival");
+        IsPicture(rig, pictures[1], arrives, "Ivan's arrival");
+        var index = Index(rig);
+        Check(index.Length == 2 && index.Single(entry => entry.Name == Path.GetFileName(pictures[0])).PersonId == (string)ana.Id
+            && index.Single(entry => entry.Name == Path.GetFileName(pictures[1])).PersonId == (string)ivan.Id,
+            "the first shows Ana and the second Ivan: " + string.Join(", ", index.Select(entry => $"{entry.Name}={entry.PersonId}")));
+        await Checks(clock, 10);
+        Check(rig.MediaFiles().Length == 2, "and nothing more is kept: " + string.Join(", ", rig.MediaFiles()));
+        NothingMissingAndNoNameLogged(rig);
+        Console.WriteLine("PASS people detector: two arrivals of one check have two pictures, in people's order");
+    }
+
+    // 21 people arrive one after the other on one face, each held by Stay on for: 20 pictures are kept, and the first
+    // person's goes, from the media folder and from pictures, as the 21st is kept. A day on, the check that finds them
+    // older than a day takes every one, the last recognised's too, and the next arrival keeps its own.
+    static async Task AtMostTwentyPicturesAreKeptAndNoneOlderThanADay()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four) Uncompared(fake, spot);
+        Show();
+        await using var rig = await Rig.Start("pictures-twenty", media: true);
+        var list = PeopleOf(rig);
+        string[] names = [.. Enumerable.Range(1, 22).Select(i => $"Vid{i:00} Kept")];
+        foreach (var (name, i) in names.Select((name, i) => (name, i))) Named(list, name, 11 + i);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 600), ("KeepPictures", true)]), Faking("Porch")));
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", () => "Recognised is Nobody: " + rig.Shown("recognised"), 10);
+        var kept = new List<string>();
+        for (var i = 0; i < 21; i++)
+        {
+            var name = names[i];
+            fake.Embeds(four[0], FaceOf(11 + i));
+            await Until(() => (string?)rig.Latest("recognised")?.Attributes["last_recognised"] == name, () => $"{name} arrives: " + Sensor(rig));
+            kept.Add(LastPicture(rig.Latest("recognised")) ?? throw new Exception($"{name}'s arrival has no picture: " + PicturesOf(rig.Latest("recognised"))));
+        }
+        var latest = rig.Latest("recognised");
+        var shown = Pictures(latest);
+        Check(shown.Length == 21 && shown[0] == null && shown.Skip(1).SequenceEqual(kept.Skip(1)),
+            "the 21 are held, by name, and the first has no picture left: " + PicturesOf(latest));
+        Check(rig.MediaFiles().SequenceEqual(kept.Skip(1).Select(path => Path.GetFileName(path)).Order(StringComparer.Ordinal)) && !File.Exists(rig.OnDisk(kept[0])),
+            "20 pictures are kept, the first one's gone: " + string.Join(", ", rig.MediaFiles()));
+
+        // Out of frame, and a day on: they have all gone, and so have their pictures; the next arrival keeps its own.
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        clock.Advance(TimeSpan.FromDays(1));
+        await Until(() => Sensor(rig) == $"Nobody | [] | [] | 0 | {names[20]}", () => "a day on, they have gone: " + Sensor(rig));
+        await Until(() => rig.MediaFiles().Length == 0, () => "with their pictures: " + string.Join(", ", rig.MediaFiles()));
+        Check(NoPictures(rig.Latest("recognised")), "Recognised names none, the last recognised's neither: " + PicturesOf(rig.Latest("recognised")));
+        var arrives = clock.Now;
+        fake.Embeds(four[0], FaceOf(11 + 21));
+        Show();
+        await Until(() => (string?)rig.Latest("recognised")?.Attributes["last_recognised"] == names[21], () => $"{names[21]} arrives: " + Sensor(rig));
+        var last = LastPicture(rig.Latest("recognised"));
+        IsPicture(rig, last, arrives, "the arrival a day on");
+        Check(Pictures(rig.Latest("recognised")).SequenceEqual([last]) && rig.MediaFiles().SequenceEqual([Path.GetFileName(last!)]) && Index(rig).Length == 1,
+            "the pictures older than a day are gone: " + PicturesOf(rig.Latest("recognised")) + " | " + string.Join(", ", rig.MediaFiles()));
+        NothingMissingAndNoNameLogged(rig);
+        Check(!rig.Home.Logs().Any(l => names.Any(name => l.Contains(name, StringComparison.OrdinalIgnoreCase))), "no line names anyone: " + rig.Lines());
+        Console.WriteLine("PASS people detector: 21 arrivals keep 20 pictures, the first one's gone from pictures too, and a day on every one goes, from Recognised too");
+    }
+
+    // Four people arrive in one check, Ivan's face the largest, and are held by Stay on for with nobody in frame. Ivan merged
+    // into Ana on another detector, Eva deleted here and Mia deleted on another detector each lose their picture, from the
+    // media folder and from Recognised (Ivan's, the last recognised's, becomes null); Ana keeps hers. Ana, come back, has a
+    // second picture: deleted here, she loses both.
+    static async Task APersonDeletedOrMergedAwayLosesTheirPictures()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        fake.Embeds(four[0], FaceOf(2));
+        fake.Embeds(four[1], FaceOf(1));
+        fake.Embeds(four[2], FaceOf(3));
+        fake.Embeds(four[3], FaceOf(4));
+        Show();
+        await using var rig = await Rig.Start("pictures-deleted", media: true);
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        var eva = Named(list, Eva, 3);
+        var mia = Named(list, Mia, 4);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 60), ("KeepPictures", true)]), Faking("Porch")));
+        await Until(() => Sensor(rig) == $"{Ana}, {Eva}, {Ivan}, {Mia} | [{Ana}, {Eva}, {Ivan}, {Mia}] | [{First(Ana)}, {First(Eva)}, {First(Ivan)}, {First(Mia)}] | 0 | {Ivan}",
+            () => "the four arrive: " + rig.Shown("recognised"), 10);
+        var arrived = Pictures(rig.Latest("recognised"));
+        Check(arrived.Length == 4 && arrived.All(path => path != null) && arrived.Distinct().Count() == 4 && LastPicture(rig.Latest("recognised")) == arrived[2],
+            "each has a picture, Ivan's the last recognised's: " + PicturesOf(rig.Latest("recognised")));
+        var (anas, evas, ivans, mias) = (arrived[0]!, arrived[1]!, arrived[2]!, arrived[3]!);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+
+        list.Merge((string)ivan.Id, (string)ana.Id);
+        await Until(() => Sensor(rig) == $"{Ana}, {Eva}, {Mia} | [{Ana}, {Eva}, {Mia}] | [{First(Ana)}, {First(Eva)}, {First(Mia)}] | 0 | -", () => "Ivan merged away on another detector: " + Sensor(rig), 2);
+        await Until(() => !File.Exists(rig.OnDisk(ivans)), () => "Ivan's picture goes: " + string.Join(", ", rig.MediaFiles()), 2);
+        Check(Pictures(rig.Latest("recognised")).SequenceEqual([anas, evas, mias]) && LastPicture(rig.Latest("recognised")) == null,
+            "his picture goes from Recognised, the last recognised's with it, and Ana, whom he was merged into, keeps hers: " + PicturesOf(rig.Latest("recognised")));
+
+        Check(await Press(rig, "people", (string)eva.Id, "delete", new { }) == "done", "Eva deleted here");
+        await Until(() => Sensor(rig) == $"{Ana}, {Mia} | [{Ana}, {Mia}] | [{First(Ana)}, {First(Mia)}] | 0 | -", () => "Eva goes: " + Sensor(rig), 2);
+        await Until(() => !File.Exists(rig.OnDisk(evas)), () => "Eva's picture goes: " + string.Join(", ", rig.MediaFiles()), 2);
+        Check(Pictures(rig.Latest("recognised")).SequenceEqual([anas, mias]), "and from Recognised: " + PicturesOf(rig.Latest("recognised")));
+
+        list.Delete((string)mia.Id);
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | -", () => "Mia deleted on another detector goes: " + Sensor(rig), 2);
+        await Until(() => !File.Exists(rig.OnDisk(mias)), () => "Mia's picture goes: " + string.Join(", ", rig.MediaFiles()), 2);
+        Check(Pictures(rig.Latest("recognised")).SequenceEqual([anas]) && rig.MediaFiles().SequenceEqual([Path.GetFileName(anas)]),
+            "Ana's picture alone is left: " + PicturesOf(rig.Latest("recognised")) + " | " + string.Join(", ", rig.MediaFiles()));
+
+        // Ana leaves and comes back, on her face alone: a second picture, hers as the last recognised's.
+        clock.Advance(TimeSpan.FromSeconds(61));
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", () => "Ana goes: " + Sensor(rig));
+        foreach (var spot in four.Where(spot => spot != four[1])) Uncompared(fake, spot);
+        Show();
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", () => "Ana comes back: " + Sensor(rig));
+        var back = LastPicture(rig.Latest("recognised"));
+        Check(back != null && back != anas && rig.MediaFiles().Length == 2, "with a second picture: " + PicturesOf(rig.Latest("recognised")) + " | " + string.Join(", ", rig.MediaFiles()));
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        Check(await Press(rig, "people", (string)ana.Id, "delete", new { }) == "done", "Ana deleted here");
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", () => "Ana goes: " + Sensor(rig), 2);
+        await Until(() => rig.MediaFiles().Length == 0, () => "both her pictures go: " + string.Join(", ", rig.MediaFiles()), 2);
+        Check(NoPictures(rig.Latest("recognised")) && Index(rig).Length == 0, "Recognised names none, and the index has none: " + PicturesOf(rig.Latest("recognised")));
+        NothingMissingAndNoNameLogged(rig);
+        Console.WriteLine("PASS people detector: a person deleted or merged away, here or on another detector, loses their pictures from the media folder and from Recognised; the one merged into keeps theirs");
+    }
+
+    // Review focus 3. Without a media folder, and with one that cannot be written, recognition goes on: each arrival is
+    // published with no picture, and the failure is logged once as a warning, with no name, until a save succeeds again.
+    static async Task APictureThatCannotBeSavedLeavesRecognitionGoing()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        const string unsaved = "Porch people: A recognition picture could not be saved";
+        await using (var rig = await Rig.Start("pictures-no-folder"))
+        {
+            foreach (var spot in four) Uncompared(fake, spot);
+            Show();
+            var list = PeopleOf(rig);
+            Named(list, Ana, 1);
+            Named(list, Ivan, 2);
+            await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 60), ("KeepPictures", true)]), Faking("Porch")));
+            await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", () => "Recognised is Nobody: " + rig.Shown("recognised"), 10);
+            fake.Embeds(four[1], FaceOf(1));
+            await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", () => "Ana arrives: " + Sensor(rig));
+            Check(Pictures(rig.Latest("recognised")) is [null] && LastPicture(rig.Latest("recognised")) == null, "with no picture: " + PicturesOf(rig.Latest("recognised")));
+            fake.Embeds(four[0], FaceOf(2));
+            await Until(() => Sensor(rig) == $"{Ana}, {Ivan} | [{Ana}, {Ivan}] | [{First(Ana)}, {First(Ivan)}] | 0 | {Ivan}", () => "Ivan arrives: " + Sensor(rig));
+            Check(Pictures(rig.Latest("recognised")) is [null, null] && LastPicture(rig.Latest("recognised")) == null, "with no picture: " + PicturesOf(rig.Latest("recognised")));
+            var warned = rig.Home.Logs(PyLogLevel.Warn).Where(l => l.StartsWith(unsaved, StringComparison.Ordinal)).ToArray();
+            Check(warned is [var line] && line.Contains("no media folder", StringComparison.Ordinal), "the failure is a warning once, saying there is no media folder: " + rig.Lines());
+            NoNameIsLogged(rig);
+        }
+
+        if (OperatingSystem.IsWindows() || Environment.UserName == "root")
+        {
+            Console.WriteLine("SKIP people detector: a media folder that cannot be written (Windows or root writes it all the same)");
+            return;
+        }
+        await using (var rig = await Rig.Start("pictures-read-only", media: true))
+        {
+            foreach (var spot in four) Uncompared(fake, spot);
+            var list = PeopleOf(rig);
+            Named(list, Ana, 1);
+            Named(list, Ivan, 2);
+            Named(list, Mia, 3);
+            Named(list, Eva, 4);
+            var root = rig.MediaRoot!;
+            Directory.CreateDirectory(root);
+            void ReadOnly(bool on) => File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute | (on ? 0 : UnixFileMode.UserWrite));
+            try
+            {
+                ReadOnly(true);
+                await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 60), ("KeepPictures", true)]), Faking("Porch")));
+                await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", () => "Recognised is Nobody: " + rig.Shown("recognised"), 10);
+                string[] Warned() => [.. rig.Home.Logs(PyLogLevel.Warn).Where(l => l.StartsWith(unsaved, StringComparison.Ordinal))];
+                fake.Embeds(four[1], FaceOf(1));
+                await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", () => "Ana arrives: " + Sensor(rig));
+                fake.Embeds(four[0], FaceOf(2));
+                await Until(() => Sensor(rig) == $"{Ana}, {Ivan} | [{Ana}, {Ivan}] | [{First(Ana)}, {First(Ivan)}] | 0 | {Ivan}", () => "Ivan arrives: " + Sensor(rig));
+                Check(Pictures(rig.Latest("recognised")) is [null, null] && LastPicture(rig.Latest("recognised")) == null, "with no picture: " + PicturesOf(rig.Latest("recognised")));
+                Check(Warned() is [var denied] && denied.Contains(nameof(UnauthorizedAccessException), StringComparison.Ordinal), "the failure is a warning once: " + rig.Lines());
+
+                // Writable again: Mia's picture is kept. Read-only once more: Eva's is not, and that is a warning again.
+                ReadOnly(false);
+                fake.Embeds(four[2], FaceOf(3));
+                await Until(() => (string?)rig.Latest("recognised")?.Attributes["last_recognised"] == Mia, () => "Mia arrives: " + Sensor(rig));
+                var mias = LastPicture(rig.Latest("recognised"));
+                Check(mias != null && File.Exists(rig.OnDisk(mias)) && Pictures(rig.Latest("recognised")).Count(path => path != null) == 1, "with her picture: " + PicturesOf(rig.Latest("recognised")));
+                ReadOnly(true);
+                File.SetUnixFileMode(rig.MediaOf(), UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                try
+                {
+                    fake.Embeds(four[3], FaceOf(4));
+                    await Until(() => (string?)rig.Latest("recognised")?.Attributes["last_recognised"] == Eva, () => "Eva arrives: " + Sensor(rig));
+                    Check(LastPicture(rig.Latest("recognised")) == null && Pictures(rig.Latest("recognised")).Count(path => path != null) == 1, "with no picture: " + PicturesOf(rig.Latest("recognised")));
+                    Check(Warned().Length == 2, "after a save succeeded, the next failure is a warning again: " + rig.Lines());
+                }
+                finally { File.SetUnixFileMode(rig.MediaOf(), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
+            }
+            finally { ReadOnly(false); }
+            NothingMissingAndNoNameLogged(rig);
+        }
+        Console.WriteLine("PASS people detector: without a media folder, or with one that cannot be written, an arrival is published with no picture and the failure is logged once until a save succeeds");
+    }
+
+    // Review focus 5. last_recognised_picture comes back after a restart with last_recognised while its file is there, and
+    // is null when it is not: removed by hand, or older than a day at the start, which takes it. A file the detector keeps
+    // no record of goes at the start.
+    static async Task TheLastPictureOutlivesARestartWhileItsFileIsThere()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four.Skip(1)) Uncompared(fake, spot);
+        fake.Embeds(four[0], FaceOf(1));
+        Show();
+        await using var rig = await Rig.Start("pictures-restart", media: true);
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("KeepPictures", true)]), Faking("Porch")));
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", () => "Recognised names Ana: " + rig.Shown("recognised"), 10);
+        var picture = LastPicture(rig.Latest("recognised"));
+        Check(picture != null, "with her picture: " + PicturesOf(rig.Latest("recognised")));
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+
+        async Task<Pushed> Restart(Action? meanwhile = null)
+        {
+            await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = false });
+            meanwhile?.Invoke();
+            var from = rig.Mark;
+            await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = true });
+            await Until(() => rig.Of("recognised", from).Any(p => p.Available) && Sensor(rig) == $"Nobody | [] | [] | 0 | {Ana}", () => "restarted, Ana is the last recognised: " + rig.Shown("recognised", from), 10);
+            return rig.Latest("recognised")!;
+        }
+
+        var restarted = await Restart();
+        Check(LastPicture(restarted) == picture && Pictures(restarted).Length == 0 && File.Exists(rig.OnDisk(picture!)), "her picture comes back with her: " + PicturesOf(restarted));
+
+        // Her picture removed by hand while the detector was off, and a file it has no record of put there.
+        const string stray = "20261123T080000-0123456789abcdef.jpg";
+        restarted = await Restart(() =>
+        {
+            File.Delete(rig.OnDisk(picture!));
+            File.WriteAllBytes(Path.Combine(rig.MediaOf(), stray), [0xFF, 0xD8, 0xFF, 0xD9]);
+        });
+        Check(LastPicture(restarted) == null, "her picture removed, last_recognised_picture is null: " + PicturesOf(restarted));
+        Check(rig.MediaFiles().Length == 0 && Index(rig).Length == 0, "the file it had no record of goes, and the index forgets the picture removed: " + string.Join(", ", rig.MediaFiles()));
+
+        // She comes back, with a new picture; a day on, the start takes it.
+        clock.Advance(TimeSpan.FromSeconds(11));
+        var from = rig.Mark;
+        Show();
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}" && rig.Of("recognised", from).Any(p => p.Text == Ana), () => "Ana comes back: " + rig.Shown("recognised", from), 10);
+        var back = LastPicture(rig.Latest("recognised"));
+        Check(back != null && back != picture, "with a new picture: " + PicturesOf(rig.Latest("recognised")));
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        restarted = await Restart(() => clock.Advance(TimeSpan.FromDays(1)));
+        Check(LastPicture(restarted) == null && rig.MediaFiles().Length == 0, "a day on, the start takes her picture, and Recognised names none: " + PicturesOf(restarted) + " | " + string.Join(", ", rig.MediaFiles()));
+        NothingMissingAndNoNameLogged(rig);
+        Console.WriteLine("PASS people detector: last_recognised_picture comes back after a restart while its file is there, and is null when it is not; a stray file and a picture older than a day go at the start");
     }
 
     // ---- The class's own node ----

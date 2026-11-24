@@ -72,7 +72,7 @@ static class ManifestTests
             try { await test(); }
             catch (Exception e) { failures.Add($"{name}: {e}"); }
         if (failures.Count > 0) throw new Exception($"Vision manifest: {failures.Count} failing:\n" + string.Join("\n", failures));
-        Console.WriteLine("PASS vision manifest: Vision.cs, People.cs and PeopleDetector.cs import together, PeopleDetector.cs needs the other two, the People detector is a node in Vision with its thirteen settings, Front door people previews with that node, and they import over 1.0.x's, whose C# device nodes take up the new settings");
+        Console.WriteLine("PASS vision manifest: Vision.cs, People.cs and PeopleDetector.cs import together, PeopleDetector.cs needs the other two, the People detector is a node in Vision with its fourteen settings, Front door people previews with that node, and they import over 1.0.x's, whose C# device nodes take up the new settings");
     }
 
     static async Task TheRepositoryLibrariesImportTogether() => await Fresh("all", async api =>
@@ -121,8 +121,8 @@ static class ManifestTests
             && entry["documents"]?.ToJsonString() == """["entity"]""" && Text(entry, "description") is { Length: > 0 },
             "a device node of entity definitions, titled People detector in Vision, from people_detector, with the class's summary: " + entry.ToJsonString());
         var settings = entry["classSignature"]!["settings"]!.AsArray().Select(s => s!.AsObject()).ToArray();
-        string[] keys = ["Camera", "CheckEvery", "StayOnFor", "FaceScore", "PersonScore", "DetectPeople", "RecogniseFaces", "MatchScore", "LearnNewLooks", "KeepUnknownFacesFor", "BoxesOnTheCamera", "FacePointsOnTheCamera", "NamesOnTheCamera"];
-        Check(settings.Select(s => Text(s, "key")).SequenceEqual(keys), "its thirteen settings, in order: " + string.Join(",", settings.Select(s => Text(s, "key"))));
+        string[] keys = ["Camera", "CheckEvery", "StayOnFor", "FaceScore", "PersonScore", "DetectPeople", "RecogniseFaces", "MatchScore", "LearnNewLooks", "KeepUnknownFacesFor", "KeepPictures", "BoxesOnTheCamera", "FacePointsOnTheCamera", "NamesOnTheCamera"];
+        Check(settings.Select(s => Text(s, "key")).SequenceEqual(keys), "its fourteen settings, in order: " + string.Join(",", settings.Select(s => Text(s, "key"))));
         Check(settings.Where(s => s["required"]?.GetValue<bool>() == true).Select(s => Text(s, "key")).SequenceEqual(["Camera"]) && Text(settings[0], "domain") == "camera",
             "only Camera, a camera, is required: " + entry["classSignature"]!.ToJsonString());
 
@@ -206,7 +206,7 @@ static class ManifestTests
         """;
 
     static readonly string[] OneZeroSettings = ["Camera", "CheckEvery", "StayOnFor", "FaceScore", "PersonScore"];
-    static readonly string[] AllSettings = [.. OneZeroSettings, "DetectPeople", "RecogniseFaces", "MatchScore", "LearnNewLooks", "KeepUnknownFacesFor", "BoxesOnTheCamera", "FacePointsOnTheCamera", "NamesOnTheCamera"];
+    static readonly string[] AllSettings = [.. OneZeroSettings, "DetectPeople", "RecogniseFaces", "MatchScore", "LearnNewLooks", "KeepUnknownFacesFor", "KeepPictures", "BoxesOnTheCamera", "FacePointsOnTheCamera", "NamesOnTheCamera"];
 
     static string[] SettingKeys(JsonObject node) => [.. node["config"]!["signature"]!["settings"]!.AsArray().Select(s => s!["key"]!.GetValue<string>())];
 
@@ -237,7 +237,7 @@ static class ManifestTests
 
     // An install of 1.0.x: its two libraries, its Front door people (the C# device node front_door deriving
     // PeopleDetector, its camera chosen) and a definition of the user's own deriving the class, with a score typed in.
-    // 1.1.0's three libraries import over them, as Add external sends them: the save gives each C# device node the thirteen
+    // 1.1.0's three libraries import over them, as Add external sends them: the save gives each C# device node the fourteen
     // settings with its code, values and wires as they were. Front door people is then overwritten with the file's, the
     // People detector's own node under the same node id and key, with the camera kept as the overwrite keeps it.
     static async Task AnUpgradeFromOneZeroKeepsTheDefinitions() => await Fresh("upgrade", async api =>
@@ -268,7 +268,7 @@ static class ManifestTests
         foreach (var (id, before) in new[] { ("front_door_people", frontDoor), ("porch_people", own) })
         {
             var node = TheNode(await Read(api, id));
-            Check(SettingKeys(node).SequenceEqual(AllSettings), $"{id}'s C# device node has the thirteen settings: " + string.Join(",", SettingKeys(node)));
+            Check(SettingKeys(node).SequenceEqual(AllSettings), $"{id}'s C# device node has the fourteen settings: " + string.Join(",", SettingKeys(node)));
             Check(node["kind"]!.GetValue<string>() == "csharp_device" && node["config"]!["source"]!.GetValue<string>() == before["config"]!["source"]!.GetValue<string>()
                 && JsonNode.DeepEquals(node["config"]!["arguments"], before["config"]!["arguments"]),
                 $"{id}'s code and values are as they were, so the new settings are at their defaults: " + node.ToJsonString());

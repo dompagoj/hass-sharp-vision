@@ -2,6 +2,7 @@
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 /// <summary>The camera of a <see cref="PeopleDetector"/>: each frame it checks, with the faces and people found drawn on it as its settings say.</summary>
 public class PeopleDetectorCamera : SharpCamera
@@ -24,7 +25,8 @@ public class PeopleDetectorCamera : SharpCamera
 /// each frame against the people list every People detector shares (<see cref="PeopleList"/>), says who is in frame
 /// (Recognised, held as seen is), groups the faces it does not know (<see cref="FaceGroups"/>), and learns new looks of
 /// the people it is sure of; its page lists the unknown faces to name or dismiss, the people to rename, merge and
-/// delete, and a person's samples to remove.
+/// delete, and a person's samples to remove. With <see cref="KeepPictures"/> on too, it keeps the face of each arrival on
+/// Recognised, for a day, in Home Assistant's media folder, and Recognised names it.
 /// </para>
 /// <para>
 /// Drop it in an entity definition as a node of its own and give it a camera; or derive a C# device node's class from
@@ -64,6 +66,11 @@ public class PeopleDetector : SharpDevice
     const string PeopleSet = "people";
     // The key of the detector's own data that keeps the last visit, for Recognised's last_recognised after a restart.
     const string VisitKey = "recognised";
+    // The key of the detector's own data that keeps the index of its recognition pictures: which picture shows whom.
+    const string PicturesKey = "pictures";
+    // The most recognition pictures a detector keeps, and how long it keeps one at most.
+    const int MostPictures = 20;
+    static readonly TimeSpan KeepPicturesFor = TimeSpan.FromDays(1);
 
     readonly PeopleDetectorCamera camera;
     readonly Watch faces, people;
@@ -96,11 +103,21 @@ public class PeopleDetector : SharpDevice
     // other users' Changed actions are queued (Task.Run) after that lock is let go, so a detector writing the shared store
     // under this lock never runs, or waits for, another detector's code; nor does the people list hold its lock across a
     // store call or its callback.
+    // Guards pictures too, the index of the recognition pictures, which Recognised names through visits: a picture is
+    // saved, and its file written, with the check's matching, so that no state is worked out with an arrival but without
+    // its picture, as the unknown groups' crops are written under it.
     readonly Lock lists = new();
     // The people list the groups were last matched against: a check that finds another (a change whose ListsChanged has
     // not run yet, or a write of its own) matches them again first.
     IReadOnlyList<Person>? matchedAgainst;
     readonly Visits visits = new();
+    // The recognition pictures kept, as the detector's data keeps them (PicturesKey); none with Keep recognition pictures off.
+    List<Picture> pictures = [];
+
+    // Guards pictureFailures: the kinds of failure to keep or remove a recognition picture logged as a warning since a
+    // picture was last saved, so that each is a warning once and a debug line after. Taken alone.
+    readonly Lock pictureLog = new();
+    readonly HashSet<string> pictureFailures = new(StringComparer.Ordinal);
 
     // Guards shownTicket and shown: Show() sets Recognised under it, never under lists.
     readonly Lock showing = new();
@@ -181,6 +198,10 @@ public class PeopleDetector : SharpDevice
     [Setting("Keep unknown faces for", Minimum = 1, Maximum = 365)]
     public int KeepUnknownFacesFor { get; set; } = 7;
 
+    /// <summary>Whether the face of each arrival on Recognised is kept for a day in Home Assistant's media folder, where every logged-in user can open it, and named on Recognised.</summary>
+    [Setting("Keep recognition pictures")]
+    public bool KeepPictures { get; set; } = false;
+
     /// <summary>Whether the camera picture shows a box around each face, and around each person when people are detected.</summary>
     [Setting("Boxes on the camera")]
     public bool BoxesOnTheCamera { get; set; } = true;
@@ -233,31 +254,44 @@ public class PeopleDetector : SharpDevice
     /// <see cref="RecogniseFaces"/> on, it opens the people list and the unknown groups first, and begins opening the
     /// recogniser; Recognised has the last visit this detector kept, and is unavailable until a check finds the recogniser
     /// open, then what that check found: Nobody, unless someone is in frame. With it off, Recognised is unavailable.
+    /// With <see cref="KeepPictures"/> off, or with <see cref="RecogniseFaces"/> off, the recognition pictures kept before
+    /// are deleted; with both on, those of people deleted or merged away meanwhile, those older than a day and those beyond
+    /// the 20 newest are, and the last visit's picture comes back with it while its file is there.
     /// </summary>
     protected sealed override Task Start()
     {
         video = SharpVideo.Open(Camera, new VideoOptions { MaxWidth = 1280 });
         if (!DetectPeople) people.Off();
-        if (!RecogniseFaces) who.Available = false;
+        if (!RecogniseFaces)
+        {
+            who.Available = false;
+            ClearPictures();
+        }
         if (RecogniseFaces)
         {
             rules = RecognitionRules.Default.WithMatchScore(MatchScore);
             cameraId = Camera.EntityId;
-            // The groups first: the people list's callback uses them, and may run as soon as the list is made.
+            // The groups first: the people list's callback uses them, and may run as soon as the list is made; and the
+            // pictures, which it may delete.
             Unknown = new FaceGroups(Data, cameraId, rules);
-            People = new PeopleList(Shared(PeopleList.StoreName), ListsChanged);
             var kept = KeptVisit();
+            var picture = OpenPictures(kept);
+            People = new PeopleList(Shared(PeopleList.StoreName), ListsChanged);
+            var now = Now;
             Shown start;
+            List<string> doomed;
             lock (lists)
             {
                 // The list may have changed while this detector was off, and the match score with the settings.
                 Rematch(People.People);
-                start = visits.Restored(kept, People.People);
+                doomed = [.. Gone(People.People), .. Prune(now)];
+                start = visits.Restored(kept, picture != null && !doomed.Contains(picture.Name) ? picture : null, People.People);
             }
             Show(start);
+            Discard(doomed);
             Draw();
             Every(RedrawEvery, Refresh, immediately: false);
-            BeginOpening(Now);
+            BeginOpening(now);
         }
         Every(TimeSpan.FromSeconds(CheckEvery), Check);
         return Task.CompletedTask;
@@ -288,13 +322,17 @@ public class PeopleDetector : SharpDevice
         // draws right after.
         if (People == null) return Task.CompletedTask;
         Shown listed;
+        List<string> doomed;
         lock (lists)
         {
             Rematch(People.People);
+            doomed = Gone(People.People);
             listed = visits.Listed(People.People);
         }
-        // A rename, a merge or a delete there shows on Recognised at once, not at the next face.
+        // A rename, a merge or a delete there shows on Recognised at once, not at the next face; a person deleted or merged
+        // away there loses their pictures, once Recognised names them no more.
         Show(listed);
+        Discard(doomed);
         Draw();
         return Task.CompletedTask;
     }
@@ -413,7 +451,9 @@ public class PeopleDetector : SharpDevice
     // to be the people the check recognised. A maybe of a turned face (Turned) is most likely its person seen from further
     // aside than their samples: it goes to no group and is not counted, unless it is known not to be them.
     // Who is in frame for Recognised is worked out under lists with the matching, also in a check without a face to
-    // compare or with the recogniser not open (Recognised is unavailable then), and set after the lock is let go.
+    // compare or with the recogniser not open (Recognised is unavailable then), and set after the lock is let go. With
+    // Keep recognition pictures on, the pictures of the check's arrivals are saved under it too, before the state that
+    // names them is worked out, and the pictures due to go are dropped from it; their files are removed once it is set.
     string?[] Recognise(SharpImage frame, IReadOnlyList<DetectedFace> found, DateTimeOffset now, TimeSpan hold)
     {
         var names = new string?[found.Count];
@@ -439,14 +479,27 @@ public class PeopleDetector : SharpDevice
         }
         Matching? matching = null;
         Shown seen;
+        List<string> doomed = [];
+        List<Exception> unsaved = [];
+        var saved = false;
         lock (lists)
         {
             if (embedded != null) matching = MatchAndNote(frame, found, embedded, names, now);
-            seen = visits.Checked(recognizer != null, matching?.Given ?? [], matching?.Unknown ?? 0, now, hold, People.People);
+            var arrived = visits.Checked(recognizer != null, matching?.Given ?? [], matching?.Unknown ?? 0, now, hold);
+            if (KeepPictures)
+            {
+                if (matching != null) saved = Photograph(frame, matching, arrived, now, unsaved);
+                doomed = Prune(now);
+            }
+            seen = visits.Showing(People.People, arrived.Began != null);
         }
         // Outside the lock: setting an entity publishes, a log line goes to Python, and the visit is written to the store.
         Show(seen);
+        Discard(doomed);
         if (seen.Began is { } visit) Keep(visit);
+        // A save that worked makes the next failure of each kind a warning again.
+        if (saved) lock (pictureLog) pictureFailures.Clear();
+        foreach (var failure in unsaved) PictureFailed("saved", failure);
         foreach (var failure in matching?.Failures ?? []) Failed(failure, now);
         if (now >= expireNext)
         {
@@ -459,8 +512,9 @@ public class PeopleDetector : SharpDevice
     // Under lists: matches a check's embedded faces against the people list as it is now, with the groups brought in line
     // with it first when it changed since they were last matched, and notes each, setting the names of those recognised.
     // Gives the failures of the faces that could not be noted, for the caller to log; the ids of the people given a face,
-    // the largest face's first; and how many faces were compared and given to no one (no match, a maybe of a face that is
-    // not turned, or a second face of a person, or one of a group known not to be them), for Recognised.
+    // the largest face's first; how many faces were compared and given to no one (no match, a maybe of a face that is
+    // not turned, or a second face of a person, or one of a group known not to be them), for Recognised; and, for the
+    // pictures of arrivals, the face given to each person and the largest of those given to no one.
     Matching MatchAndNote(SharpImage frame, IReadOnlyList<DetectedFace> found, List<(int Index, FaceEmbedding Embedding)> embedded, string?[] names, DateTimeOffset now)
     {
         var failures = new List<Exception>();
@@ -493,12 +547,14 @@ public class PeopleDetector : SharpDevice
             }
             catch (Exception e) when (!Stopping.IsCancellationRequested) { failures.Add(e); }
         }
-        return new(failures, recognised, matched.Count - given.Count - aside.Count);
+        var faces = given.ToDictionary(face => face.Match.Person!.Id, face => face.Face, StringComparer.Ordinal);
+        var stranger = matched.Where(face => !named.Contains(face.Index) && !aside.Contains(face.Index)).MaxBy(face => face.Eyes)?.Face;
+        return new(failures, recognised, matched.Count - given.Count - aside.Count, faces, stranger);
     }
 
-    // What MatchAndNote gives back beside the names: the failures to log, the ids of the people given a face, and the
-    // number of faces compared and given to no one.
-    sealed record Matching(List<Exception> Failures, IReadOnlyList<string> Given, int Unknown);
+    // What MatchAndNote gives back beside the names: the failures to log, the ids of the people given a face, the number
+    // of faces compared and given to no one, the face given to each person by id, and the largest given to no one.
+    sealed record Matching(List<Exception> Failures, IReadOnlyList<string> Given, int Unknown, IReadOnlyDictionary<string, DetectedFace> Faces, DetectedFace? Stranger);
 
     // A face clear enough to embed: large enough, and looking towards the camera by the frontal rule or turned no further
     // than the turn limit.
@@ -601,15 +657,18 @@ public class PeopleDetector : SharpDevice
             who.Attributes["unknown_faces"] = next.UnknownFaces;
             who.Attributes["last_recognised"] = next.LastRecognised;
             who.Attributes["last_recognised_at"] = next.LastRecognisedAt;
+            who.Attributes["pictures"] = next.Pictures;
+            who.Attributes["last_recognised_picture"] = next.LastPicture;
+            who.Attributes["unknown_picture"] = next.UnknownPicture;
             // The value publishes, with the attributes; set while unavailable, it is sent with the availability after it.
             who.Value = next.State;
             if (who.Available != next.Available) who.Available = next.Available;
         }
     }
 
-    // A visit that began, kept in the detector's own data so that last_recognised comes back after a restart: written once
-    // for each visit, by the check that began it, outside lists (the checks run one at a time). A store that refuses it,
-    // full, loses only last_recognised at the next start.
+    // A visit that began, kept in the detector's own data so that last_recognised comes back after a restart, with its
+    // picture: written once for each visit, by the check that began it, outside lists (the checks run one at a time). A
+    // store that refuses it, full, loses only last_recognised at the next start.
     void Keep(Visit visit)
     {
         try { Data.Set(VisitKey, visit); }
@@ -625,92 +684,140 @@ public class PeopleDetector : SharpDevice
         catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return null; }
     }
 
-    // A visit: the person, by id, and when they were given a face while not in frame.
-    sealed record Visit(string PersonId, DateTimeOffset At);
+    // A visit: the person, by id, when they were given a face while not in frame, and the name of its picture, if one was
+    // kept.
+    sealed record Visit(string PersonId, DateTimeOffset At, string? Picture = null);
 
     // What Recognised shows: whether it is available, its state, and its attributes; with the visit the check began, to
     // keep, and the ticket that orders them as they were worked out under lists.
-    sealed record Shown(long Ticket, bool Available, string State, string[] Names, string[] FirstNames, int UnknownFaces, string? LastRecognised, DateTimeOffset? LastRecognisedAt, Visit? Began)
+    sealed record Shown(long Ticket, bool Available, string State, string[] Names, string[] FirstNames, int UnknownFaces, string? LastRecognised, DateTimeOffset? LastRecognisedAt,
+        string?[] Pictures, string? LastPicture, string? UnknownPicture, Visit? Began)
     {
         // Whether the sensor shows the same: all but the ticket and the visit begun.
         public bool Same(Shown other) =>
             Available == other.Available && State == other.State && Names.SequenceEqual(other.Names) && FirstNames.SequenceEqual(other.FirstNames)
-            && UnknownFaces == other.UnknownFaces && LastRecognised == other.LastRecognised && LastRecognisedAt == other.LastRecognisedAt;
+            && UnknownFaces == other.UnknownFaces && LastRecognised == other.LastRecognised && LastRecognisedAt == other.LastRecognisedAt
+            && Pictures.SequenceEqual(other.Pictures) && LastPicture == other.LastPicture && UnknownPicture == other.UnknownPicture;
     }
 
+    // Who arrived in a check: the people who began a visit, by id, the largest face's first; whether its faces given to
+    // no one are the first within the hold; and the visit it began, the first arrival's.
+    sealed record Arrivals(IReadOnlyList<string> People, bool Unknown, Visit? Began);
+
     // Who Recognised says is in frame, by person id: each person a check gave a face within Stay on for, held as seen is,
-    // and the faces of those checks given to no one; and the last visit. Used under lists only, so it is always of the
-    // people list the faces were matched against; the names are written from the list as it is when Recognised is worked
-    // out, so a rename shows at once, and a person who is no longer in it goes.
+    // and the faces of those checks given to no one; the last visit; and the pictures of their arrivals. Used under lists
+    // only, so it is always of the people list the faces were matched against; the names are written from the list as it
+    // is when Recognised is worked out, so a rename shows at once, and a person who is no longer in it goes.
     sealed class Visits
     {
-        // Each person in frame, by id: when their visit began, and the last check that gave them a face.
-        readonly Dictionary<string, (DateTimeOffset Began, DateTimeOffset Last)> inFrame = new(StringComparer.Ordinal);
+        // Each person in frame, by id: when their visit began, the last check that gave them a face, and the picture of
+        // their arrival, if one was kept.
+        readonly Dictionary<string, (DateTimeOffset Began, DateTimeOffset Last, Shot? Picture)> inFrame = new(StringComparer.Ordinal);
         // The checks within the hold that had faces given to no one, the oldest first, each with more of them than every
         // later one: so the first has the most, and there are at most MostEmbedded.
         readonly List<(DateTimeOffset At, int Count)> unknown = [];
-        // The visit that began last, kept after the person leaves; the one kept in the store at the start.
+        // The picture of the unknown arrival, while unknown faces are in frame.
+        Shot? unknownPicture;
+        // The visit that began last, kept after the person leaves; the one kept in the store at the start. And its picture.
         Visit? last;
+        Shot? lastPicture;
         // Whether the recogniser was open at the last check.
         bool open;
+        // Whether pictures are kept: without, Recognised's pictures is an empty list whoever is in frame.
+        public bool Keeping { get; set; }
         // The tickets handed out.
         long tickets;
 
-        // At the start: nobody in frame, the visit kept, and not available until a check finds the recogniser open.
-        public Shown Restored(Visit? kept, IReadOnlyList<Person> everyone)
+        // At the start: nobody in frame, the visit kept with its picture while its file is there, and not available until
+        // a check finds the recogniser open.
+        public Shown Restored(Visit? kept, Shot? picture, IReadOnlyList<Person> everyone)
         {
-            last = kept;
-            return Showing(everyone, null);
+            (last, lastPicture) = (kept, picture);
+            return Showing(everyone, false);
         }
 
         // A check: the people it gave a face, the largest face's first, and how many faces it gave to no one; with the
         // recogniser not open, none of either. A person not in frame begins a visit, and of several in one check the one
-        // of the largest face is the last recognised.
-        public Shown Checked(bool open, IReadOnlyList<string> given, int unknownFaces, DateTimeOffset now, TimeSpan hold, IReadOnlyList<Person> everyone)
+        // of the largest face is the last recognised. Its faces given to no one arrive when none were within the hold.
+        // Gives who arrived, for their pictures (Pictured), before Recognised is worked out (Showing).
+        public Arrivals Checked(bool open, IReadOnlyList<string> given, int unknownFaces, DateTimeOffset now, TimeSpan hold)
         {
             this.open = open;
-            Visit? began = null;
+            var arrived = new List<string>();
             foreach (var id in given)
             {
-                if (inFrame.TryGetValue(id, out var visit)) inFrame[id] = (visit.Began, now);
+                if (inFrame.TryGetValue(id, out var visit)) inFrame[id] = (visit.Began, now, visit.Picture);
                 else
                 {
-                    inFrame[id] = (now, now);
-                    began ??= new Visit(id, now);
+                    inFrame[id] = (now, now, null);
+                    arrived.Add(id);
                 }
             }
+            var unknownArrived = false;
             if (unknownFaces > 0)
             {
+                unknownArrived = unknown.All(check => Gone(check.At, now, hold));
+                if (unknownArrived) unknownPicture = null;
                 while (unknown.Count > 0 && unknown[^1].Count <= unknownFaces) unknown.RemoveAt(unknown.Count - 1);
                 unknown.Add((now, unknownFaces));
             }
             Expire(now, hold);
-            if (began != null) last = began;
-            return Showing(everyone, began);
+            Visit? began = arrived.Count > 0 ? new Visit(arrived[0], now) : null;
+            if (began != null) (last, lastPicture) = (began, null);
+            return new(arrived, unknownArrived, began);
+        }
+
+        // The picture of an arrival of the check just made: of the person of that id, or of its unknown faces with none.
+        public void Pictured(string? personId, Shot picture)
+        {
+            if (personId == null)
+            {
+                unknownPicture = picture;
+                return;
+            }
+            if (!inFrame.TryGetValue(personId, out var visit)) return;
+            inFrame[personId] = (visit.Began, visit.Last, picture);
+            if (last != null && last.PersonId == personId && last.At == visit.Began) (last, lastPicture) = (last with { Picture = picture.Name }, picture);
+        }
+
+        // The pictures of those names are going: Recognised names them no more.
+        public void Drop(IReadOnlySet<string> names)
+        {
+            foreach (var (id, visit) in inFrame.ToList())
+                if (visit.Picture != null && names.Contains(visit.Picture.Name)) inFrame[id] = (visit.Began, visit.Last, null);
+            if (lastPicture != null && names.Contains(lastPicture.Name)) (last, lastPicture) = (last! with { Picture = null }, null);
+            if (unknownPicture != null && names.Contains(unknownPicture.Name)) unknownPicture = null;
         }
 
         // A check that failed: whom the hold has passed for goes, and nothing before.
         public Shown Failed(DateTimeOffset now, TimeSpan hold, IReadOnlyList<Person> everyone)
         {
             Expire(now, hold);
-            return Showing(everyone, null);
+            return Showing(everyone, false);
         }
 
         // The people list changed: the names as it has them now.
-        public Shown Listed(IReadOnlyList<Person> everyone) => Showing(everyone, null);
+        public Shown Listed(IReadOnlyList<Person> everyone) => Showing(everyone, false);
 
-        // Whom no check gave a face within the hold goes, and so do the faces given to no one of the checks before it; what
-        // the check at now gave stays, also with no hold, as seen stays on.
+        // Whether a check at that time is out of the hold by now: what the check at now gave stays, also with no hold, as
+        // seen stays on.
+        static bool Gone(DateTimeOffset at, DateTimeOffset now, TimeSpan hold) => at != now && now - at >= hold;
+
+        // Whom no check gave a face within the hold goes, and so do the faces given to no one of the checks before it, with
+        // their picture once none is left.
         void Expire(DateTimeOffset now, TimeSpan hold)
         {
             foreach (var (id, visit) in inFrame.ToList())
-                if (visit.Last != now && now - visit.Last >= hold) inFrame.Remove(id);
-            unknown.RemoveAll(check => check.At != now && now - check.At >= hold);
+                if (Gone(visit.Last, now, hold)) inFrame.Remove(id);
+            unknown.RemoveAll(check => Gone(check.At, now, hold));
+            if (unknown.Count == 0) unknownPicture = null;
         }
 
         // What Recognised shows now: the people in frame by full name, without those no longer in the list, which go from
-        // the frame too; and the last visit's person when they are in it.
-        Shown Showing(IReadOnlyList<Person> everyone, Visit? began)
+        // the frame too, with the pictures of their arrivals; the last visit's person when they are in it, with its
+        // picture; and the unknown arrival's picture while unknown faces are in frame. With the visit the check made began
+        // when it did.
+        public Shown Showing(IReadOnlyList<Person> everyone, bool began)
         {
             var byId = everyone.ToDictionary(person => person.Id, StringComparer.Ordinal);
             foreach (var id in inFrame.Keys.Where(id => !byId.ContainsKey(id)).ToList()) inFrame.Remove(id);
@@ -721,7 +828,9 @@ public class PeopleDetector : SharpDevice
             var faces = unknown.Count > 0 ? unknown[0].Count : 0;
             var state = names.Length > 0 ? Joined(names) : faces > 0 ? "Unknown" : "Nobody";
             var lastPerson = last != null && byId.TryGetValue(last.PersonId, out var person) ? person : null;
-            return new(++tickets, open, state, names, [.. here.Select(person => person.FirstName)], faces, lastPerson?.FullName, lastPerson != null ? last!.At : null, began);
+            return new(++tickets, open, state, names, [.. here.Select(person => person.FirstName)], faces, lastPerson?.FullName, lastPerson != null ? last!.At : null,
+                Keeping ? [.. here.Select(person => inFrame[person.Id].Picture?.Path)] : [], lastPerson != null ? lastPicture?.Path : null, faces > 0 ? unknownPicture?.Path : null,
+                began ? last : null);
         }
 
         // The names joined by ", ", or as many whole names as fit in LongestState with More after them.
@@ -734,6 +843,199 @@ public class PeopleDetector : SharpDevice
             for (var i = 1; i < names.Length && kept.Length + 2 + names[i].Length + More.Length <= LongestState; i++) kept += ", " + names[i];
             return kept + More;
         }
+    }
+
+    // ---- Recognition pictures ----
+
+    // A recognition picture as the detector's data keeps it (PicturesKey): its file's name in the media folder, the person
+    // it shows, by id (none for an unknown face), and the time of the check that took it.
+    sealed record Picture(string Name, string? PersonId, DateTimeOffset At);
+
+    // A picture Recognised names: its file's name, and the path Home Assistant serves it at.
+    sealed record Shot(string Name, string Path);
+
+    // The name of a recognition picture, as Save makes it: the time of its check in UTC and 16 random hex digits. Only a
+    // file of such a name is the detector's to clear or sweep: a class deriving it may keep files of its own in the
+    // node's media folder.
+    static readonly System.Text.RegularExpressions.Regex PictureName = new(@"^\d{8}T\d{6}-[0-9a-f]{16}\.jpg\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    // At the start, outside lists. With Keep recognition pictures off, the detector's pictures and their index are
+    // deleted. On, the index is read and brought in line with the media folder: a picture it has no record of goes (one an
+    // interruption left between its save and its index, or whose removal failed), and a picture whose file is gone is
+    // forgotten. Gives the kept visit's picture while its file is there. Without a media folder there is nothing to keep,
+    // and nothing is logged of it.
+    Shot? OpenPictures(Visit? kept)
+    {
+        List<Picture> loaded = [];
+        Shot? picture = null;
+        if (!KeepPictures) ClearPictures();
+        else
+        {
+            var index = KeptPictures();
+            var files = PictureFiles();
+            if (files != null)
+            {
+                foreach (var stray in files.Keys.Where(name => index.All(known => known.Name != name)))
+                    try { Media.Remove(stray); }
+                    catch (Exception e) when (MediaFailure(e)) { PictureFailed("removed", e); }
+                loaded = [.. index.Where(known => files.ContainsKey(known.Name))];
+                if (kept?.Picture is { } name && loaded.Any(known => known.Name == name)) picture = new Shot(name, files[name]);
+            }
+            if (loaded.Count != index.Count) WritePictures(loaded);
+        }
+        lock (lists)
+        {
+            pictures = loaded;
+            visits.Keeping = KeepPictures;
+        }
+        return picture;
+    }
+
+    // Deletes the detector's pictures and their index: at the start with Keep recognition pictures off, or with Recognise
+    // faces off, when no check would prune them.
+    void ClearPictures()
+    {
+        foreach (var name in PictureFiles()?.Keys.ToList() ?? [])
+            try { Media.Remove(name); }
+            catch (Exception e) when (MediaFailure(e)) { PictureFailed("removed", e); }
+        try { Data.Remove(PicturesKey); }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
+    }
+
+    // The pictures in the node's media folder, by name, with the path each is served at; none without a media folder, or
+    // when it cannot be listed, which is logged.
+    Dictionary<string, string>? PictureFiles()
+    {
+        try { return Media.Files().Where(file => PictureName.IsMatch(file.Name)).ToDictionary(file => file.Name, file => file.Path, StringComparer.Ordinal); }
+        catch (Exception e) when (MediaFailure(e))
+        {
+            if (!NoMediaFolder(e)) PictureFailed("listed", e);
+            return null;
+        }
+    }
+
+    // The index of the pictures as the detector's data keeps it, the oldest first; none when it cannot be read, and none of
+    // a name that is not a picture's.
+    List<Picture> KeptPictures()
+    {
+        try { return [.. (Data.Get<Picture[]>(PicturesKey) ?? []).Where(known => known?.Name != null && PictureName.IsMatch(known.Name)).OrderBy(known => known.At)]; }
+        catch (InvalidDataException) { return []; }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return []; }
+    }
+
+    // Writes the index of the pictures to the detector's data; under lists, or at the start. A store that refuses it, full,
+    // leaves files its index at the next start has no record of, which go then.
+    void WritePictures(List<Picture> index)
+    {
+        try { Data.Set(PicturesKey, index); }
+        catch (InvalidDataException) { }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
+    }
+
+    // Under lists: the face crop of each arrival of the check, and of its unknown arrival, saved as a picture in the media
+    // folder (as the page's crops are cut), and set on the visits for Recognised to name. The file is on disk before the
+    // state that names it is worked out. A save that fails leaves that arrival without a picture, and its failure is given
+    // back for the caller to log. Gives whether a picture was saved.
+    bool Photograph(SharpImage frame, Matching matching, Arrivals arrived, DateTimeOffset now, List<Exception> unsaved)
+    {
+        var saved = false;
+        foreach (var id in arrived.People)
+            if (matching.Faces.TryGetValue(id, out var face) && Save(frame, face, id, now, unsaved) is { } picture)
+            {
+                visits.Pictured(id, picture);
+                saved = true;
+            }
+        if (arrived.Unknown && matching.Stranger is { } stranger && Save(frame, stranger, null, now, unsaved) is { } unknown)
+        {
+            visits.Pictured(null, unknown);
+            saved = true;
+        }
+        if (saved) WritePictures(pictures);
+        return saved;
+    }
+
+    // Under lists: a face's crop saved as a picture of the person of that id (of an unknown face with none), named by the
+    // check's time in UTC and 16 random hex digits, never by anything of the person. Null when the save failed.
+    Shot? Save(SharpImage frame, DetectedFace face, string? personId, DateTimeOffset now, List<Exception> unsaved)
+    {
+        var name = $"{now.UtcDateTime.ToString("yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture)}-{Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8))}.jpg";
+        try
+        {
+            var path = Media.Save(name, Crop(frame, face));
+            pictures.Add(new Picture(name, personId, now));
+            return new Shot(name, path);
+        }
+        catch (Exception e) when (!Stopping.IsCancellationRequested)
+        {
+            unsaved.Add(e);
+            return null;
+        }
+    }
+
+    // Under lists: the pictures older than a day, and beyond the newest MostPictures, go from the index and from what
+    // Recognised names. Gives their names, whose files the caller removes once Recognised is set (Discard).
+    List<string> Prune(DateTimeOffset now)
+    {
+        if (pictures.Count == 0) return [];
+        var doomed = pictures.Where(known => now - known.At > KeepPicturesFor).Select(known => known.Name).ToHashSet(StringComparer.Ordinal);
+        doomed.UnionWith(pictures.Where(known => !doomed.Contains(known.Name)).OrderByDescending(known => known.At).Skip(MostPictures).Select(known => known.Name));
+        return Forget(doomed);
+    }
+
+    // Under lists: the pictures of the people no longer in the list, deleted or merged away here or on another detector,
+    // go from the index and from what Recognised names; none while the list cannot be read, whatever it has. Gives their
+    // names, whose files the caller removes once Recognised is set (Discard). The one a person was merged into keeps theirs.
+    List<string> Gone(IReadOnlyList<Person> everyone)
+    {
+        if (pictures.Count == 0) return [];
+        var ids = everyone.Select(person => person.Id).ToHashSet(StringComparer.Ordinal);
+        var doomed = pictures.Where(known => known.PersonId != null && !ids.Contains(known.PersonId)).Select(known => known.Name).ToHashSet(StringComparer.Ordinal);
+        if (doomed.Count == 0 || People.Problem != null) return [];
+        return Forget(doomed);
+    }
+
+    // Under lists: the pictures of those names go from the index, which is written, and from what Recognised names.
+    List<string> Forget(HashSet<string> doomed)
+    {
+        if (doomed.Count == 0) return [];
+        pictures.RemoveAll(known => doomed.Contains(known.Name));
+        visits.Drop(doomed);
+        WritePictures(pictures);
+        return [.. doomed];
+    }
+
+    // Removes the files of the pictures forgotten, after Recognised was set without them, outside lists: so a state never
+    // names a file that is gone. One that cannot be removed is in no index, and goes at the next start.
+    void Discard(List<string> doomed)
+    {
+        foreach (var name in doomed)
+            try { Media.Remove(name); }
+            catch (Exception e) when (MediaFailure(e)) { PictureFailed("removed", e); }
+    }
+
+    // A failure of the media folder: none, the 200-file or 10 MiB limit, or the disk's. A stop's is none: nothing is
+    // logged of it.
+    static bool MediaFailure(Exception e) => e is IOException or UnauthorizedAccessException || e is InvalidOperationException and not ObjectDisposedException;
+
+    // Home Assistant has no media folder: SharpMedia's sentence for it.
+    static bool NoMediaFolder(Exception e) => e is InvalidOperationException and not ObjectDisposedException && e.Message.StartsWith("Home Assistant has no media folder", StringComparison.Ordinal);
+
+    // A picture that could not be saved or removed, or the pictures not listed: a warning the first time for each kind of
+    // failure (what was done, the exception's type, and whether Home Assistant has no media folder) since a picture was
+    // last saved, a debug line after. The exception's type and message hold no name and nothing of a face: a picture's
+    // name is a time and random digits, and its folder the definition's id and the node's key.
+    void PictureFailed(string doing, Exception failure)
+    {
+        var kind = $"{doing} {failure.GetType().Name}{(NoMediaFolder(failure) ? " no folder" : "")}";
+        bool again;
+        lock (pictureLog) again = !pictureFailures.Add(kind);
+        var what = doing switch
+        {
+            "saved" => "A recognition picture could not be saved, so Recognised names none for that arrival",
+            "removed" => "A recognition picture could not be removed; it is removed at a later start",
+            _ => "The recognition pictures could not be listed, so those kept before are removed at a later start",
+        };
+        Log($"{what}: {failure.GetType().Name}: {failure.Message}", again ? PyLogLevel.Debug : PyLogLevel.Warn);
     }
 
     // ---- The page ----
@@ -1089,12 +1391,19 @@ public class PeopleDetector : SharpDevice
     // The person, as the people list has them now.
     Person Known(string personId) => People.People.FirstOrDefault(person => person.Id == personId) ?? throw new UiRefusal(PersonGone);
 
-    // Recognised with the names of the people list as it is now.
+    // Recognised with the names of the people list as it is now; a person deleted or merged away loses their pictures,
+    // once Recognised names them no more.
     void Relisted()
     {
         Shown listed;
-        lock (lists) listed = visits.Listed(People.People);
+        List<string> doomed;
+        lock (lists)
+        {
+            doomed = Gone(People.People);
+            listed = visits.Listed(People.People);
+        }
         Show(listed);
+        Discard(doomed);
     }
 
     // A person merged away or deleted: their samples are not shown any more.
