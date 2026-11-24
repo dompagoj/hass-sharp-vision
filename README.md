@@ -165,21 +165,24 @@ score** at its default, 0.50:
 **Match score** moves the other two lines with it: the line for suggesting a name is a tenth under it, and the line for
 learning (below) a tenth over it. At 0.60, a name is suggested from 0.50 and learned from 0.70.
 
-A name is given to one face of a frame, the best match: another face of that frame that matches the same person is
-drawn with its score.
+A name is given to one face of a frame, the best match: another face of that frame that matches the same person goes
+to the unknown faces, and is drawn with its score.
 
 ### Unknown faces
 
 Each People detector keeps the faces it does not know in its own stored data. A face joins a group of faces that is
-at least **Match score** alike to one of its samples, or starts one; two groups that come that close are joined. Two
-faces seen in the same frame are never put on one card, however alike they are. A group keeps up to 5 samples, the
-larger faces and the ones unlike those it has, and counts at most one sighting a check.
+at least **Match score** alike to one of its samples, or starts one; two groups that come that close are joined. People
+seen in the same frame are kept apart: their faces are never put on one card, however alike they are. A face seen in a
+frame with a named person is never taken for that person afterwards while its card waits, and neither is a card that
+shared a frame with a card you named, so two people who look alike should each be named, on their own card. A group
+keeps up to 5 samples, the larger faces and the ones unlike those it has, and counts at most one sighting a check.
 
 - A group is shown on the page from its third sighting. One that is not shown within an hour is dropped, so a passer-by
   seen once never becomes a card.
 - A shown group not seen for **Keep unknown faces for** days (7 by default) is deleted. At most 50 groups are kept; the
   one seen longest ago goes first.
-- When the people list changes, the groups are matched again: one that now matches a person is removed.
+- When the people list changes, the groups are matched again: one that now matches a person is removed, unless it
+  shared a frame with them.
 
 ### The page
 
@@ -244,6 +247,10 @@ defaults up to about one of every thousand faces of strangers gets an enrolled p
 photos with a small list, and more at a real door or with a long list. Small, turned, blurred or night faces will
 often go unrecognised, and with a 1080p camera the detector misses most faces under about 24 pixels between the eyes
 before recognition is tried.
+
+People who look alike, relatives above all, score closer than the calibration's strangers: in this repository's own
+test photo, two different men score 0.52 to 0.56 at about 18 pixels between the eyes, above the default **Match
+score**.
 
 Faces, their crops, their embeddings and the names you give them are biometric and personal data:
 

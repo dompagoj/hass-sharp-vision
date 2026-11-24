@@ -313,8 +313,11 @@ public class PeopleDetector : SharpDevice
 
     // Recognises the usable faces of a frame, the largest first and at most MostEmbedded, and expires the unknown groups
     // when that is due. Gives each face's name, in the order of found: a recognised face's person's, null for the others.
-    // Two faces of one frame are two people, so a person is given to one face of the check, the best match: another face
-    // matched to them is not recognised in this check, nor seen, learned from or grouped.
+    // A face the matcher gives to a person, but that belongs to an unknown group known not to be them, is not theirs
+    // (FaceGroups.KnownNotToBe: the matcher itself knows nothing of the groups). Two faces of one frame are two people,
+    // so a person is given to one face of the check, the best match; another face matched to them goes to the unknown
+    // faces, as any face not recognised does, without suggesting them. The group of each face not recognised is known not
+    // to be the people the check recognised.
     string?[] Recognise(SharpImage frame, IReadOnlyList<DetectedFace> found, DateTimeOffset now)
     {
         var names = new string?[found.Count];
@@ -337,14 +340,25 @@ public class PeopleDetector : SharpDevice
                 }
                 catch (Exception e) when (!Stopping.IsCancellationRequested) { Failed(e, now); }
             }
-            var given = matched.Where(face => face.Match.Kind == MatchKind.Recognised && face.Match.Person != null)
+            var elsewhere = matched.Where(face => Unknown.KnownNotToBe(face.Embedding, face.Match)).Select(face => face.Index).ToHashSet();
+            var given = matched.Where(face => face.Match.Kind == MatchKind.Recognised && face.Match.Person != null && !elsewhere.Contains(face.Index))
                 .GroupBy(face => face.Match.Person!.Id, StringComparer.Ordinal)
-                .Select(faces => faces.MaxBy(face => face.Match.Score)!.Index)
-                .ToHashSet();
+                .Select(faces => faces.MaxBy(face => face.Match.Score)!)
+                .ToList();
+            var recognised = given.Select(face => face.Match.Person!.Id).ToList();
+            var named = given.Select(face => face.Index).ToHashSet();
             foreach (var face in matched)
             {
-                if (face.Match.Kind == MatchKind.Recognised && !given.Contains(face.Index)) continue;
-                try { names[face.Index] = Note(frame, face, now); }
+                try
+                {
+                    if (named.Contains(face.Index)) names[face.Index] = Note(frame, face, now);
+                    else
+                    {
+                        // A maybe suggests its person, unless the face is known not to be them.
+                        var suggested = face.Match is { Kind: MatchKind.Maybe, Person: { } maybe } && !elsewhere.Contains(face.Index) ? maybe.Id : null;
+                        Unknown.Seen(face.Embedding, () => Crop(frame, face.Face), face.Eyes, now, suggested, recognised);
+                    }
+                }
                 catch (Exception e) when (!Stopping.IsCancellationRequested) { Failed(e, now); }
             }
         }
@@ -368,32 +382,21 @@ public class PeopleDetector : SharpDevice
         return new Matched(index, face, embedding, Vision.EyeDistance(face), FaceMatcher.Match(embedding, everyone, rules));
     }
 
-    // One matched face, noted as a sighting of its person or of an unknown face, and learned when it meets the rules.
-    // Gives its person's name when it is recognised, and null otherwise. Nothing of it is logged.
-    string? Note(SharpImage frame, Matched face, DateTimeOffset now)
+    // A recognised face, noted as a sighting of its person, and learned when it meets the rules. Gives its person's name.
+    // Nothing of it is logged. A face not recognised is cut, by Seen, only when a group keeps it, during the call: the
+    // frame is still the check's.
+    string Note(SharpImage frame, Matched face, DateTimeOffset now)
     {
-        var (embedding, eyes, match) = (face.Embedding, face.Eyes, face.Match);
-        // Cut only when a face is kept, during the call: the frame is still the check's.
-        Func<byte[]> crop = () => Crop(frame, face.Face);
-        switch (match)
+        var (embedding, eyes, match, person) = (face.Embedding, face.Eyes, face.Match, face.Match.Person!);
+        People.Seen(person.Id, now, cameraId);
+        // A person has one face in a check, so is learned from at most once in it.
+        if (LearnNewLooks && FaceMatcher.Learns(embedding, eyes, match, now, rules))
         {
-            case { Kind: MatchKind.Recognised, Person: { } person }:
-                People.Seen(person.Id, now, cameraId);
-                // A person has one face in a check, so is learned from at most once in it.
-                if (LearnNewLooks && FaceMatcher.Learns(embedding, eyes, match, now, rules))
-                {
-                    // Refused when the person was deleted meanwhile: the sample is dropped.
-                    try { People.AddSamples(person.Id, [new NewSample(embedding, crop(), now, cameraId)], learned: true); }
-                    catch (PeopleRefusal) { }
-                }
-                return person.Name;
-            case { Kind: MatchKind.Maybe, Person: { } suggested }:
-                Unknown.Seen(embedding, crop, eyes, now, suggested.Id);
-                return null;
-            default:
-                Unknown.Seen(embedding, crop, eyes, now, null);
-                return null;
+            // Refused when the person was deleted meanwhile: the sample is dropped.
+            try { People.AddSamples(person.Id, [new NewSample(embedding, Crop(frame, face.Face), now, cameraId)], learned: true); }
+            catch (PeopleRefusal) { }
         }
+        return person.Name;
     }
 
     // A face of a check, embedded and matched: its index in the faces found, the face, its embedding, the pixels between
@@ -612,15 +615,15 @@ public class PeopleDetector : SharpDevice
     }
 
     // Names a group: its samples go to the person of that name, or to a new person, first, and the group after, so that a
-    // group an interruption leaves behind matches its person at the next start and goes.
+    // group an interruption leaves behind matches its person at the next start and goes. The groups apart from it are
+    // known not to be that person.
     void SaveFace(string groupId, string name)
     {
         if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
         var samples = Unknown.Samples(groupId);
         if (samples.Count == 0) throw new UiRefusal(NoPicture);
-        if (People.Named(name) is { } person) People.AddSamples(person.Id, samples, learned: false);
-        else People.Add(name, samples);
-        Unknown.Remove(groupId);
+        var person = People.Named(name) is { } named ? People.AddSamples(named.Id, samples, learned: false) : People.Add(name, samples);
+        Unknown.Named(groupId, person.Id);
         // Other groups of the same face are now recognised, and go too.
         Unknown.Rematch(People.People, rules);
     }
@@ -643,6 +646,8 @@ public class PeopleDetector : SharpDevice
         var target = People.Named(into) ?? throw new UiRefusal(PersonGone);
         People.Merge(personId, target.Id);
         Closed(personId);
+        // Here only: another detector's groups see the person gone, and drop them.
+        Unknown.Merged(personId, target.Id);
         Unknown.Rematch(People.People, rules);
     }
 

@@ -2,6 +2,7 @@
 using System.Buffers.Binary;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text.Json;
 
 /// <summary>
 /// The lines a face's embedding is judged by against the people list. <see cref="Default"/> holds the values of
@@ -857,17 +858,26 @@ public sealed record FaceGroup(string Id, int Sightings, DateTimeOffset First, D
 /// </summary>
 /// <remarks>
 /// <para>
-/// The store's keys: <c>format</c>, 1; <c>groups</c>, a JSON array of the groups' ids; <c>groups/&lt;id&gt;</c>, a group
-/// without its embeddings and crops; <c>groups/&lt;id&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats;
-/// <c>groups/&lt;id&gt;/&lt;sampleId&gt;/crop</c>, the JPEG; and <c>apart</c>, a JSON array of the pairs of groups that are
-/// apart, each pair two ids (a store without it has none apart). The pairs are of the groups kept, at most
-/// <see cref="MostGroups"/>, and a group removed leaves them.
+/// The store's keys: <c>format</c>, 1; <c>groups</c>, the index, a JSON array with an entry for each group: its
+/// <c>id</c>, the ids of the groups it is <c>apart</c> from, and the ids of the people it is known not to be,
+/// <c>notPeople</c>; <c>groups/&lt;id&gt;</c>, a group without its embeddings and crops;
+/// <c>groups/&lt;id&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats; and
+/// <c>groups/&lt;id&gt;/&lt;sampleId&gt;/crop</c>, the JPEG. An entry that is the id alone, as an index written before
+/// the relations has it, is a group apart from none and known to be no one's. The relations are in the index, so that
+/// one write changes a group's place in it and its relations together, and nothing can part them.
+/// </para>
+/// <para>
+/// A group is known not to be a person when it is apart from a group named as that person on the page, or took a face
+/// of a check in which another face was recognised as them. A face the people list gives to that person but that is
+/// more alike to the group goes to the group (<see cref="KnownNotToBe"/>), and <see cref="Rematch"/> neither removes
+/// the group for a match with that person nor suggests them for it. The ids are of people in the list: one no longer
+/// there goes at the next <see cref="Rematch"/>, so a group has at most <see cref="PeopleList.MostPeople"/>.
 /// </para>
 /// <para>
 /// Memory is the truth while the detector runs, and the store follows: a group is written when it starts, gains or loses
-/// a sample, is joined with another, is first shown or has its suggestion changed by <see cref="Rematch"/>, and its last
-/// seen and count otherwise at most once a minute (<see cref="WrittenEvery"/>). A restart can lose up to a minute of a
-/// group's sightings. The pairs apart are written when they change, after the index.
+/// a sample, is joined with another, is first shown or has its suggestion changed, and its last seen and count otherwise
+/// at most once a minute (<see cref="WrittenEvery"/>). A restart can lose up to a minute of a group's sightings. The
+/// index is written when a group starts or goes, and when a relation changes.
 /// </para>
 /// <para>
 /// A new group's samples are written before its record, and its record before the index lists it; a group removed leaves
@@ -875,8 +885,8 @@ public sealed record FaceGroup(string Id, int Sightings, DateTimeOffset First, D
 /// store only after the one before has stopped, so loading removes every key under <c>groups/</c> that the index and the
 /// groups' records do not list: what an interruption left, which nothing is still writing. A group whose record cannot
 /// be read, or has no sample left, is dropped with its keys; an index that cannot be read drops every group, as this is
-/// a cache of faces the user has not named. A pair apart that names a group not kept, or pairs that cannot be read, are
-/// left out. A store of another format is neither read nor written, and has no groups.
+/// a cache of faces the user has not named. A group apart from one not kept leaves that one out, and two groups are
+/// apart when either entry says so. A store of another format is neither read nor written, and has no groups.
 /// A store cleared while the detector runs is noticed at the next change, and the groups in memory are forgotten, so
 /// that none is written back.
 /// </para>
@@ -902,7 +912,7 @@ public sealed class FaceGroups
     public static readonly TimeSpan WrittenEvery = TimeSpan.FromMinutes(1);
 
     const int Format = 1;
-    const string IndexKey = "groups", ApartKey = "apart";
+    const string IndexKey = "groups";
 
     readonly SharpData data;
     readonly string camera;
@@ -963,21 +973,24 @@ public sealed class FaceGroups
     /// seen; it starts a group when there is none. Two faces of one check are two people, so the faces of one check are
     /// given the same <paramref name="now"/>, and each check its own: a face never joins a group that took a face of the
     /// same check, and the group it joins or starts is apart from those for good. Of groups that are apart, it joins
-    /// only the one it is most alike to, and joins nothing together. A group not shown within <see cref="ShownWithin"/>
-    /// is dropped first.
+    /// only the one it is most alike to, and joins nothing together. The group is known not to be the people recognised on
+    /// the check's other faces, and never suggests a person it is known not to be. A group not shown within
+    /// <see cref="ShownWithin"/> is dropped first.
     /// </summary>
     /// <param name="face">The face's embedding.</param>
     /// <param name="crop">Makes the face's crop, a JPEG of at most 1 MiB; called once when the face is kept as one of the group's samples, and not at all otherwise.</param>
     /// <param name="eyes">The pixels between the face's eyes: a group keeps its larger faces.</param>
     /// <param name="now">When the check saw the face.</param>
     /// <param name="suggestedPersonId">The person the face might be, from a maybe; null for none, which leaves the group's suggestion as it is.</param>
+    /// <param name="recognisedPersonIds">The ids of the people the check recognised on its other faces; none when null.</param>
     /// <exception cref="ArgumentException">The embedding has no 128 values, or the crop is null or over 1 MiB.</exception>
-    public void Seen(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggestedPersonId)
+    public void Seen(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggestedPersonId, IReadOnlyCollection<string>? recognisedPersonIds = null)
     {
         ArgumentNullException.ThrowIfNull(crop);
         if (face.Values is not { Length: PeopleList.Values }) throw new ArgumentException("A face's embedding has 128 values");
         if (!ours) return;
         var suggested = PeopleList.IsId(suggestedPersonId) ? suggestedPersonId : null;
+        var notPeople = (recognisedPersonIds ?? []).Where(PeopleList.IsId).Distinct(StringComparer.Ordinal).ToList();
         lock (gate)
         {
             Cleared();
@@ -1000,9 +1013,73 @@ public sealed class FaceGroups
             foreach (var group in alike)
                 if (close.All(chosen => !chosen.Apart.Contains(group.Id))) close.Add(group);
             close = [.. close.OrderBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal)];
-            var target = close.Count == 0 ? Start(face, crop, eyes, now, suggested) : Join(close, face, crop, eyes, now, suggested);
-            Apart(target);
+            var target = close.Count == 0 ? Start(face, crop, eyes, now, suggested, notPeople) : Join(close, face, crop, eyes, now, suggested, notPeople);
             took.Add(target.Id);
+            Publish();
+        }
+    }
+
+    /// <summary>
+    /// Whether a face that <see cref="FaceMatcher.Match"/> gives to a person, recognised or suggested, belongs instead to
+    /// a group known not to be that person: it is at least <see cref="RecognitionRules.MatchScore"/> from a sample of such
+    /// a group, and more alike to it than the match's score. Such a face is not that person's: the detector notes it
+    /// with <see cref="Seen"/>, without suggesting them. False for a match of no one.
+    /// </summary>
+    /// <param name="face">The face's embedding.</param>
+    /// <param name="match">The face's match against the people list.</param>
+    public bool KnownNotToBe(FaceEmbedding face, FaceMatch match)
+    {
+        ArgumentNullException.ThrowIfNull(match);
+        if (!ours || match.Person is not { } person || face.Values is not { Length: PeopleList.Values }) return false;
+        lock (gate)
+            return groups.Values
+                .Where(group => group.NotPeople.Contains(person.Id) && group.Samples.Count > 0)
+                .Select(group => group.Samples.Max(sample => (double)sample.Embedding.Similarity(face)))
+                .Any(score => score >= rules.MatchScore && score > match.Score);
+    }
+
+    /// <summary>
+    /// Removes a group named as a person on the page, once its samples are theirs: every group apart from it is known not
+    /// to be that person from now on, written in the one write that removes it. Nothing when it is gone already.
+    /// </summary>
+    /// <param name="id">The group's id.</param>
+    /// <param name="personId">The id of the person it was named as.</param>
+    public void Named(string id, string personId)
+    {
+        if (!ours || id == null) return;
+        lock (gate)
+        {
+            Cleared();
+            if (!groups.TryGetValue(id, out var group)) return;
+            if (PeopleList.IsId(personId))
+                foreach (var apartId in group.Apart)
+                    if (groups.TryGetValue(apartId, out var apart))
+                        NotPerson(apart, personId);
+            Drop([group]);
+            Publish();
+        }
+    }
+
+    /// <summary>
+    /// A person merged into another on this detector's page: a group known not to be the one is known not to be the other.
+    /// Another detector sees the person gone only, and its groups drop them at its next <see cref="Rematch"/>.
+    /// </summary>
+    /// <param name="fromId">The id of the person merged away.</param>
+    /// <param name="intoId">The id of the person they were merged into.</param>
+    public void Merged(string fromId, string intoId)
+    {
+        if (!ours || !PeopleList.IsId(fromId) || !PeopleList.IsId(intoId) || fromId == intoId) return;
+        lock (gate)
+        {
+            Cleared();
+            var changed = false;
+            foreach (var group in groups.Values)
+                if (group.NotPeople.Remove(fromId))
+                {
+                    NotPerson(group, intoId);
+                    changed = true;
+                }
+            if (changed) WriteIndex();
             Publish();
         }
     }
@@ -1010,7 +1087,8 @@ public sealed class FaceGroups
     /// <summary>
     /// Matches every group's samples against the people list again, after it changed: a group a sample of which is now
     /// recognised as someone is removed; one a sample of which is a maybe suggests that person; a suggestion whose person
-    /// is gone is cleared.
+    /// is gone is cleared. A group is matched against the people it is not known not to be only, and the ids of people
+    /// no longer in the list leave the groups.
     /// </summary>
     /// <param name="people">The people list, such as <see cref="PeopleList.People"/>.</param>
     /// <param name="rules">The lines to judge by.</param>
@@ -1019,10 +1097,15 @@ public sealed class FaceGroups
         ArgumentNullException.ThrowIfNull(people);
         ArgumentNullException.ThrowIfNull(rules);
         if (!ours) return;
-        List<(Group Group, GroupSample[] Samples)> taken;
-        lock (gate) taken = groups.Values.Select(group => (group, group.Samples.ToArray())).ToList();
+        List<(Group Group, GroupSample[] Samples, HashSet<string> NotPeople)> taken;
+        lock (gate) taken = groups.Values.Select(group => (group, group.Samples.ToArray(), new HashSet<string>(group.NotPeople, StringComparer.Ordinal))).ToList();
         // Matched outside the lock: it can take a while against a full list, and a check should not wait for it.
-        var judged = taken.Select(item => (item.Group, Matches: item.Samples.Select(sample => FaceMatcher.Match(sample.Embedding, people, rules)).ToList())).ToList();
+        var judged = taken.Select(item =>
+        {
+            IReadOnlyList<Person> candidates = item.NotPeople.Count == 0 ? people : people.Where(person => !item.NotPeople.Contains(person.Id)).ToList();
+            return (item.Group, Matches: item.Samples.Select(sample => FaceMatcher.Match(sample.Embedding, candidates, rules)).ToList());
+        }).ToList();
+        var listed = people.Select(person => person.Id).ToHashSet(StringComparer.Ordinal);
         lock (gate)
         {
             Cleared();
@@ -1031,18 +1114,26 @@ public sealed class FaceGroups
             {
                 // Removed or joined into another meanwhile.
                 if (!groups.TryGetValue(group.Id, out var current) || current != group) continue;
-                if (matches.Any(match => match.Kind == MatchKind.Recognised))
+                // Known not to be a person since it was matched: that match does not count.
+                var counted = matches.Where(match => match.Person == null || !group.NotPeople.Contains(match.Person.Id)).ToList();
+                if (counted.Any(match => match.Kind == MatchKind.Recognised))
                 {
                     recognised.Add(group);
                     continue;
                 }
-                var maybe = matches.Where(match => match.Kind == MatchKind.Maybe).MaxBy(match => match.Score);
-                var suggested = maybe?.Person?.Id ?? (people.Any(person => person.Id == group.Suggested) ? group.Suggested : null);
+                var maybe = counted.Where(match => match.Kind == MatchKind.Maybe).MaxBy(match => match.Score);
+                var suggested = maybe?.Person?.Id ?? (group.Suggested is { } before && listed.Contains(before) && !group.NotPeople.Contains(before) ? before : null);
                 if (suggested == group.Suggested) continue;
                 group.Suggested = suggested;
                 WriteRecord(group);
             }
-            Drop(recognised);
+            // The people no longer in the list: deleted, or merged into another (see Merged).
+            var gone = false;
+            foreach (var group in groups.Values)
+                gone |= group.NotPeople.RemoveWhere(id => !listed.Contains(id)) > 0;
+            // Dropping writes the index, with the ids gone.
+            if (recognised.Count > 0) Drop(recognised);
+            else if (gone) WriteIndex();
             Publish();
         }
     }
@@ -1100,27 +1191,32 @@ public sealed class FaceGroups
 
     // ---- Changes; each under the lock ----
 
-    /// <summary>Starts a group of one face, dropping the group seen longest ago when there are <see cref="MostGroups"/>.</summary>
-    Group Start(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
+    /// <summary>
+    /// Starts a group of one face, dropping the group seen longest ago when there are <see cref="MostGroups"/>: its
+    /// sample, then its record, then the index with it and its relations.
+    /// </summary>
+    Group Start(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested, List<string> notPeople)
     {
         var bytes = Made(crop);
         if (groups.Count >= MostGroups) Drop([groups.Values.OrderBy(group => group.Last).ThenBy(group => group.Id, StringComparer.Ordinal).First()]);
-        var group = new Group(PeopleList.NewId()) { Sightings = 1, First = now, Last = now, Suggested = suggested };
+        var group = new Group(PeopleList.NewId()) { Sightings = 1, First = now, Last = now };
         var sample = new GroupSample(PeopleList.NewId(), face, eyes, now);
         group.Samples.Add(sample);
         groups[group.Id] = group;
+        Relate(group, notPeople);
+        group.Suggested = suggested is { } id && !group.NotPeople.Contains(id) ? id : null;
         WriteSample(group.Id, sample, bytes);
         WriteRecord(group);
-        ChangeIndex(index => index.Add(group.Id));
+        WriteIndex();
         return group;
     }
 
     /// <summary>
     /// A face joins the groups it is close to, none of which is apart from another or took a face of this check: they
     /// become the first, with every sighting and this check's, the best of their samples, the face as a sample when it
-    /// adds to them, and every group any of them is apart from.
+    /// adds to them, every group any of them is apart from, and every person any of them is known not to be.
     /// </summary>
-    Group Join(List<Group> close, FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
+    Group Join(List<Group> close, FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested, List<string> notPeople)
     {
         var (group, others) = (close[0], close.Skip(1).ToList());
         var sightings = close.Sum(g => g.Sightings) + 1;
@@ -1140,48 +1236,64 @@ public sealed class FaceGroups
         var moved = kept.Where(k => k.Owner != group && k.Sample != replaced).Select(k => (k.Owner.Id, k.Sample)).ToList();
         var dropped = group.Samples.Where(sample => !samples.Contains(sample)).ToList();
         var firstShown = !IsShown(group) && sightings >= ShownAt;
+        var suggestedBefore = group.Suggested;
         group.Sightings = sightings;
         var latest = close.Max(g => g.Last);
         group.Last = latest > now ? latest : now;
-        group.Suggested = suggested ?? group.Suggested ?? others.Select(g => g.Suggested).FirstOrDefault(s => s != null);
         group.Samples = samples;
         foreach (var other in others) groups.Remove(other.Id);
-        // The groups the others were apart from are apart from the first now.
+        // The groups the others were apart from are apart from the first now, and the people they are not, it is not.
         foreach (var other in others)
-        foreach (var id in other.Apart)
-            if (groups.TryGetValue(id, out var apart))
-            {
-                apart.Apart.Remove(other.Id);
-                apart.Apart.Add(group.Id);
-                group.Apart.Add(id);
-            }
+        {
+            foreach (var id in other.Apart)
+                if (groups.TryGetValue(id, out var apart))
+                {
+                    apart.Apart.Remove(other.Id);
+                    apart.Apart.Add(group.Id);
+                    group.Apart.Add(id);
+                }
+            group.NotPeople.UnionWith(other.NotPeople);
+        }
+        var related = Relate(group, notPeople);
+        group.Suggested = new[] { suggested, group.Suggested }.Concat(others.Select(g => g.Suggested))
+            .FirstOrDefault(id => id != null && !group.NotPeople.Contains(id));
 
         foreach (var (from, sample) in moved) CopySample(from, group.Id, sample);
         if (added != null) WriteSample(group.Id, added, bytes!);
-        if (others.Count > 0 || added != null || dropped.Count > 0 || firstShown || group.Written is not { } written || (now - written).Duration() >= WrittenEvery)
+        if (others.Count > 0 || added != null || dropped.Count > 0 || firstShown || group.Suggested != suggestedBefore
+            || group.Written is not { } written || (now - written).Duration() >= WrittenEvery)
             WriteRecord(group);
-        if (others.Count > 0)
-        {
-            var gone = others.Select(other => other.Id).ToHashSet(StringComparer.Ordinal);
-            ChangeIndex(index => index.RemoveAll(gone.Contains));
-            if (others.Any(other => other.Apart.Count > 0)) WriteApart();
-            foreach (var other in others) Forget(other.Id);
-        }
+        if (others.Count > 0 || related) WriteIndex();
+        foreach (var other in others) Forget(other.Id);
         foreach (var sample in dropped) RemoveSampleKeys(group.Id, sample.Id);
         return group;
     }
 
     /// <summary>
-    /// The group a face of this check just went to is apart from every other group that took a face of the check: two
-    /// faces of one frame are two people. The pairs are written when they change.
+    /// The group a face of this check goes to is apart from every other group that took a face of the check, as two faces
+    /// of one frame are two people, and is known not to be the people recognised on the check's other faces. True when
+    /// either changed, for the index to be written.
     /// </summary>
-    void Apart(Group target)
+    bool Relate(Group target, List<string> notPeople)
     {
         var changed = false;
         foreach (var id in took)
             if (id != target.Id && groups.TryGetValue(id, out var other))
                 changed |= target.Apart.Add(id) | other.Apart.Add(target.Id);
-        if (changed) WriteApart();
+        foreach (var id in notPeople) changed |= target.NotPeople.Add(id);
+        return changed;
+    }
+
+    /// <summary>
+    /// A group is known not to be a person from now on, and so does not suggest them; its record is written when its
+    /// suggestion is cleared, and the caller writes the index.
+    /// </summary>
+    void NotPerson(Group group, string personId)
+    {
+        group.NotPeople.Add(personId);
+        if (group.Suggested != personId) return;
+        group.Suggested = null;
+        WriteRecord(group);
     }
 
     /// <summary>At most <see cref="MostSamples"/> of the samples: the largest faces first, those unlike the ones chosen before the rest.</summary>
@@ -1212,16 +1324,14 @@ public sealed class FaceGroups
         return eyes > smallest.Eyes ? (true, smallest) : (false, null);
     }
 
-    /// <summary>Removes groups: from the index first, then their records and samples.</summary>
+    /// <summary>Removes groups: from the index first, with every other group's relation to them, then their records and samples.</summary>
     void Drop(List<Group> dropped)
     {
         if (dropped.Count == 0) return;
         foreach (var group in dropped) groups.Remove(group.Id);
         var gone = dropped.Select(group => group.Id).ToHashSet(StringComparer.Ordinal);
-        ChangeIndex(index => index.RemoveAll(gone.Contains));
-        var apartChanged = dropped.Any(group => group.Apart.Count > 0);
         foreach (var group in groups.Values) group.Apart.RemoveWhere(gone.Contains);
-        if (apartChanged) WriteApart();
+        WriteIndex();
         foreach (var group in dropped) Forget(group.Id);
     }
 
@@ -1263,20 +1373,41 @@ public sealed class FaceGroups
     /// <summary>Reads the groups, and removes what an interruption left; see the remarks.</summary>
     void Load()
     {
-        List<string>? index;
+        List<JsonElement>? index;
         var rewrite = false;
-        try { index = data.Get<List<string>>(IndexKey); }
+        try { index = data.Get<List<JsonElement>>(IndexKey); }
         catch (InvalidDataException) { (index, rewrite) = (null, true); }
         catch (InvalidOperationException e) when (e is not ObjectDisposedException) { (index, rewrite) = (null, true); }
-        foreach (var id in index ?? [])
+        var entries = new List<(Group Group, IndexEntry Entry)>();
+        foreach (var item in index ?? [])
         {
-            if (!PeopleList.IsId(id) || groups.ContainsKey(id) || Read(id) is not { } group)
+            if (Entry(item) is not { } entry || !PeopleList.IsId(entry.Id) || groups.ContainsKey(entry.Id) || Read(entry.Id) is not { } group)
             {
                 rewrite = true;
                 continue;
             }
-            groups[id] = group;
+            groups[entry.Id] = group;
+            entries.Add((group, entry));
         }
+        // The relations, once every group kept is known: apart both ways, and only from a group kept.
+        foreach (var (group, entry) in entries)
+        {
+            foreach (var id in entry.Apart ?? [])
+            {
+                if (id != group.Id && groups.TryGetValue(id, out var other))
+                {
+                    group.Apart.Add(id);
+                    other.Apart.Add(group.Id);
+                }
+                else rewrite = true;
+            }
+            foreach (var id in entry.NotPeople ?? [])
+            {
+                if (PeopleList.IsId(id) && group.NotPeople.Count < PeopleList.MostPeople) group.NotPeople.Add(id);
+                else rewrite = true;
+            }
+        }
+        rewrite |= entries.Any(item => item.Group.Apart.Count != (item.Entry.Apart ?? []).Distinct(StringComparer.Ordinal).Count());
         foreach (var key in data.Keys("groups/"))
         {
             var parts = key.Split('/');
@@ -1286,31 +1417,26 @@ public sealed class FaceGroups
             try { data.Remove(key); }
             catch (Exception e) when (e is not ObjectDisposedException) { }
         }
-        if (rewrite) Try(() => data.Set(IndexKey, groups.Keys.Order(StringComparer.Ordinal).ToList()));
-        if (!LoadApart()) WriteApart();
+        if (rewrite) WriteIndex();
     }
 
     /// <summary>
-    /// Reads the pairs of groups apart into the groups, both ways, leaving out a pair that names a group not kept; false
-    /// when one was left out or they cannot be read, so that they are written again as they are now.
+    /// An entry of the index: an object with the group's id and its relations, or the id alone, as the index was written
+    /// before it held them; null for anything else.
     /// </summary>
-    bool LoadApart()
+    static IndexEntry? Entry(JsonElement item)
     {
-        List<List<string>?>? pairs;
-        try { pairs = data.Get<List<List<string>?>>(ApartKey); }
-        catch (InvalidDataException) { return false; }
-        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return false; }
-        var whole = true;
-        foreach (var pair in pairs ?? [])
+        static List<string> Ids(JsonElement entry, string name) =>
+            entry.TryGetProperty(name, out var list) && list.ValueKind == JsonValueKind.Array
+                ? [.. list.EnumerateArray().Where(id => id.ValueKind == JsonValueKind.String).Select(id => id.GetString()!)]
+                : [];
+        return item.ValueKind switch
         {
-            if (pair is [{ } a, { } b] && a != b && groups.TryGetValue(a, out var first) && groups.TryGetValue(b, out var second))
-            {
-                first.Apart.Add(b);
-                second.Apart.Add(a);
-            }
-            else whole = false;
-        }
-        return whole;
+            JsonValueKind.String => new IndexEntry(item.GetString()!, [], []),
+            JsonValueKind.Object when item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String =>
+                new IndexEntry(id.GetString()!, Ids(item, "apart"), Ids(item, "notPeople")),
+            _ => null,
+        };
     }
 
     /// <summary>A group as its record and samples have it; null when its record cannot be read or no sample of it can.</summary>
@@ -1374,22 +1500,14 @@ public sealed class FaceGroups
         catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
     }
 
-    /// <summary>Writes the pairs of groups apart as memory has them: each pair once, the smaller id first, in order.</summary>
-    void WriteApart()
+    /// <summary>Writes the index as memory has it: each group's entry with its relations, by id, each list in order.</summary>
+    void WriteIndex()
     {
-        var pairs = groups.Values
-            .SelectMany(group => group.Apart.Where(id => string.CompareOrdinal(group.Id, id) < 0).Select(id => new[] { group.Id, id }))
-            .OrderBy(pair => pair[0], StringComparer.Ordinal).ThenBy(pair => pair[1], StringComparer.Ordinal)
+        var index = groups.Values.OrderBy(group => group.Id, StringComparer.Ordinal)
+            .Select(group => new IndexEntry(group.Id, [.. group.Apart.Order(StringComparer.Ordinal)], [.. group.NotPeople.Order(StringComparer.Ordinal)]))
             .ToList();
-        Try(() => data.Set(ApartKey, pairs));
+        Try(() => data.Set(IndexKey, index));
     }
-
-    void ChangeIndex(Action<List<string>> change) => Try(() => data.Update<List<string>>(IndexKey, index =>
-    {
-        index ??= [];
-        change(index);
-        return index;
-    }));
 
     void WriteSample(string groupId, GroupSample sample, byte[] crop) => Try(() =>
     {
@@ -1452,6 +1570,8 @@ public sealed class FaceGroups
         public List<GroupSample> Samples { get; set; } = [];
         /// <summary>The ids of the groups this one is apart from: each took a face of a check this one took a face of.</summary>
         public HashSet<string> Apart { get; } = new(StringComparer.Ordinal);
+        /// <summary>The ids of the people this one is known not to be.</summary>
+        public HashSet<string> NotPeople { get; } = new(StringComparer.Ordinal);
         /// <summary>The last seen its record was last written with; null when it never was.</summary>
         public DateTimeOffset? Written { get; set; }
 
@@ -1460,6 +1580,9 @@ public sealed class FaceGroups
 
     /// <summary>A sample of a group: its face, how large it was, and when it was seen; the crop is in the store only.</summary>
     sealed record GroupSample(string Id, FaceEmbedding Embedding, double Eyes, DateTimeOffset At);
+
+    /// <summary>A group's entry in the index: its id, the groups it is apart from, and the people it is known not to be.</summary>
+    internal sealed record IndexEntry(string Id, List<string>? Apart, List<string>? NotPeople);
 
     /// <summary>A group as <c>groups/&lt;id&gt;</c> keeps it: without its embeddings and crops.</summary>
     internal sealed record StoredGroup(DateTimeOffset First, DateTimeOffset Last, int Sightings, string? Suggested, List<StoredGroupSample>? Samples);

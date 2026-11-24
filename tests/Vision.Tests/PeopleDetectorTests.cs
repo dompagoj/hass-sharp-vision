@@ -89,7 +89,8 @@ static class PeopleDetectorTests
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
                 (nameof(ARemovedLearnedSampleIsNotLearnedAgainAtOnce), ARemovedLearnedSampleIsNotLearnedAgainAtOnce),
                 (nameof(APersonIsGivenToOneFaceOfACheck), APersonIsGivenToOneFaceOfACheck),
-                (nameof(TwoFacesOfOneFrameStayTwoCards), TwoFacesOfOneFrameStayTwoCards),
+                (nameof(TwoLookAlikesOfOneFrameAreNamedEachOnTheirOwnCard), TwoLookAlikesOfOneFrameAreNamedEachOnTheirOwnCard),
+                (nameof(AFaceAlikeToAPersonNeverSeenWithThemIsThatPerson), AFaceAlikeToAPersonNeverSeenWithThemIsThatPerson),
                 (nameof(GroupsOlderThanTheKeepTimeAreGoneAfterACheck), GroupsOlderThanTheKeepTimeAreGoneAfterACheck),
                 (nameof(ARecogniserThatThrowsFailsThatFaceOnly), ARecogniserThatThrowsFailsThatFaceOnly),
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
@@ -1022,7 +1023,7 @@ static class PeopleDetectorTests
     }
 
     // Two faces of one check recognised as one person: the name goes to the better match alone, which alone is learned
-    // from; the other is drawn with its score and grouped nowhere.
+    // from; the other is drawn with its score, and goes to the unknown faces, on a card that does not suggest her.
     static async Task APersonIsGivenToOneFaceOfACheck()
     {
         var spots = await Spots();
@@ -1048,14 +1049,18 @@ static class PeopleDetectorTests
         Check(labels.Count(label => label == Ana) == 1, "one face is named Ana, the others show their scores: " + string.Join(", ", labels));
         Check(LearnedOf(Reread(list, Ana)).Length == 1, "the other face is never learned from");
         var unknown = Member(rig.Detector(), "Unknown");
-        var grouped = Shown(rig).SelectMany(group => VisionTests.Items((object)unknown.Samples((string)group.Id))).Select(sample => (float[])((dynamic)sample).Embedding.Values).ToArray();
-        Check(Shown(rig).Length == 2 && !grouped.Any(values => PeopleTests.Cosine(values, larger) > 0.999), "the face not given the name is in no group, and the two strangers are: " + Shown(rig).Length);
+        bool Holds(dynamic group, float[] face) => VisionTests.Items((object)unknown.Samples((string)group.Id)).Any(sample => PeopleTests.Cosine((float[])((dynamic)sample).Embedding.Values, face) > 0.999);
+        var groups = Shown(rig);
+        Check(groups.Length == 3 && groups.Count(group => Holds(group, larger)) == 1, "the face not given the name is a group, as the two strangers are: " + groups.Length);
+        Check(groups.All(group => group.SuggestedPersonId == null), "and no group suggests Ana");
         NoNameIsLogged(rig);
-        Console.WriteLine("PASS people detector: a person is given to one face of a check, the best match, which alone is learned from; the other is drawn with its score and grouped nowhere");
+        Console.WriteLine("PASS people detector: a person is given to one face of a check, the best match, which alone is learned from; the other is drawn with its score and goes to the unknown faces without suggesting them");
     }
 
-    // As seen live on group.jpg: two faces of one frame, 0.55 alike, became one group, so one card named two people.
-    static async Task TwoFacesOfOneFrameStayTwoCards()
+    // As seen live on group.jpg: two men of one frame, 0.55 alike, became one card; on two cards, the one left after the
+    // other was named was taken for him and removed. Named each on their own card, each is recognised by their own name,
+    // together and alone. The two other faces embedded fit too badly to be compared, so the frame has these two people.
+    static async Task TwoLookAlikesOfOneFrameAreNamedEachOnTheirOwnCard()
     {
         var spots = await Spots();
         int[] chosen = [.. Enumerable.Range(0, spots.Length).Where(i => spots[i].Usable).Take(4)];
@@ -1067,27 +1072,86 @@ static class PeopleDetectorTests
         var b = PeopleTests.At(a, 0.55, 42);
         fake.Embeds(first, a);
         fake.Embeds(last, b);
+        fake.Embeds(chosen[1], PeopleTests.Unit(43), fit: 9);
+        fake.Embeds(chosen[2], PeopleTests.Unit(44), fit: 9);
         Show();
-        await using var rig = await Rig.Start("two-cards");
+        await using var rig = await Rig.Start("look-alikes");
         await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
-        await Until(() => fake.Embedded("Porch").Length >= 20 * 4, "twenty checks", 10);
-        await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "four faces, four cards: " + Shown(rig).Length, 2);
+        async Task Checks(int count, string what)
+        {
+            var from = fake.Embedded("Porch").Length;
+            await Until(() => fake.Embedded("Porch").Length >= from + count * 4, what, 10);
+        }
+        await Checks(20, "twenty checks");
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 2, "two faces, two cards: " + Shown(rig).Length, 2);
         var unknown = Member(rig.Detector(), "Unknown");
         bool Holds(dynamic group, float[] face) => VisionTests.Items((object)unknown.Samples((string)group.Id)).Any(sample => PeopleTests.Cosine((float[])((dynamic)sample).Embedding.Values, face) > 0.999);
-        var groups = Shown(rig);
-        var ofA = groups.Single(group => Holds(group, a));
-        Check(!Holds(ofA, b) && groups.Count(group => Holds(group, b)) == 1, "the two faces are on two cards");
+        string aId = Shown(rig).Single(group => Holds(group, a)).Id;
+        string bId = Shown(rig).Single(group => Holds(group, b)).Id;
+        Check(aId != bId, "the two faces are on two cards");
+        int Sightings() => (int)unknown.Find(bId).Sightings;
+        string[] Names() => [.. rig.Labels().Where(label => !IsScore(label))];
 
-        Check(await Press(rig, "unknown", (string)ofA.Id, "save", new { name = Ana }) == "done", "Save of one card as Ana");
+        // A saved as Ivan while B is alone in view, so that nothing but B could have Ivan seen.
+        fake.Embeds(first, a, fit: 9);
+        await Checks(2, "two checks with B alone");
+        Check(await Press(rig, "unknown", aId, "save", new { name = Ivan }) == "done", "Save of A's card as Ivan");
         var list = PeopleOf(rig);
-        var ana = Reread(list, Ana);
-        Check(((object[])PeopleTests.Items(ana.Samples)).Length == 1, "Ana has the one face of her card");
+        var seen = Sightings();
+        await Checks(5, "five checks with B alone");
+        var card = CardOf(Page(rig), "unknown", bId);
+        Check(CardsOf(Page(rig), "unknown").Length == 1 && card != null && Detail(card) == null, "B's card stays, and does not suggest Ivan: " + Page(rig)?.ToJsonString());
+        Check(Names().Length == 0 && Reread(list, Ivan).LastSeen == null, "B alone is not named Ivan, and Ivan is not seen: " + string.Join(", ", Names()));
+        Check(Sightings() > seen, "B's card counts his checks");
+
+        // Both in view: A is Ivan, and B's card keeps counting.
+        fake.Embeds(first, a);
+        seen = Sightings();
+        await Checks(5, "five checks with both");
+        Check(Names().SequenceEqual([Ivan]), "A is named Ivan, and B is not: " + string.Join(", ", Names()));
+        Check(Reread(list, Ivan).LastSeen != null && Sightings() > seen && CardsOf(Page(rig), "unknown").Length == 1, "Ivan is seen, and B's card counts");
+
+        // B alone again, after Ivan was seen with him.
+        fake.Embeds(first, a, fit: 9);
+        seen = Sightings();
+        await Checks(5, "five checks with B alone");
+        Check(Names().Length == 0 && Sightings() > seen, "B alone is still not Ivan, and his card counts: " + string.Join(", ", Names()));
+
+        // B saved as Ivo: each is recognised by his own name, together and alone, and no card is left.
+        Check(await Press(rig, "unknown", bId, "save", new { name = Ivo }) == "done", "Save of B's card as Ivo");
+        fake.Embeds(first, a);
+        await Checks(5, "five checks with both");
+        Check(Names().Order().SequenceEqual(new[] { Ivan, Ivo }.Order()), "together, each by his name: " + string.Join(", ", Names()));
+        fake.Embeds(first, a, fit: 9);
+        await Checks(3, "three checks with Ivo alone");
+        Check(Names().SequenceEqual([Ivo]), "Ivo alone: " + string.Join(", ", Names()));
+        fake.Embeds(first, a);
+        fake.Embeds(last, b, fit: 9);
+        await Checks(3, "three checks with Ivan alone");
+        Check(Names().SequenceEqual([Ivan]), "Ivan alone: " + string.Join(", ", Names()));
+        Check(CardsOf(Page(rig), "unknown").Length == 0, "no card is left: " + Shown(rig).Length);
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: two look-alikes of one frame are two cards; named one by one, the other's card stays, is not taken for him and counts, and both are then recognised by their own names, together and alone");
+    }
+
+    // Without a frame that has them both, a face as alike to a person is that person.
+    static async Task AFaceAlikeToAPersonNeverSeenWithThemIsThatPerson()
+    {
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("alike");
+        var list = PeopleOf(rig);
+        Named(list, Ivan, 2);
+        var face = PeopleTests.At(PeopleTests.Unit(2), 0.55, 51);
+        fake.Embeds(0, face);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => rig.Labels().Contains(Ivan), "the face 0.55 alike to Ivan is named Ivan: " + string.Join(", ", rig.Labels()), 10);
+        await Until(() => Reread(list, Ivan).LastSeen != null, "Ivan is seen", 10);
         var from = fake.Embedded("Porch").Length;
         await Until(() => fake.Embedded("Porch").Length >= from + 5 * 4, "five checks more", 10);
-        var labels = rig.Labels();
-        Check(labels.Count(label => label == Ana) == 1, "naming one card names one face: " + string.Join(", ", labels));
+        Check(rig.Labels().Count(label => label == Ivan) == 1, "still named Ivan: " + string.Join(", ", rig.Labels()));
         NoNameIsLogged(rig);
-        Console.WriteLine("PASS people detector: two faces of one frame, alike over the match score, stay two cards over many checks, and naming one names one face");
+        Console.WriteLine("PASS people detector: a face 0.55 alike to a person, never seen in a frame with them, is recognised as them");
     }
 
     // As seen live: a learned sample removed on the page, while the same face stays in view, was learned again at the
@@ -1136,7 +1200,7 @@ static class PeopleDetectorTests
         var now = DateTimeOffset.UtcNow;
         foreach (var (seed, ago) in new[] { (301, TimeSpan.FromDays(10)), (302, TimeSpan.FromDays(1)) })
             for (var i = 0; i < 3; i++)
-                seen.Invoke(groups, new object?[] { (object)PeopleTests.Embedding(PeopleTests.Unit(seed)), (Func<byte[]>)(() => PeopleTests.Crop(seed)), 30.0, now - ago + TimeSpan.FromMinutes(i), null });
+                seen.Invoke(groups, new object?[] { (object)PeopleTests.Embedding(PeopleTests.Unit(seed)), (Func<byte[]>)(() => PeopleTests.Crop(seed)), 30.0, now - ago + TimeSpan.FromMinutes(i), null, null });
         var shown = VisionTests.Items(groups.GetType().GetProperty("Shown")!.GetValue(groups)!).Select(group => (dynamic)group).ToArray();
         Check(shown.Length == 2, "two groups are shown");
         var kept = shown.Single(group => group.Last > now - TimeSpan.FromDays(2));
@@ -1596,16 +1660,35 @@ static class PeopleDetectorTests
         // Four faces are embedded, and the largest and the smallest of them are 0.52 to 0.56 alike as SFace has them: they
         // are two people still, on two cards.
         await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "the four faces embedded are four cards: " + CardsOf(Page(rig), "unknown").Length, 10);
+        var unknown = Member(rig.Detector(), "Unknown");
+        float[][] Faces(string id) => [.. VisionTests.Items((object)unknown.Samples(id)).Select(sample => (float[])((dynamic)sample).Embedding.Values)];
+        var ids = CardsOf(Page(rig), "unknown").Select(card => (string)card["id"]!).ToArray();
+        var alike = (from one in ids
+                     from other in ids
+                     where string.CompareOrdinal(one, other) < 0
+                     select (One: one, Other: other, Score: Faces(one).Max(x => Faces(other).Max(y => PeopleTests.Cosine(x, y))))).MaxBy(pair => pair.Score);
+        Check(alike.Score >= (double)PeopleTests.DefaultRules.MatchScore, string.Create(CultureInfo.InvariantCulture, $"two of the cards are Match score alike, the look-alikes: {alike.Score:0.000}"));
 
-        var group = CardsOf(Page(rig), "unknown")[0];
-        Check(await Press(rig, "unknown", (string)group["id"]!, "save", new { name = Ana }) == "done", "Save of a name for the unknown face");
+        // One of the look-alikes named: the other's card stays and counts, and he is not taken for her.
+        Check(await Press(rig, "unknown", alike.One, "save", new { name = Ana }) == "done", "Save of a name for one look-alike");
         await Until(() => rig.Labels().Contains(Ana), "the camera names the face: " + string.Join(", ", rig.Labels()), 10);
-        await Task.Delay(500);
+        var seen = (int)unknown.Find(alike.Other).Sightings;
+        await Task.Delay(1500);
         Check(rig.Labels().Count(label => label == Ana) == 1, "one face is named: " + string.Join(", ", rig.Labels()));
+        var card = CardOf(Page(rig), "unknown", alike.Other);
+        Check(CardsOf(Page(rig), "unknown").Length == 3 && card != null && Detail(card) == null, "the other look-alike's card stays, and does not suggest her: " + Page(rig)?.ToJsonString());
+        Check((int)unknown.Find(alike.Other).Sightings > seen, "and counts his checks");
         var list = PeopleOf(rig);
         await Until(() => Reread(list, Ana).LastSeen != null, "Ana is seen", 10);
         Check(Reread(list, Ana).LastSeenAt == "camera.porch", "at camera.porch");
+
+        // The other named too: each is recognised by their own name.
+        Check(await Press(rig, "unknown", alike.Other, "save", new { name = Ivan }) == "done", "Save of a name for the other look-alike");
+        await Until(() => rig.Labels().Contains(Ivan) && rig.Labels().Contains(Ana), "the camera names both: " + string.Join(", ", rig.Labels()), 10);
+        await Task.Delay(1000);
+        Check(rig.Labels().Count(label => label == Ana) == 1 && rig.Labels().Count(label => label == Ivan) == 1, "each once: " + string.Join(", ", rig.Labels()));
+        Check(CardsOf(Page(rig), "unknown").Length == 2, "the two strangers' cards are left");
         NoNameIsLogged(rig);
-        Console.WriteLine("PASS people detector: the class's own node detects, groups an unknown face with the real model, and recognises it once it is named");
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"PASS people detector: the class's own node detects, groups unknown faces with the real model, and recognises two look-alikes {alike.Score:0.00} alike by their own names once each is named"));
     }
 }

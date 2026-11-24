@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text;
+using System.Text.Json.Nodes;
 using HassSharp;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -257,6 +258,9 @@ static class PeopleTests
             (nameof(TwoFacesOfOneCheckAreTwoGroups), Sync(TwoFacesOfOneCheckAreTwoGroups)),
             (nameof(GroupsOfOneCheckAreNeverJoined), Sync(GroupsOfOneCheckAreNeverJoined)),
             (nameof(ARemovedGroupLeavesNoneApart), Sync(ARemovedGroupLeavesNoneApart)),
+            (nameof(AGroupApartFromANamedOneIsNotThatPerson), Sync(AGroupApartFromANamedOneIsNotThatPerson)),
+            (nameof(AGroupOfACheckThatRecognisedAPersonIsNotThatPerson), Sync(AGroupOfACheckThatRecognisedAPersonIsNotThatPerson)),
+            (nameof(AFaceKnownNotToBeAPersonBelongsToTheGroupMoreAlike), Sync(AFaceKnownNotToBeAPersonBelongsToTheGroupMoreAlike)),
             (nameof(GroupsExpire), Sync(GroupsExpire)),
             (nameof(The51stGroupDropsTheOneSeenLongestAgo), Sync(The51stGroupDropsTheOneSeenLongestAgo)),
             (nameof(AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces), Sync(AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces)),
@@ -920,14 +924,15 @@ static class PeopleTests
         /// A face the people list does not know, seen in the check at <paramref name="now"/>; its crop is made from
         /// <paramref name="seed"/>, and each time it is asked for counts in <paramref name="crops"/>.
         /// </summary>
-        public void See(float[] face, DateTimeOffset now, double eyes = 20, string? suggested = null, int seed = 0, int[]? crops = null)
+        public void See(float[] face, DateTimeOffset now, double eyes = 20, string? suggested = null, int seed = 0, int[]? crops = null, string[]? notPeople = null)
         {
             Func<byte[]> crop = () =>
             {
                 if (crops != null) crops[0]++;
                 return PeopleTests.Crop(seed);
             };
-            groups.Seen(Embedding(face), crop, eyes, now, suggested);
+            if (notPeople == null) groups.Seen(Embedding(face), crop, eyes, now, suggested);
+            else groups.Seen(Embedding(face), crop, eyes, now, suggested, (IReadOnlyCollection<string>)notPeople);
         }
 
         /// <summary>Every group, shown or not, as the internal <c>All</c> gives them.</summary>
@@ -949,7 +954,23 @@ static class PeopleTests
         public void Remove(string id) => groups.Remove(id);
         public void Expire(DateTimeOffset now, TimeSpan keep) => groups.Expire(now, keep);
         public void Rematch(object people) => groups.Rematch((dynamic)people, DefaultRules);
+        public void Named(string id, string personId) => groups.Named(id, personId);
+        public void Merged(string fromId, string intoId) => groups.Merged(fromId, intoId);
+        public bool KnownNotToBe(float[] face, object match) => groups.KnownNotToBe(Embedding(face), (dynamic)match);
     }
+
+    /// <summary>The groups' index as the store has it; empty when there is none.</summary>
+    static JsonArray Index(SharpData data) => data.Keys("groups").Contains("groups") ? data.Get<JsonArray>("groups") ?? [] : [];
+
+    /// <summary>The ids the index lists, in its order.</summary>
+    static string[] IndexIds(SharpData data) => [.. Index(data).Select(entry => entry is JsonObject o ? (string)o["id"]! : (string)entry!)];
+
+    /// <summary>The ids of one list of a group's entry in the index, in order; none for an entry without it.</summary>
+    static string[] Listed(SharpData data, string id, string list) =>
+        Index(data).OfType<JsonObject>().SingleOrDefault(entry => (string)entry["id"]! == id)?[list] is JsonArray ids ? [.. ids.Select(item => (string)item!)] : [];
+
+    /// <summary>The people a group is known not to be, as its entry in the store's index has them.</summary>
+    static string NotPeopleOf(SharpData data, string id) => string.Join(",", Listed(data, id, "notPeople"));
 
     static bool Holds(dynamic[] samples, float[] face) => samples.Any(sample => ((float[])sample.Embedding.Values).SequenceEqual(face));
 
@@ -1050,8 +1071,9 @@ static class PeopleTests
     /// <summary>A face Match score alike to both of two strangers, <paramref name="a"/> and <paramref name="c"/>, and more alike to <paramref name="a"/>.</summary>
     static float[] Between(float[] a, float[] c) => Normalised(a.Zip(c).Select(pair => 1.2 * pair.First + pair.Second).ToArray());
 
-    /// <summary>The relation of groups apart, as the store has it; empty when it has none.</summary>
-    static string Apart(SharpData data) => data.Keys("apart").Count == 0 ? "" : System.Text.Json.JsonSerializer.Serialize(data.Get<System.Text.Json.JsonElement>("apart"));
+    /// <summary>The relation of groups apart, as the store's index has it: each group apart from some, with them; empty when none is.</summary>
+    static string Apart(SharpData data) => string.Join(" ", IndexIds(data)
+        .Select(id => (Id: id, Apart: Listed(data, id, "apart"))).Where(item => item.Apart.Length > 0).Select(item => item.Id + ">" + string.Join(",", item.Apart)));
 
     static void GroupsOfOneCheckAreNeverJoined()
     {
@@ -1116,18 +1138,129 @@ static class PeopleTests
         groups.See(Unit(7065), T0.AddMinutes(2).AddSeconds(1), seed: 7065);
         Check(groups.All.Length == 3 && Apart(data).Length > 0, "two strangers of one check are apart: " + Apart(data));
         groups.Expire(T0.AddHours(2), TimeSpan.FromHours(1));
-        Check(groups.All.Length == 0 && Apart(data) is "" or "[]", "expired, they leave nothing apart: " + Apart(data));
+        Check(groups.All.Length == 0 && Apart(data) == "", "expired, they leave nothing apart: " + Apart(data));
 
-        // A store with groups and no relation, as 1.1.0's development builds wrote it, has none apart.
+        // An index of the ids alone, as the index was written before it held the relations, has none apart.
         groups.See(a, T0.AddHours(3), seed: 7066);
         groups.See(c, T0.AddHours(3), seed: 7067);
         Check(groups.All.Length == 2 && Apart(data).Length > 2, "a's and c's groups are apart");
-        data.Remove("apart");
+        data.Set("groups", IndexIds(data));
         var old = Groups(home.RestartedDevice());
-        Check(old.All.Length == 2, "the groups load without the relation");
+        Check(old.All.Length == 2, "the groups load from an index of their ids alone");
         old.See(Between(a, c), T0.AddHours(3).AddSeconds(1), seed: 7068);
         Check(old.All.Length == 1, "and none is apart: a face alike to both joins them: " + string.Join(", ", old.All));
-        Console.WriteLine("PASS people: a group removed or expired leaves no other apart from it, and a store without the relation has none apart");
+        Console.WriteLine("PASS people: a group removed or expired leaves no other apart from it, and an index of the ids alone has none apart");
+    }
+
+    // The live case, on group.jpg: two men 0.55 alike are two groups of one check; one is named, and the other is not
+    // taken for him.
+    static void AGroupApartFromANamedOneIsNotThatPerson()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var a = Unit(8500);
+        var b = At(a, 0.55, 8501);
+        var d = Unit(8502);
+        for (var i = 0; i < 3; i++)
+        {
+            groups.See(a, T0.AddSeconds(i), eyes: 32, seed: 8500);
+            groups.See(b, T0.AddSeconds(i), eyes: 18, seed: 8501);
+        }
+        // Another look of the same man, seen alone: never in a check with a's group.
+        groups.See(d, T0.AddMinutes(1), seed: 8502);
+        string aId = groups.All.Single(group => Holds(groups.Samples((string)group.Id), a)).Id;
+        string bId = groups.All.Single(group => Holds(groups.Samples((string)group.Id), b)).Id;
+        string dId = groups.All.Single(group => Holds(groups.Samples((string)group.Id), d)).Id;
+
+        groups.Named(aId, "ivan");
+        Check(groups.Find(aId) == null && data.Keys($"groups/{aId}").Count == 0, "the named group goes, keys and all");
+        Check(NotPeopleOf(data, bId) == "ivan" && NotPeopleOf(data, dId) == "", "the group apart from it is known not to be Ivan, in the store at once; the other is not: " + Index(data).ToJsonString());
+        var ivan = Person("ivan", a, At(d, 0.9, 8503));
+        Check(Match(b, People(ivan)).Kind.ToString() == "Recognised", "b is recognised as Ivan by the matcher alone");
+        groups.Rematch((object)People(ivan));
+        Check(groups.Find(bId) != null && groups.Find(bId).SuggestedPersonId == null, "matching again keeps b's group, and suggests no one: " + string.Join(", ", groups.All));
+        Check(groups.Find(dId) == null, "a group never apart from Ivan's and now recognised as him is removed as before");
+        Check(Groups(home.RestartedDevice()).Find(bId) != null && NotPeopleOf(home.RestartedDevice(), bId) == "ivan", "the next revision has it, known not to be Ivan");
+
+        // Known not to be Ivan is not known to be no one: a match with another person removes it.
+        groups.Rematch((object)People(ivan, Person("marko", At(b, 0.9, 8504))));
+        Check(groups.Find(bId) == null, "the group recognised as Marko is removed");
+        Console.WriteLine("PASS people: a group apart from one named as a person is known not to be them: matching again neither removes it for them nor suggests them, and a match with another person removes it");
+    }
+
+    static void AGroupOfACheckThatRecognisedAPersonIsNotThatPerson()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var a = Unit(8510);
+        var b = At(a, 0.55, 8511);
+        // Seen in a check in which Ivan was recognised on another face, and suggested as Ivan: it is not Ivan.
+        groups.See(b, T0, suggested: "ivan", seed: 8511, notPeople: ["ivan"]);
+        string bId = groups.All.Single().Id;
+        Check(groups.Find(bId).SuggestedPersonId == null && NotPeopleOf(data, bId) == "ivan", "the group is known not to be Ivan, and does not suggest him: " + Index(data).ToJsonString());
+        groups.See(At(b, 0.95, 8512), T0.AddSeconds(1), suggested: "ivan", seed: 8512);
+        Check(groups.All.Single().Sightings == 2 && groups.Find(bId).SuggestedPersonId == null, "a later sighting suggesting Ivan does not either");
+        // Joined with a group that suggests Ivan, it still does not, and the joined group is not Ivan.
+        var c = Unit(8513);
+        groups.See(c, T0.AddSeconds(2), suggested: "ivan", seed: 8513);
+        string cId = groups.All.Single(group => group.Id != bId).Id;
+        Check(groups.Find(cId).SuggestedPersonId == "ivan", "a group seen without the evidence suggests Ivan");
+        groups.See(Normalised(b.Zip(c).Select(pair => (double)pair.First + pair.Second).ToArray()), T0.AddSeconds(3), seed: 8514);
+        Check(groups.All.Single().Id == bId && groups.Find(bId).SuggestedPersonId == null && NotPeopleOf(data, bId) == "ivan", "joined, they are one group known not to be Ivan, suggesting no one: " + string.Join(", ", groups.All));
+
+        // A maybe for Ivan is not suggested by matching again either.
+        groups.Rematch((object)People(Person("ivan", At(b, 0.45, 8515))));
+        Check(groups.Find(bId).SuggestedPersonId == null, "matching again suggests no one");
+
+        // Ivan deleted: his id goes from the group at the next matching.
+        groups.Rematch((object)People(Person("mia", Unit(8516))));
+        Check(NotPeopleOf(data, bId) == "", "a person no longer in the list leaves the group: " + Index(data).ToJsonString());
+        groups.Rematch((object)People(Person("ivan", At(b, 0.9, 8517))));
+        Check(groups.Find(bId) == null, "and a person of that id, named again, removes it as anyone would");
+
+        // Ana merged into Ivo on this detector: a group known not to be Ana is known not to be Ivo.
+        groups.See(b, T0.AddMinutes(1), seed: 8518, notPeople: ["ana"]);
+        string eId = groups.All.Single().Id;
+        groups.Merged("ana", "ivo");
+        Check(NotPeopleOf(data, eId) == "ivo", "known not to be Ivo: " + Index(data).ToJsonString());
+        groups.Rematch((object)People(Person("ivo", a)));
+        Check(groups.Find(eId) != null && NotPeopleOf(data, eId) == "ivo", "matching against Ivo, with Ana's samples, keeps it");
+        Console.WriteLine("PASS people: a group that took a face of a check that recognised a person is known not to be them; a person deleted leaves the groups, and one merged on this detector passes it on");
+    }
+
+    static void AFaceKnownNotToBeAPersonBelongsToTheGroupMoreAlike()
+    {
+        using var home = new Home();
+        var groups = Groups(home.Device());
+        var a = Unit(8520);
+        var b = At(a, 0.55, 8521);
+        var ivan = People(Person("ivan", a));
+        groups.See(b, T0, seed: 8521, notPeople: ["ivan"]);
+        dynamic Matched(float[] face) => Match(face, ivan);
+        Check(Matched(b).Kind.ToString() == "Recognised" && groups.KnownNotToBe(b, Matched(b)), "b, given to Ivan at 0.55, belongs to its group, which is 1.0 alike and known not to be Ivan");
+        // The first of the made-up faces that is as the case needs.
+        static float[] Found(Func<int, float[]> make, Func<float[], bool> fits) =>
+            Enumerable.Range(8530, 200).Select(make).FirstOrDefault(fits) ?? throw new Exception("no seed makes such a face");
+        var near = Found(seed => At(b, 0.8, seed), face => Cosine(face, a) is > 0.41 and < 0.49);
+        Check(Matched(near).Kind.ToString() == "Maybe" && groups.KnownNotToBe(near, Matched(near)), $"a maybe for Ivan belongs to the group too: {Cosine(near, a)} to Ivan, {Cosine(near, b)} to the group");
+
+        // Match score alike to the group, but more alike to Ivan: his.
+        var f = Found(seed => Normalised(a.Zip(b, (x, y) => x + 0.6 * y).Zip(Unit(seed), (x, n) => x + 1.4 * n).ToArray()),
+            face => Cosine(face, b) is > 0.52 and < 0.6 && Cosine(face, a) > Cosine(face, b) + 0.05);
+        Check(Matched(f).Kind.ToString() == "Recognised", $"f is {Cosine(f, a)} to Ivan, {Cosine(f, b)} to the group");
+        Check(!groups.KnownNotToBe(f, Matched(f)), "a face less alike to the group than to Ivan is his");
+        var g = At(a, 0.6, 8524);
+        Check(Cosine(g, b) < 0.5 && !groups.KnownNotToBe(g, Matched(g)), $"so is one under the match score from the group: {Cosine(g, b)}");
+        Check(!groups.KnownNotToBe(b, Match(b, People())), "a face given to no one belongs to no group by this");
+
+        // Without the evidence, a face as alike to its group is Ivan's.
+        using var other = new Home();
+        var plain = Groups(other.Device());
+        plain.See(b, T0, seed: 8521);
+        Check(!plain.KnownNotToBe(b, Matched(b)), "a group not known not to be Ivan takes nothing from him");
+        Console.WriteLine("PASS people: a face given to a person belongs instead to a group known not to be them when it is Match score alike to it and more alike to it than to them");
     }
 
     static void GroupsExpire()
@@ -1323,7 +1456,11 @@ static class PeopleTests
         data.SetBytes($"groups/{id}/stray0000001/embedding", new byte[512]);
         data.SetBytes($"groups/{id}/stray0000001/crop", Crop(7702));
         // An index that lists a group whose record is gone.
-        data.Update<List<string>>("groups", index => [.. index!, "norecord0001"]);
+        data.Update<JsonArray>("groups", index =>
+        {
+            index!.Add("norecord0001");
+            return index;
+        });
         data.SetBytes("groups/norecord0001/sample000002/crop", Crop(7703));
 
         var next = Groups(home.RestartedDevice());
@@ -1331,7 +1468,7 @@ static class PeopleTests
         Check(stored.Keys("groups/orphan000001").Count == 0 && stored.Keys("groups/norecord0001").Count == 0 && stored.Keys($"groups/{id}/stray0000001/").Count == 0,
             "nothing of them is left: " + string.Join(", ", stored.Keys()));
         Check(next.All.Single().Id == id && next.Samples(id).Length == 1 && stored.Keys($"groups/{id}/").Count == 2, "the group is kept with its sample");
-        Check(stored.Get<List<string>>("groups")!.SequenceEqual([id]), "the index lists it alone");
+        Check(IndexIds(stored).SequenceEqual([id]), "the index lists it alone: " + string.Join(", ", IndexIds(stored)));
 
         // An index that cannot be read: every group goes, as it is a detector's own cache of faces.
         stored.SetBytes("groups", [1, 2, 3]);
