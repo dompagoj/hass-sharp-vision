@@ -52,6 +52,8 @@ public class PeopleDetector : SharpDevice
     static readonly TimeSpan ExpireEvery = TimeSpan.FromMinutes(1), FailureLogEvery = TimeSpan.FromMinutes(1);
     // How often the page is drawn again while it lists anything, so that its times ("5 minutes ago") and counts stay true.
     static readonly TimeSpan RedrawEvery = TimeSpan.FromMinutes(1);
+    // How long after a Save is asked whether a face unlike its person is theirs a second Save of the card saves it.
+    static readonly TimeSpan SaveAgainWithin = TimeSpan.FromMinutes(2);
     // The most samples of a person: every named and every learned one.
     const int MostSamples = PeopleList.MostNamed + PeopleList.MostLearned;
     // The sentences of a press for what is gone, or cannot be done.
@@ -115,6 +117,12 @@ public class PeopleDetector : SharpDevice
     string drawnGroups = "";
     // Each draw's ticket, in the order they began: a draw hands its lists over only when no later one has.
     long ticketsBegun, drawnTicket;
+
+    // Guards asked: the Saves that were asked whether a face unlike its person is theirs (AskFirst), by the card's id. Taken
+    // inside lists or alone, and nothing is taken inside it. In memory only, and nothing of a face: it goes when the card
+    // goes (named, dismissed, or no longer drawn) and when the detector stops.
+    readonly Lock asking = new();
+    readonly Dictionary<string, Asked> asked = new(StringComparer.Ordinal);
 
     /// <summary>The device with its camera and its seven sensors, in this order: face seen, person seen, faces, people, last face seen, last person seen, recognised.</summary>
     public PeopleDetector()
@@ -261,6 +269,7 @@ public class PeopleDetector : SharpDevice
         // No check runs by now: Stop() runs after the last. One still being opened is closed as it opens.
         open?.Dispose();
         detector?.Dispose();
+        lock (asking) asked.Clear();
         Log("People detector stopped", PyLogLevel.Debug);
     }
 
@@ -738,6 +747,9 @@ public class PeopleDetector : SharpDevice
         var samples = chosen == null ? null : SampleCards(chosen, now, places);
         var unknownEmpty = Unknown.OfAnotherFormat ? "The unknown faces were saved by a newer hass-sharp-vision; update this one." : "No unknown faces.";
         var peopleEmpty = People.Problem ?? "Nobody is named yet.";
+        // A card no longer drawn takes its question with it.
+        lock (asking)
+            foreach (var cardId in asked.Keys.Where(cardId => shown.All(group => group.Id != cardId)).ToList()) asked.Remove(cardId);
         lock (page)
         {
             if (ticket < drawnTicket) return;
@@ -938,6 +950,7 @@ public class PeopleDetector : SharpDevice
     // Naming is a sighting of the person here, at the group's last: their last seen moves to it when it is later, at once,
     // so that the page does not say "not seen yet" of a face it has just seen. It is not a check's face, and Recognised is
     // not touched.
+    // A Save for a person the faces look unlike is asked about first (AskFirst), before anything is written.
     void SaveFace(string groupId, string? personId, UiValues? newPerson)
     {
         lock (lists)
@@ -945,14 +958,48 @@ public class PeopleDetector : SharpDevice
             if (Unknown.Find(groupId) is not { } group) throw new UiRefusal(FaceGone);
             var samples = Unknown.Samples(groupId);
             if (samples.Count == 0) throw new UiRefusal(NoPicture);
+            if (personId != null) AskFirst(groupId, personId, samples);
             var person = personId != null ? People.AddSamples(personId, samples, learned: false)
                 : newPerson != null ? People.Add(newPerson["first_name"], newPerson["last_name"], samples)
                 : throw new UiRefusal(NoPerson);
             People.Named(person.Id, group.Last, cameraId);
             Unknown.Named(groupId, person.Id);
+            Forget(groupId);
             // Other groups of the same face are now recognised, and go too.
             Rematch(People.People);
         }
+    }
+
+    // Under lists: a Save of a card for a person its faces look unlike (FaceMatcher.LooksUnlike), most likely the wrong
+    // person chosen, is refused with a question the first time, and nothing is written. The same Save again within
+    // SaveAgainWithin, for the same person and with the card's faces as they were, goes on; one for another person, later,
+    // or after a check changed the card's faces, is asked about afresh. What is kept of the question is the person's id,
+    // its time and the times of the card's faces: nothing of a face. A person who is no longer in the list is left to
+    // AddSamples to refuse, and one without samples cannot be compared. The handlers of a page run one at a time, and
+    // lists holds the judging and the saving together, so of two Saves of a card at once the first asks and the second
+    // saves.
+    void AskFirst(string groupId, string personId, IReadOnlyList<NewSample> samples)
+    {
+        if (People.People.FirstOrDefault(person => person.Id == personId) is not { } person) return;
+        if (!FaceMatcher.LooksUnlike(samples.Select(sample => sample.Embedding), person)) return;
+        var now = Now;
+        DateTimeOffset[] faces = [.. samples.Select(sample => sample.At)];
+        lock (asking)
+        {
+            if (asked.Remove(groupId, out var before) && before.PersonId == personId && now - before.At <= SaveAgainWithin && before.Faces.SequenceEqual(faces))
+                return;
+            asked[groupId] = new Asked(personId, now, faces);
+        }
+        throw new UiRefusal($"This face does not look like {person.FullName}'s samples. Press Save again to add it to {person.FullName} anyway.");
+    }
+
+    // A question AskFirst asked of a card: the person chosen, by id, when, and the times of the card's faces then.
+    sealed record Asked(string PersonId, DateTimeOffset At, DateTimeOffset[] Faces);
+
+    // A card that goes takes its question with it.
+    void Forget(string groupId)
+    {
+        lock (asking) asked.Remove(groupId);
     }
 
     void DismissFace(string groupId)
@@ -961,6 +1008,7 @@ public class PeopleDetector : SharpDevice
         {
             if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
             Unknown.Remove(groupId);
+            Forget(groupId);
         }
     }
 

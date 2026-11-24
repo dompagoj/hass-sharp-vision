@@ -105,6 +105,13 @@ public static class FaceMatcher
     /// </summary>
     public const double Alike = 0.9;
 
+    /// <summary>
+    /// The cosine under which faces look unlike a person (<see cref="LooksUnlike"/>): few pairs of faces of one person
+    /// score under it, and nearly every pair of different people does (<c>docs/calibration.md</c>, Defaults). It is the
+    /// line for a face named for the wrong person, and does not move with <see cref="RecognitionRules.MatchScore"/>.
+    /// </summary>
+    public const double Unlike = 0.40;
+
     /// <summary>How long after a person's learned samples last changed (one added or removed) the next one may be learned.</summary>
     public static readonly TimeSpan LearnedEvery = TimeSpan.FromMinutes(10);
 
@@ -168,6 +175,23 @@ public static class FaceMatcher
         if (samples.Any(sample => sample.Embedding.Similarity(face) >= Alike)) return false;
         var learned = samples.Where(sample => sample.Learned).Select(sample => (DateTimeOffset?)sample.At).Append(person.LearnedChanged).Max();
         return learned is not { } last || now - last >= LearnedEvery;
+    }
+
+    /// <summary>
+    /// Whether faces look unlike a person: the best cosine between any of them and any sample of the person, named or
+    /// learned, is under <see cref="Unlike"/>. False when there are no faces, or the person has no sample to compare with.
+    /// </summary>
+    /// <param name="faces">The faces' embeddings, such as an unknown group's samples.</param>
+    /// <param name="person">The person, as the people list has them.</param>
+    public static bool LooksUnlike(IEnumerable<FaceEmbedding> faces, Person person)
+    {
+        ArgumentNullException.ThrowIfNull(faces);
+        ArgumentNullException.ThrowIfNull(person);
+        var best = double.NegativeInfinity;
+        foreach (var face in faces)
+            foreach (var sample in person.Samples)
+                best = Math.Max(best, sample.Embedding.Similarity(face));
+        return !double.IsNegativeInfinity(best) && best < Unlike;
     }
 }
 

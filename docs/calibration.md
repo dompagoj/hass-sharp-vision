@@ -283,6 +283,7 @@ MatchMargin = 0.10
 SuggestScore = 0.40
 LearnScore = 0.60
 LearnMargin = 0.15
+Unlike = 0.40
 ```
 
 - `MatchScore` 0.50. The plan's rule looks at one pair of faces, but a face at the door is compared with every sample
@@ -299,6 +300,27 @@ LearnMargin = 0.15
 - `UsableEyes` 16 and `LearnEyes` 24, the design's values. On LFW recognition holds down to 10 px, but those are clean
   photos, and in a 1080p frame the detector finds few faces under 16 px anyway.
 - `FitLimit` 7, as measured.
+- `Unlike` 0.40 (`FaceMatcher.Unlike`), which is not one of the plan's rules and does not move with *Match score*. A
+  Save that names a card's faces for a person asks first when none of them comes this close to any of the person's
+  samples, named or learned: faces that unlike are far more likely a stranger's, the wrong person chosen, than a new
+  look of theirs. It is the line for 1 in 1,000 different-person pairs (0.365 to 0.372 at every size), rounded up to
+  0.05 as the plan rounds its match line. Under it fall 1.3, 1.2, 1.3, 1.5 and 1.8 % of same-person pairs at 40, 32,
+  24, 20 and 16 px between the eyes (3.1 % at 12 px, 5.6 % at 10 px); over it, 0.023 to 0.026 % of different-person
+  pairs at those sizes (0.038 % at 10 px), so more than 99.96 % of them are under it.
+  - A lower line would ask the same person less often and let far more wrong names through. At 0.30, the line for 1 in
+    100, 0.4 to 0.5 % of same-person pairs fall under it, but 0.90 to 1.01 % of different-person pairs are over it.
+    The gap grows with the pairs compared: the guard takes the best of every pair of the card's faces (up to 5) and the
+    person's samples (up to 40), as a gallery takes the best of its 60 samples. There, 2.05 % of strangers' probes reach
+    0.40 for someone (1,487 of 72,377, with no margin), near the 2.3 % that 60 pairs at 10 px's 0.038 % give when taken
+    as independent. Taken so, 200 pairs reach 0.40 for about 5 % of wrong names, and 0.30 for about 85 %: at 0.30 the
+    guard would miss most wrong names given to a person with many samples, which is the case it is for.
+  - The best of several pairs helps the same person too: with 3 named pictures each, 99.3 % of the galleries' genuine
+    probes at 10 px reach 0.40 as the right person, so at most 0.7 % would be asked about. A known person's face only
+    comes to a card when it is not recognised, though: about 3 % of genuine probes at the gallery line nearest the
+    defaults (0.47 with a margin of 0.10), of which up to a fifth (0.7 of 3.2 points) are under 0.40. So, on LFW's
+    clean photos, up to about one in five of a known person's cards is asked about when it is named for them; the rest
+    are suggested as them at the default *Match score*, where this line is the suggest line. Sunglasses, a turned head,
+    night infrared and a door camera's blur lower the same person's scores, by an amount this data cannot measure.
 
 ## What the plan's rules give
 

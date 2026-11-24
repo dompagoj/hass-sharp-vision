@@ -283,6 +283,14 @@ it. It has two lists, and a third when asked:
   **Save**: the group's samples go to the person you chose, or make the new person; a person with 20 named samples
   keeps the most different ([below](#how-many-samples-a-person-keeps)). A suggested person is chosen already, so
   **Save** alone accepts the suggestion. **Dismiss** deletes the group.
+
+  When the card's faces look very unlike the person you chose, as a stranger's do (none of them comes 0.40 close to
+  any of that person's samples, named or learned), **Save** saves nothing the first time, and the card says: "This
+  face does not look like Ana Horvat's samples. Press Save again to add it to Ana Horvat anyway." Press **Save** again
+  within 2 minutes, with the same person chosen, to save it as usual. Choosing someone else, waiting longer, or the
+  card taking another face meanwhile asks again. A new person is never asked about, and at the default **Match
+  score** neither is the person a card suggests. Their own face seldom looks that unlike them: a new look, such as
+  sunglasses or a turned head, may be asked about, and one more **Save** adds it.
 - **People**, by full name, each with their newest named face, how many samples they have (and how many learned), and
   when and at which camera they were last seen. **Save** renames them to the **First name** and **Last name** on their
   card. To merge two cards of one person, press **Merge into** on the card to remove, choose the person to keep in its
@@ -327,7 +335,8 @@ for a person who has 20 named samples is never refused: they keep the 20 most di
   judges the merged person's named samples the same way, the newest first.
 - Learned samples take no part, and stay as they are.
 
-A face named for the wrong person is unlike their others, so it is kept: remove it in **Samples of …**.
+A face named for the wrong person is unlike their others, so it is kept. **Save** asks first when it looks very unlike
+them ([The page](#the-page)); one saved all the same is removed in **Samples of …**.
 
 ## Trust and privacy
 

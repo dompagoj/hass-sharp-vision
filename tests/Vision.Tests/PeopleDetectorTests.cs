@@ -103,6 +103,8 @@ static class PeopleDetectorTests
                 (nameof(TheUnknownCardsKeepTheirPlaces), TheUnknownCardsKeepTheirPlaces),
                 (nameof(NamingAFaceIsASightingOfItsPerson), NamingAFaceIsASightingOfItsPerson),
                 (nameof(SavingAFaceForAFullPersonKeepsTheirMostDifferentSamples), SavingAFaceForAFullPersonKeepsTheirMostDifferentSamples),
+                (nameof(ASaveForSomeoneTheFacesLookUnlikeAsksFirst), ASaveForSomeoneTheFacesLookUnlikeAsksFirst),
+                (nameof(ASaveAskedAboutAsksAgainLaterOrForOtherFaces), ASaveAskedAboutAsksAgainLaterOrForOtherFaces),
                 (nameof(AStrangerIsDismissed), AStrangerIsDismissed),
                 (nameof(ThePageListsThePeopleToRenameMergeAndDelete), ThePageListsThePeopleToRenameMergeAndDelete),
                 (nameof(ThePageListsAPersonsSamplesToRemove), ThePageListsAPersonsSamplesToRemove),
@@ -1841,8 +1843,10 @@ static class PeopleDetectorTests
         Check(refused == $"refused: There is already a person named {Ana}: choose them from the list.", "Save of a new person of Ana's name: " + refused);
         Check(CardOf(Page(rig), "unknown", (string)second.Id) != null && ((object[])PeopleTests.Items(Reread(list, Ana).Samples)).Length == 1, "the group stays, and Ana gains nothing");
 
-        // Save with a person chosen: the group's samples go to that person, by id.
+        // Save with a person chosen: the group's samples go to that person, by id. A stranger's face looks unlike Ana, so
+        // the first Save asks (ASaveForSomeoneTheFacesLookUnlikeAsksFirst), and the second saves.
         faces = unknownFaces.Samples((string)second.Id).Count;
+        Check(await Press(rig, "unknown", (string)second.Id, "save", new { person = Picked((string)Reread(list, Ana).Id) }) == Unlike(Ana), "Save of Ana, chosen, asks");
         Check(await Press(rig, "unknown", (string)second.Id, "save", new { person = Picked((string)Reread(list, Ana).Id) }) == "done", "Save of Ana, chosen");
         var ana = Reread(list, Ana);
         Check(((object[])PeopleTests.Items(ana.Samples)).Count(s => !((dynamic)s).Learned) == 1 + faces, $"Ana gains the group's {faces} faces as named samples");
@@ -1944,9 +1948,12 @@ static class PeopleDetectorTests
         Check(((string?)OptionsOf(Page(rig)).Single(o => (string)o["id"]! == mia)["detail"])!.EndsWith($" · last seen {Moment} at Porch camera", StringComparison.Ordinal),
             "and her option: " + Page(rig)?["options"]?.ToJsonString());
 
+        // A stranger's face looks unlike Ana and Ivan: the first Save asks, and the second saves.
+        Check(await Press(rig, "unknown", (string)groups[1].Id, "save", new { person = Picked((string)ana.Id) }) == Unlike(Ana), "Save of Ana, chosen, asks");
         Check(await Press(rig, "unknown", (string)groups[1].Id, "save", new { person = Picked((string)ana.Id) }) == "done", "Save of Ana, chosen");
         Check(SeenOf(Ana) == (LastOf(1), "camera.porch"), $"Ana's last seen moves forward to the group's last sighting, within the minute of the one written: {SeenOf(Ana)} | {LastOf(1):O}");
 
+        Check(await Press(rig, "unknown", (string)groups[2].Id, "save", new { person = Picked((string)ivan.Id) }) == Unlike(Ivan), "Save of Ivan, chosen, asks");
         Check(await Press(rig, "unknown", (string)groups[2].Id, "save", new { person = Picked((string)ivan.Id) }) == "done", "Save of Ivan, chosen");
         Check(SeenOf(Ivan) == (atTheHall, "camera.hall"), $"Ivan, seen at the hall since, stays: {SeenOf(Ivan)}");
         Check(Detail(CardOf(Page(rig), "people", (string)ivan.Id)!)!.EndsWith($" · last seen {Moment} at camera.hall", StringComparison.Ordinal), "his card names the hall: " + Page(rig)?.ToJsonString());
@@ -1980,8 +1987,13 @@ static class PeopleDetectorTests
         string groupId = group.Id;
         DateTimeOffset last = group.Last;
 
-        Check(await Press(rig, "unknown", groupId, "save", new { person = Picked(anaId) }) == "done", "Save for a person with 20 named samples is not refused");
+        // The look is unlike every sample of hers: the first Save asks, and changes nothing of hers.
         var unknown = Member(rig.Detector(), "Unknown");
+        Check(await Press(rig, "unknown", groupId, "save", new { person = Picked(anaId) }) == Unlike(Ana), "the first Save for a person with 20 named samples asks");
+        var asked = ((object[])PeopleTests.Items(Reread(list, Ana).Samples)).Select(s => (dynamic)s).ToArray();
+        Check(unknown.Find(groupId) != null && asked.Length == 20 && asked.Any(s => s.Id == older) && asked.All(s => s.Camera != "camera.porch")
+            && rig.Shared().Keys($"samples/{anaId}/").Count == 40 && Reread(list, Ana).LastSeen == null, "her samples are as they were, and the card stays");
+        Check(await Press(rig, "unknown", groupId, "save", new { person = Picked(anaId) }) == "done", "Save for a person with 20 named samples is not refused");
         Check(unknown.Find(groupId) == null && CardOf(Page(rig), "unknown", groupId) == null && CardsOf(Page(rig), "unknown").Length == 3, "the card goes: " + Page(rig)?.ToJsonString());
         var person = Reread(list, Ana);
         var named = ((object[])PeopleTests.Items(person.Samples)).Select(s => (dynamic)s).Where(s => !s.Learned).ToArray();
@@ -1990,7 +2002,139 @@ static class PeopleDetectorTests
         Check(person.LastSeen == last && person.LastSeenAt == "camera.porch", $"the naming is a sighting at the group's last: {person.LastSeen} at {person.LastSeenAt}");
         Check(Detail(CardOf(Page(rig), "people", anaId)!)!.StartsWith("20 samples · last seen", StringComparison.Ordinal), "her card is drawn again: " + Page(rig)?.ToJsonString());
         NoNameIsLogged(rig);
-        Console.WriteLine("PASS people detector: Save names a face for a person with 20 named samples: the look is kept in place of the older of their closest pair, the card goes, and it is a sighting");
+        Console.WriteLine("PASS people detector: Save names a face for a person with 20 named samples: a look unlike hers is asked about first, changing nothing, and at the second Save is kept in place of the older of their closest pair, the card goes, and it is a sighting");
+    }
+
+    /// <summary>What a first Save answers when the card's faces look unlike the person chosen, as <see cref="Press"/> gives it.</summary>
+    static string Unlike(string name) => $"refused: This face does not look like {name}'s samples. Press Save again to add it to {name} anyway.";
+
+    /// <summary>How many Saves the running detector remembers having asked about: its private <c>asked</c>.</summary>
+    static int Asking(SharpDevice device)
+    {
+        var type = device.GetType();
+        while (type != null && type.Name != "PeopleDetector") type = type.BaseType;
+        var field = type?.GetField("asked", BindingFlags.Instance | BindingFlags.NonPublic) ?? throw new Exception("PeopleDetector has no asked");
+        return ((System.Collections.ICollection)field.GetValue(device)!).Count;
+    }
+
+    // A face named for someone it looks nothing like is most likely the wrong person chosen: the first Save asks, and stores
+    // nothing; a second Save of the card for the same person saves it as any Save does. Another person chosen in between is
+    // judged afresh. A new person, or a person the faces are alike enough to, is saved at the first Save.
+    static async Task ASaveForSomeoneTheFacesLookUnlikeAsksFirst()
+    {
+        using var cameras = Cameras(("camera.porch", "Porch camera"));
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        // Three strangers, and a face 0.45 alike to Ivan's sample: a maybe, alike enough to him.
+        for (var i = 0; i < 3; i++) fake.Embeds(four[i], PeopleTests.Unit(8100 + i));
+        fake.Embeds(four[3], PeopleTests.At(PeopleTests.Unit(2), 0.45, 8103));
+        Show();
+        await using var rig = await Rig.Start("page-unlike");
+        var list = PeopleOf(rig);
+        string anaId = Named(list, Ana, 1).Id, ivanId = Named(list, Ivan, 2).Id;
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "the maybe and the three strangers are drawn: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        var unknown = Member(rig.Detector(), "Unknown");
+        var groups = Shown(rig);
+        string maybe = groups.Single(g => g.SuggestedPersonId == ivanId).Id;
+        string[] strangers = [.. groups.Where(g => g.SuggestedPersonId == null).Select(g => (string)g.Id)];
+        Check(strangers.Length == 3, "three strangers' cards");
+        var first = strangers[0];
+        DateTimeOffset last = Shown(rig).Single(g => g.Id == first).Last;
+        int faces = unknown.Samples(first).Count;
+        var keys = rig.Shared().Keys().Count;
+        int SamplesOf(string name) => ((object[])PeopleTests.Items(Reread(list, name).Samples)).Length;
+        Task<string> Save(string card, string personId) => Press(rig, "unknown", card, "save", new { person = Picked(personId) });
+        bool Untouched() => rig.Shared().Keys().Count == keys && SamplesOf(Ana) == 1 && SamplesOf(Ivan) == 1 && Reread(list, Ana).LastSeen == null
+            && Reread(list, Ivan).LastSeen == null && unknown.Find(first) != null && CardOf(Page(rig), "unknown", first) != null;
+
+        // The first Save for Ana asks, and stores nothing: no sample, no crop, no sighting; the card stays.
+        Check(await Save(first, anaId) == Unlike(Ana), "the first Save for Ana asks");
+        Check(Untouched(), "nothing is stored, and the card stays: " + string.Join(", ", rig.Shared().Keys()));
+        Check(Asking(rig.Detector()) == 1, "the detector remembers that it asked");
+
+        // Ivan chosen next is judged afresh, and the faces look unlike him too; Ana chosen after him is asked about again.
+        Check(await Save(first, ivanId) == Unlike(Ivan), "a Save for Ivan after the question about Ana asks about Ivan");
+        Check(await Save(first, anaId) == Unlike(Ana), "and one for Ana after it asks about Ana again");
+        Check(Untouched() && Asking(rig.Detector()) == 1, "nothing is stored yet, and one question is remembered");
+
+        // The second Save for Ana saves: her samples, the card gone, and a sighting at the group's last.
+        Check(await Save(first, anaId) == "done", "the second Save for Ana saves");
+        var ana = Reread(list, Ana);
+        Check(SamplesOf(Ana) == 1 + faces && unknown.Find(first) == null && CardOf(Page(rig), "unknown", first) == null, $"Ana has the card's {faces} faces, and the card goes");
+        Check(ana.LastSeen == last && ana.LastSeenAt == "camera.porch", $"the naming is a sighting at the group's last: {ana.LastSeen} at {ana.LastSeenAt}");
+        Check(Asking(rig.Detector()) == 0, "nothing of the question is kept once the card goes");
+
+        // A card asked about and then dismissed leaves nothing of the question.
+        Check(await Save(strangers[1], ivanId) == Unlike(Ivan), "a Save of another card for Ivan asks");
+        Check(await Press(rig, "unknown", strangers[1], "dismiss", new { person = (object?)null }) == "done" && Asking(rig.Detector()) == 0, "Dismiss leaves nothing of it");
+
+        // A new person, and a person the faces are alike enough to, are saved at the first Save.
+        Check(await Press(rig, "unknown", strangers[2], "save", new { person = NewPerson(Mia) }) == "done", "a Save for a new person saves at once");
+        Check(SamplesOf(Mia) == faces, "Mia is made of the card's faces");
+        int maybeFaces = unknown.Samples(maybe).Count;
+        Check(await Save(maybe, ivanId) == "done", "a Save for Ivan of a face 0.45 alike to him saves at once");
+        Check(SamplesOf(Ivan) == 1 + maybeFaces && CardsOf(Page(rig), "unknown").Length == 0, "Ivan has its faces, and no card is left");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a Save for someone the card's faces look unlike asks first and stores nothing, the card staying; the second Save for the same person saves and is a sighting; another person is judged afresh; a new person, or one the faces are alike to, is saved at once");
+    }
+
+    // The second Save counts within two minutes of the question, for the faces asked about: later, or once a check has given
+    // the card another face, it asks again. Two Saves of one card at once, as from two browsers, run one after the other:
+    // the first asks, and the second, within the time and for the same faces, saves; the faces are added once.
+    static async Task ASaveAskedAboutAsksAgainLaterOrForOtherFaces()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        var (stranger, other) = (PeopleTests.Unit(8200), PeopleTests.Unit(8201));
+        fake.Embeds(four[0], stranger);
+        fake.Embeds(four[1], other);
+        foreach (var spot in four[2..]) Uncompared(fake, spot);
+        Show();
+        await using var rig = await Rig.Start("page-unlike-later");
+        var list = PeopleOf(rig);
+        string anaId = Named(list, Ana, 1).Id;
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 2, "the two strangers are drawn: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        var unknown = Member(rig.Detector(), "Unknown");
+        string card = Shown(rig).Single(group => HoldsFace(unknown, group, stranger)).Id;
+        string second = Shown(rig).Single(group => HoldsFace(unknown, group, other)).Id;
+        int SamplesOf() => ((object[])PeopleTests.Items(Reread(list, Ana).Samples)).Length;
+        Task<string> Save(string id) => Press(rig, "unknown", id, "save", new { person = Picked(anaId) });
+
+        // A Save more than two minutes after the question asks again.
+        Check(await Save(card) == Unlike(Ana), "the first Save asks");
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(1));
+        Check(await Save(card) == Unlike(Ana), "a Save two minutes and a second later asks again");
+
+        // A check gives the card another face: the faces asked about are not the card's any more, and the next Save asks.
+        clock.Advance(TimeSpan.FromMinutes(1));
+        fake.Embeds(four[0], PeopleTests.At(stranger, 0.7, 8202));
+        Show();
+        await Until(() => unknown.Samples(card).Count == 2, "the card's group keeps the new face", 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        Check(await Save(card) == Unlike(Ana), "a Save after the card's faces changed asks again");
+        Check(SamplesOf() == 1 && unknown.Find(card) != null, "nothing is stored yet");
+
+        // Within the two minutes, the Save after the question saves.
+        clock.Advance(TimeSpan.FromMinutes(2) - TimeSpan.FromSeconds(1));
+        Check(await Save(card) == "done", "a Save two minutes less a second after the question saves");
+        Check(SamplesOf() == 3 && unknown.Find(card) == null, "Ana has the card's two faces, and the card goes");
+
+        // Two Saves of the other card at once: one asks and one saves, and its face is added once.
+        var both = await Task.WhenAll(Save(second), Save(second));
+        Check(both.Order(StringComparer.Ordinal).SequenceEqual(new[] { "done", Unlike(Ana) }.Order(StringComparer.Ordinal)), "of two Saves at once one asks and one saves: " + string.Join(" | ", both));
+        Check(SamplesOf() == 4 && unknown.Find(second) == null && Asking(rig.Detector()) == 0, "Ana has its face once, the card goes, and no question is kept");
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a Save asked about asks again two minutes later or once the card's faces changed, and saves within the two minutes; of two Saves at once one asks and one saves");
     }
 
     static async Task AStrangerIsDismissed()

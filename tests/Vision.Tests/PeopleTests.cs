@@ -240,6 +240,7 @@ static class PeopleTests
             (nameof(UnderTheSuggestScoreIsUnknown), Sync(UnderTheSuggestScoreIsUnknown)),
             (nameof(APersonScoresByTheirBestSample), Sync(APersonScoresByTheirBestSample)),
             (nameof(AnEmptyListIsUnknown), Sync(AnEmptyListIsUnknown)),
+            (nameof(FacesFarFromEverySampleOfAPersonLookUnlikeThem), Sync(FacesFarFromEverySampleOfAPersonLookUnlikeThem)),
             (nameof(APersonComesBackFromTheStore), Sync(APersonComesBackFromTheStore)),
             (nameof(NamesAreTrimmedAndChecked), Sync(NamesAreTrimmedAndChecked)),
             (nameof(TwoPeopleMayNotHaveOneFullName), Sync(TwoPeopleMayNotHaveOneFullName)),
@@ -404,6 +405,30 @@ static class PeopleTests
         var withoutSamples = Match(Unit(17), People(Person("ana")));
         Check(withoutSamples.Kind.ToString() == "Unknown" && withoutSamples.Person == null, $"a person without samples: {withoutSamples}");
         Console.WriteLine("PASS people: an empty list, or one whose people have no samples, gives unknown");
+    }
+
+    /// <summary>Whether the faces look unlike the person, by <c>FaceMatcher.LooksUnlike</c>.</summary>
+    static bool LooksUnlike(object person, params float[][] faces)
+    {
+        var array = Array.CreateInstance(Type("FaceEmbedding"), faces.Length);
+        for (var i = 0; i < faces.Length; i++) array.SetValue((object)Embedding(faces[i]), i);
+        return (bool)Invoke(Type("FaceMatcher").GetMethod("LooksUnlike")!, null, array, person)!;
+    }
+
+    // The vectors are on the axes (Axis, Between), so that each similarity is the cosine given, in floats.
+    static void FacesFarFromEverySampleOfAPersonLookUnlikeThem()
+    {
+        var line = (double)Type("FaceMatcher").GetField("Unlike")!.GetValue(null)!;
+        Check(line == 0.40, "the line is docs/calibration.md's, 0.40: " + line);
+        var ana = PersonOf("ana", (Axis(0), false, T0), (Axis(1), true, T0));
+        Check(LooksUnlike(ana, Axis(5)), "a face 0 alike to both her samples looks unlike her");
+        Check(LooksUnlike(ana, Between(0, 5, 0.39), Between(1, 6, 0.39)), "and so do faces just under the line from each");
+        Check(!LooksUnlike(ana, Between(0, 5, 0.40)), "a face at the line from her named sample does not");
+        Check(!LooksUnlike(ana, Between(1, 5, 0.40)), "nor one at the line from her learned sample");
+        Check(!LooksUnlike(ana, Axis(5), Axis(6), Between(1, 7, 0.45)), "nor faces of which one is close enough: the best pair is judged");
+        Check(!LooksUnlike(PersonOf("eva"), Axis(5)), "a person without samples cannot be compared, and does not look unlike");
+        Check(!LooksUnlike(ana), "nor do no faces");
+        Console.WriteLine("PASS people: faces look unlike a person when no pair of a face and a sample of theirs, named or learned, comes 0.40 close; a person without samples is not compared");
     }
 
     // ---- The list ----
