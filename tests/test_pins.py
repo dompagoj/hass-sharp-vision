@@ -1,6 +1,6 @@
-"""The pins in nodes/Vision.cs follow native/: its checksum table is native/SHA256SUMS and its download URL is the
-release of the crate's version, and the first line of each node file names that version. With
-HS_VISION_CHECK_RELEASE=1 (CI), the release's own SHA256SUMS is compared too."""
+"""The pins in nodes/Vision.cs follow native/: its checksum table is native/SHA256SUMS, its download URL is the release
+of the crate's version, its model's name and SHA-256 are those native/fetch-model.sh fetches, and the first line of
+each node file names that version. With HS_VISION_CHECK_RELEASE=1 (CI), the release's own SHA256SUMS is compared too."""
 
 import os
 import re
@@ -15,10 +15,13 @@ VISION = ROOT / "nodes" / "Vision.cs"
 PEOPLE_DETECTOR = ROOT / "nodes" / "PeopleDetector.cs"
 SUMS = ROOT / "native" / "SHA256SUMS"
 CARGO = ROOT / "native" / "Cargo.toml"
+FETCH_MODEL = ROOT / "native" / "fetch-model.sh"
 
 SOURCE = re.compile(r'^\s*const string Source = "([^"]*)";\s*$', re.MULTILINE)
 RELEASE = re.compile(r"^https://github\.com/dompagoj/hass-sharp-vision/releases/download/v(\d+\.\d+\.\d+)/$")
 HEADER = re.compile(r"^// hass-sharp-vision (\d+\.\d+\.\d+), from https://github\.com/dompagoj/hass-sharp-vision$")
+MODEL_NAME = re.compile(r'^\s*const string ModelName = "([^"]*)";\s*$', re.MULTILINE)
+MODEL_SHA256 = re.compile(r'^\s*const string ModelSha256 = "([^"]*)";\s*$', re.MULTILINE)
 ENTRY = re.compile(r'^\s*\["([^"]+)"\] = "([0-9a-f]{64})",\s*$')
 
 
@@ -27,6 +30,25 @@ def source() -> str:
     if len(found) != 1:
         raise AssertionError(f"Vision.cs has {len(found)} lines of the form const string Source = \"...\"; not 1")
     return found[0]
+
+
+def model() -> tuple[str, str]:
+    """The model's file name and SHA-256 that Vision.cs pins."""
+    text = VISION.read_text(encoding="utf-8")
+    names, sums = MODEL_NAME.findall(text), MODEL_SHA256.findall(text)
+    if len(names) != 1 or len(sums) != 1:
+        raise AssertionError("Vision.cs has no single ModelName and ModelSha256")
+    return names[0], sums[0]
+
+
+def fetched() -> tuple[str, str]:
+    """The model's file name and SHA-256 that native/fetch-model.sh downloads and checks."""
+    text = FETCH_MODEL.read_text(encoding="utf-8")
+    names = re.findall(r"^NAME=(\S+)$", text, re.MULTILINE)
+    sums = re.findall(r"^SHA256=([0-9a-f]{64})$", text, re.MULTILINE)
+    if len(names) != 1 or len(sums) != 1:
+        raise AssertionError("fetch-model.sh has no single NAME= and SHA256= line")
+    return names[0], sums[0]
 
 
 def header(path: Path) -> str:
@@ -79,6 +101,9 @@ class PinsTest(unittest.TestCase):
         match = RELEASE.match(url)
         self.assertIsNotNone(match, f"Source is not a hass-sharp-vision release download URL: {url}")
         self.assertEqual(match.group(1), version())
+
+    def test_model_is_the_one_fetch_model_fetches(self):
+        self.assertEqual(model(), fetched())
 
     def test_node_files_name_this_version(self):
         for path in (VISION, PEOPLE_DETECTOR):

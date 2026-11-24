@@ -1,7 +1,8 @@
-// hass-sharp-vision 1.0.0, from https://github.com/dompagoj/hass-sharp-vision
+// hass-sharp-vision 1.1.0, from https://github.com/dompagoj/hass-sharp-vision
 using System.Buffers;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 
 /// <summary>A point in a picture, in its pixels from the top left.</summary>
 /// <param name="X">Pixels from the left.</param>
@@ -151,14 +152,133 @@ public sealed unsafe class VisionDetector : IDisposable
     }
 }
 
+/// <summary>A face as SFace sees it: 128 values of length 1, which lie close together for faces of one person.</summary>
+/// <param name="Values">The 128 values, of length 1.</param>
+/// <param name="Fit">
+/// How far the face's landmarks were from where an aligned face has them, in the 112×112 crop's pixels (the root mean
+/// square of the five distances): the lower, the better the face could be aligned.
+/// </param>
+public readonly record struct FaceEmbedding(float[] Values, float Fit)
+{
+    /// <summary>How alike two faces are: the dot product of their values, from −1 to 1, and 1 for the same face.</summary>
+    /// <param name="other">The other face's embedding.</param>
+    /// <exception cref="ArgumentException">The two do not have as many values.</exception>
+    public float Similarity(FaceEmbedding other)
+    {
+        ReadOnlySpan<float> mine = Values, theirs = other.Values;
+        if (mine.Length != theirs.Length) throw new ArgumentException("The two embeddings do not have as many values");
+        var sum = 0f;
+        for (var i = 0; i < mine.Length; i++) sum += mine[i] * theirs[i];
+        return sum;
+    }
+}
+
+/// <summary>Turns a detected face into its embedding: <see cref="VisionRecognizer"/>, or a stand-in that makes them up.</summary>
+public interface IFaceRecognizer : IDisposable
+{
+    /// <summary>The embedding of a face found in a picture.</summary>
+    /// <param name="image">The picture the face was found in.</param>
+    /// <param name="face">The face, as the detector found it in <paramref name="image"/>.</param>
+    FaceEmbedding Embed(SharpImage image, DetectedFace face);
+}
+
 /// <summary>
-/// The native hs_vision library: downloaded once from the hass-sharp-vision release this code is pinned to, checked by
-/// its SHA-256, and loaded for the process (it is never unloaded). Also draws what it finds on a picture.
+/// SFace, the face recogniser of the native hs_vision library, made by <see cref="Vision.OpenRecognizerAsync"/>. Its
+/// calls run one at a time; <see cref="Dispose"/> waits for the one running and closes it, and any call after that
+/// throws.
+/// </summary>
+public sealed unsafe class VisionRecognizer : IFaceRecognizer
+{
+    // An embedding is 128 floats, and a face's landmarks 10: the five as x, y pairs.
+    const int Values = 128;
+    const int LandmarkFloats = 10;
+
+    // Around every native call and the close: the library leaves a call after close, a double close and a close
+    // during a call undefined.
+    readonly Lock gate = new();
+    readonly Vision.Exports exports;
+    // The native recogniser; zero once closed.
+    nint recognizer;
+
+    internal VisionRecognizer(Vision.Exports exports, nint recognizer)
+    {
+        this.exports = exports;
+        this.recognizer = recognizer;
+    }
+
+    /// <summary>The embedding of <paramref name="face"/>, aligned from its five landmarks on the full picture.</summary>
+    /// <param name="image">The picture the face was found in.</param>
+    /// <param name="face">The face, as the detector found it in <paramref name="image"/>.</param>
+    /// <exception cref="ObjectDisposedException">The recogniser has been closed.</exception>
+    /// <exception cref="InvalidOperationException">The library failed.</exception>
+    public FaceEmbedding Embed(SharpImage image, DetectedFace face)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(face);
+        // In the order hs_vision_faces gives them.
+        var landmarks = stackalloc float[LandmarkFloats]
+        {
+            face.RightEye.X, face.RightEye.Y, face.LeftEye.X, face.LeftEye.Y, face.NoseTip.X, face.NoseTip.Y,
+            face.RightMouthCorner.X, face.RightMouthCorner.Y, face.LeftMouthCorner.X, face.LeftMouthCorner.Y,
+        };
+        var values = new float[Values];
+        var fit = 0f;
+        int width = image.Width, height = image.Height;
+        var length = image.PixelsLength(SharpPixelFormat.Rgb);
+        var pixels = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
+            image.CopyPixels(pixels, SharpPixelFormat.Rgb);
+            fixed (byte* rgb = pixels)
+            fixed (float* embedding = values)
+                lock (gate)
+                {
+                    if (recognizer == 0) throw new ObjectDisposedException(nameof(VisionRecognizer), "The vision recogniser has been closed");
+                    try
+                    {
+                        if (exports.Embed(recognizer, rgb, width, height, width * 3, landmarks, embedding, &fit) != 0)
+                            throw new InvalidOperationException($"Face recognition failed: {exports.LastError()}");
+                    }
+                    // The lock roots the Lock, not this: without this, the finalizer could close the recogniser mid-call.
+                    finally { GC.KeepAlive(this); }
+                }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(pixels);
+        }
+        return new FaceEmbedding(values, fit);
+    }
+
+    /// <summary>Waits for an embedding running, then closes the recogniser; a second call does nothing.</summary>
+    public void Dispose()
+    {
+        lock (gate)
+        {
+            if (recognizer == 0) return;
+            exports.CloseRecognizer(recognizer);
+            recognizer = 0;
+        }
+        GC.SuppressFinalize(this);
+    }
+
+    // A recogniser never disposed, such as one a device's Setup() made before its definition failed to start, is closed
+    // when its load context is collected. Nothing reaches it by then, so no call can be running.
+    ~VisionRecognizer()
+    {
+        if (recognizer != 0) exports.CloseRecognizer(recognizer);
+    }
+}
+
+/// <summary>
+/// The native hs_vision library and its face recognition model: downloaded once from the hass-sharp-vision release this
+/// code is pinned to, checked by their SHA-256, and the library loaded for the process (it is never unloaded). Also
+/// judges and draws what it finds on a picture.
 /// </summary>
 public static class Vision
 {
     // Not an unsafe class: OpenAsync awaits, which an unsafe context may not. Its native parts are unsafe each.
-    const string Source = "https://github.com/dompagoj/hass-sharp-vision/releases/download/v1.0.0/";
+    const string Source = "https://github.com/dompagoj/hass-sharp-vision/releases/download/v1.1.0/";
 
     // The release's native/SHA256SUMS, by runtime identifier.
     static readonly Dictionary<string, string> Sha256 = new(StringComparer.Ordinal)
@@ -171,7 +291,12 @@ public static class Vision
         // pinned:end
     };
 
-    const int AbiVersion = 1;
+    // SFace, the face recognition model, which the release publishes beside the libraries, and its SHA-256: the same
+    // file for every runtime.
+    const string ModelName = "face_recognition_sface_2021dec.onnx";
+    const string ModelSha256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79";
+
+    const int AbiVersion = 2;
     // SharpImage's limit: an image carries at most 500 drawings.
     const int MaxDrawings = 500;
 
@@ -179,15 +304,20 @@ public static class Vision
     static readonly Lock loading = new();
     static Exports? loaded;
 
-    /// <summary>The exports of hs_vision's C ABI version 1 besides hs_vision_abi_version, which <see cref="Load"/> checks first.</summary>
+    /// <summary>The exports of hs_vision's C ABI version 2 besides hs_vision_abi_version, which <see cref="Load"/> checks first.</summary>
     internal sealed unsafe class Exports(nint library)
     {
         readonly delegate* unmanaged<nint> open = (delegate* unmanaged<nint>)NativeLibrary.GetExport(library, "hs_vision_open");
+        // (model path, NUL-terminated UTF-8): a recogniser, or zero.
+        readonly delegate* unmanaged<byte*, nint> openRecognizer = (delegate* unmanaged<byte*, nint>)NativeLibrary.GetExport(library, "hs_vision_open_recognizer");
         readonly delegate* unmanaged<byte*> lastError = (delegate* unmanaged<byte*>)NativeLibrary.GetExport(library, "hs_vision_last_error");
         // (detector, rgb, width, height, stride, input size, minimum score, out, max): how many it wrote, or -1.
         internal readonly delegate* unmanaged<nint, byte*, int, int, int, int, float, float*, int, int> Faces = (delegate* unmanaged<nint, byte*, int, int, int, int, float, float*, int, int>)NativeLibrary.GetExport(library, "hs_vision_faces");
         internal readonly delegate* unmanaged<nint, byte*, int, int, int, int, float, float*, int, int> People = (delegate* unmanaged<nint, byte*, int, int, int, int, float, float*, int, int>)NativeLibrary.GetExport(library, "hs_vision_people");
         internal readonly delegate* unmanaged<nint, void> Close = (delegate* unmanaged<nint, void>)NativeLibrary.GetExport(library, "hs_vision_close");
+        // (recogniser, rgb, width, height, stride, 10 landmarks, out of 128, fit): 0, or -1.
+        internal readonly delegate* unmanaged<nint, byte*, int, int, int, float*, float*, float*, int> Embed = (delegate* unmanaged<nint, byte*, int, int, int, float*, float*, float*, int>)NativeLibrary.GetExport(library, "hs_vision_embed");
+        internal readonly delegate* unmanaged<nint, void> CloseRecognizer = (delegate* unmanaged<nint, void>)NativeLibrary.GetExport(library, "hs_vision_close_recognizer");
 
         /// <summary>Why this thread's last call failed.</summary>
         internal string LastError()
@@ -202,6 +332,16 @@ public static class Vision
             if (detector == 0) throw new InvalidOperationException($"The vision library could not start: {LastError()}");
             return new VisionDetector(this, detector);
         }
+
+        /// <summary>Opens a recogniser on the model at <paramref name="modelPath"/>; the first one open reads and plans it.</summary>
+        internal VisionRecognizer OpenRecognizer(string modelPath)
+        {
+            var path = Encoding.UTF8.GetBytes(modelPath + "\0");
+            nint recognizer;
+            fixed (byte* name = path) recognizer = openRecognizer(name);
+            if (recognizer == 0) throw new InvalidOperationException($"The face recogniser could not start: {LastError()}");
+            return new VisionRecognizer(this, recognizer);
+        }
     }
 
     /// <summary>
@@ -215,15 +355,37 @@ public static class Vision
     /// <exception cref="PlatformNotSupportedException">There is no build for <paramref name="runtimeIdentifier"/>.</exception>
     /// <exception cref="System.IO.InvalidDataException">The download does not match its checksum.</exception>
     /// <exception cref="InvalidOperationException">The library is another version, or cannot start.</exception>
-    public static async Task<VisionDetector> OpenAsync(SharpFiles files, string runtimeIdentifier, CancellationToken cancellation)
+    public static async Task<VisionDetector> OpenAsync(SharpFiles files, string runtimeIdentifier, CancellationToken cancellation) =>
+        Load(await DownloadLibrary(files, runtimeIdentifier, cancellation)).Open();
+
+    /// <summary>
+    /// Downloads the library for <paramref name="runtimeIdentifier"/> and SFace, the face recognition model (each once: a
+    /// file already downloaded is used as it is), loads the library and opens a recogniser on the model; the first one
+    /// open in the process reads and plans the model, which takes a moment. Call it from a <c>[NodeSetup]</c> or a
+    /// device's <c>Setup()</c>, and dispose the recogniser when the definition stops (<see cref="NodeSetupContext.Own"/>).
+    /// </summary>
+    /// <param name="files">The definition's files.</param>
+    /// <param name="runtimeIdentifier">The runtime identifier, such as <c>linux-musl-arm64</c>.</param>
+    /// <param name="cancellation">Ends the downloads: the definition's stopping.</param>
+    /// <exception cref="PlatformNotSupportedException">There is no build for <paramref name="runtimeIdentifier"/>.</exception>
+    /// <exception cref="System.IO.InvalidDataException">A download does not match its checksum.</exception>
+    /// <exception cref="InvalidOperationException">The library is another version, or the recogniser cannot start.</exception>
+    public static async Task<VisionRecognizer> OpenRecognizerAsync(SharpFiles files, string runtimeIdentifier, CancellationToken cancellation)
+    {
+        var library = await DownloadLibrary(files, runtimeIdentifier, cancellation);
+        var model = await files.Download(Source + ModelName, ModelSha256, ModelName, cancellation);
+        return Load(library).OpenRecognizer(model);
+    }
+
+    // Downloads the library for the runtime identifier, once, and gives its path.
+    static async Task<string> DownloadLibrary(SharpFiles files, string runtimeIdentifier, CancellationToken cancellation)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(runtimeIdentifier);
         if (!Sha256.TryGetValue(runtimeIdentifier, out var sha256))
             throw new PlatformNotSupportedException($"The vision library has no native build for {runtimeIdentifier}; it runs on {Listed(Sha256.Keys)}");
         var name = $"libhs_vision-{runtimeIdentifier}.so";
-        var path = await files.Download(Source + name, sha256, name, cancellation);
-        return Load(path).Open();
+        return await files.Download(Source + name, sha256, name, cancellation);
     }
 
     static unsafe Exports Load(string path)
@@ -255,6 +417,29 @@ public static class Vision
     static int Round(float value) => (int)MathF.Round(value);
     static string Score(float score) => score.ToString("0.00", CultureInfo.InvariantCulture);
 
+    /// <summary>How far apart a face's eyes are, in the picture's pixels: how large the face is to the recogniser.</summary>
+    /// <param name="face">The face.</param>
+    public static float EyeDistance(DetectedFace face)
+    {
+        ArgumentNullException.ThrowIfNull(face);
+        return MathF.Sqrt(Square(face.LeftEye.X - face.RightEye.X) + Square(face.LeftEye.Y - face.RightEye.Y));
+    }
+
+    static float Square(float value) => value * value;
+
+    /// <summary>
+    /// Whether a face looks towards the camera enough to be recognised: its eyes are at least a fifth of its box's width
+    /// apart, and its nose tip is between them across the picture. A face in profile has its eyes close together, or its
+    /// nose beside them.
+    /// </summary>
+    /// <param name="face">The face.</param>
+    public static bool Frontal(DetectedFace face)
+    {
+        ArgumentNullException.ThrowIfNull(face);
+        float left = MathF.Min(face.RightEye.X, face.LeftEye.X), right = MathF.Max(face.RightEye.X, face.LeftEye.X);
+        return EyeDistance(face) >= face.Width / 5 && face.NoseTip.X >= left && face.NoseTip.X <= right;
+    }
+
     /// <summary>
     /// Draws each face on <paramref name="image"/>, the best first and as many as fit under its 500 drawings, 7 each: a
     /// green box, a dot on each landmark (right eye blue, left eye red, nose tip yellow, right mouth corner magenta, left
@@ -267,16 +452,41 @@ public static class Vision
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(faces);
+        return Draw(image, faces, null);
+    }
+
+    /// <summary>
+    /// Draws each face on <paramref name="image"/> as <see cref="DrawFaces(SharpImage, IReadOnlyList{DetectedFace})"/>
+    /// does, with a face's name above its box in place of its score where it has one.
+    /// </summary>
+    /// <param name="image">The picture to draw on, such as a copy (<see cref="SharpImage.Copy"/>).</param>
+    /// <param name="faces">The faces found in it.</param>
+    /// <param name="names">Each face's name, in the order of <paramref name="faces"/>: null or blank for a face without one.</param>
+    /// <returns><paramref name="image"/>.</returns>
+    /// <exception cref="ArgumentException">There are not as many names as faces.</exception>
+    public static SharpImage DrawFaces(SharpImage image, IReadOnlyList<DetectedFace> faces, IReadOnlyList<string?> names)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(faces);
+        ArgumentNullException.ThrowIfNull(names);
+        if (names.Count != faces.Count) throw new ArgumentException("There is one name, or null, for each face");
+        return Draw(image, faces, names);
+    }
+
+    static SharpImage Draw(SharpImage image, IReadOnlyList<DetectedFace> faces, IReadOnlyList<string?>? names)
+    {
         var room = Math.Max(0, (MaxDrawings - image.Drawings) / 7);
-        foreach (var face in faces.OrderByDescending(face => face.Score).Take(room))
+        foreach (var index in Enumerable.Range(0, faces.Count).OrderByDescending(index => faces[index].Score).Take(room))
         {
+            var face = faces[index];
             int x = Round(face.X), y = Round(face.Y);
             image.DrawRect(x, y, Round(face.Width), Round(face.Height), SharpColor.Green, Math.Clamp(Round(MathF.Min(face.Width, face.Height) / 50), 2, 50));
             var radius = Math.Clamp(Round(face.Width / 40), 2, 4096);
             foreach (var (point, color) in new[] { (face.RightEye, SharpColor.Blue), (face.LeftEye, SharpColor.Red), (face.NoseTip, SharpColor.Yellow),
                 (face.RightMouthCorner, SharpColor.FromRgb(255, 0, 255)), (face.LeftMouthCorner, SharpColor.Orange) })
                 image.DrawCircle(Round(point.X), Round(point.Y), radius, color, filled: true);
-            image.DrawText(Score(face.Score), x, Math.Max(0, y - 20), SharpColor.White, 16, background: true);
+            var name = names?[index];
+            image.DrawText(string.IsNullOrWhiteSpace(name) ? Score(face.Score) : name, x, Math.Max(0, y - 20), SharpColor.White, 16, background: true);
         }
         return image;
     }

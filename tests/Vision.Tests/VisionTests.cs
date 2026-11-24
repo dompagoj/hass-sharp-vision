@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -14,7 +15,8 @@ using Microsoft.CodeAnalysis.CSharp;
 /// hand-made <see cref="NodeSetupContext"/>, and end to end, saved as library <c>vision</c> and used by an entity
 /// definition. Its download URL and checksum table are rewritten to a loopback server that serves a local
 /// <c>hs_vision</c> build (<see cref="LocalLibrary"/>); without one, the tests that need it are skipped, unless
-/// <c>HS_VISION_REQUIRE_LIBRARY=1</c>.
+/// <c>HS_VISION_REQUIRE_LIBRARY=1</c>. The recogniser's tests serve a local SFace model the same way
+/// (<see cref="LocalModel"/>), and are skipped without one.
 /// </summary>
 static class VisionTests
 {
@@ -59,8 +61,46 @@ static class VisionTests
         }.FirstOrDefault(File.Exists);
     }
 
+    /// <summary>The file name of SFace, the face recognition model, on the release and on disk.</summary>
+    internal const string ModelName = "face_recognition_sface_2021dec.onnx";
+
+    static readonly Lazy<string?> model = new(FindModel);
+
+    /// <summary>
+    /// The SFace model these tests serve: <c>HS_VISION_MODEL</c> when set (it must exist); else
+    /// <c>native/model/face_recognition_sface_2021dec.onnx</c>, from <c>native/fetch-model.sh</c>; null when there is none.
+    /// </summary>
+    internal static string? LocalModel => model.Value;
+
+    static string? FindModel()
+    {
+        if (Environment.GetEnvironmentVariable("HS_VISION_MODEL") is { Length: > 0 } named)
+            return File.Exists(named) ? Path.GetFullPath(named) : throw new Exception($"HS_VISION_MODEL is {named}, which does not exist");
+        var path = Path.Combine(Root, "native", "model", ModelName);
+        return File.Exists(path) ? path : null;
+    }
+
     /// <summary><c>nodes/Vision.cs</c> as committed.</summary>
     internal static string Committed() => File.ReadAllText(Path.Combine(Root, "nodes", "Vision.cs"));
+
+    /// <summary><paramref name="text"/>, a <c>Vision.cs</c>, with its model's pinned SHA-256 set to <paramref name="sha256"/>.</summary>
+    internal static string WithModel(string text, string sha256)
+    {
+        var pin = new Regex("^(\\s*)const string ModelSha256 = \"[^\"]*\";$", RegexOptions.Multiline);
+        Check(pin.Matches(text).Count == 1, "Vision.cs has one ModelSha256 line");
+        return pin.Replace(text, match => $"{match.Groups[1].Value}const string ModelSha256 = \"{sha256}\";");
+    }
+
+    /// <summary>
+    /// <see cref="LocalSource"/>, with <see cref="LocalModel"/> served at <c>/face_recognition_sface_2021dec.onnx</c> too
+    /// and pinned by its checksum.
+    /// </summary>
+    internal static string LocalRecognizerSource(LoopbackServer server)
+    {
+        var bytes = File.ReadAllBytes(LocalModel ?? throw new InvalidOperationException("There is no SFace model"));
+        server.Respond("/" + ModelName, new() { Body = bytes });
+        return WithModel(LocalSource(server), Convert.ToHexStringLower(SHA256.HashData(bytes)));
+    }
 
     /// <summary>
     /// <c>Vision.cs</c> with its <c>Source</c> set to <paramref name="source"/> and its pinned table to
@@ -103,9 +143,14 @@ static class VisionTests
             (nameof(AWrongChecksumNeverLoads), AWrongChecksumNeverLoads),
             (nameof(NotSetUpThrows), NotSetUpThrows),
             (nameof(CompilesAsLibraryVision), CompilesAsLibraryVision),
+            (nameof(AWrongModelChecksumNeverLoads), AWrongModelChecksumNeverLoads),
+            (nameof(ALibraryOfAbi1IsRefused), ALibraryOfAbi1IsRefused),
+            (nameof(SimilarityIsTheDotProduct), SimilarityIsTheDotProduct),
+            (nameof(FrontalNeedsTheEyesApartAndTheNoseBetweenThem), FrontalNeedsTheEyesApartAndTheNoseBetweenThem),
         };
         var failures = new List<string>();
         if (LocalLibrary != null)
+        {
             tests.AddRange([
                 (nameof(FindsTheFacesOfTheFixture), FindsTheFacesOfTheFixture),
                 (nameof(FindsThePeopleOfTheFixtures), FindsThePeopleOfTheFixtures),
@@ -113,7 +158,17 @@ static class VisionTests
                 (nameof(DrawsOnlyWhatFitsUnderTheDrawingLimit), DrawsOnlyWhatFitsUnderTheDrawingLimit),
                 (nameof(DisposeWaitsForADetectionAndLaterCallsFail), DisposeWaitsForADetectionAndLaterCallsFail),
                 (nameof(DetectFacesRunsInAnEntityDefinition), DetectFacesRunsInAnEntityDefinition),
+                (nameof(TheProfileOfTheFixtureIsNotFrontal), TheProfileOfTheFixtureIsNotFrontal),
+                (nameof(DrawsANameInPlaceOfTheScore), DrawsANameInPlaceOfTheScore),
             ]);
+            if (LocalModel != null)
+                tests.AddRange([
+                    (nameof(EmbedsAFaceOfTheFixture), EmbedsAFaceOfTheFixture),
+                    (nameof(EmbedAfterDisposeFails), EmbedAfterDisposeFails),
+                ]);
+            else
+                Console.WriteLine("SKIP vision: no SFace model (native/fetch-model.sh, or HS_VISION_MODEL), so no recogniser is opened");
+        }
         else if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
             failures.Add($"an hs_vision library is required (HS_VISION_REQUIRE_LIBRARY=1) and there is none for {Rid}");
         else
@@ -123,8 +178,8 @@ static class VisionTests
             catch (Exception e) { failures.Add($"{name}: {e}"); }
         if (failures.Count > 0) throw new Exception($"Vision: {failures.Count} failing:\n" + string.Join("\n", failures));
         Console.WriteLine(LocalLibrary != null
-            ? $"PASS vision: Vision.cs downloads hs_vision pinned by checksum, finds and draws faces and people, and Detect faces runs in an entity definition ({LocalLibrary})"
-            : "PASS vision: Vision.cs refuses an unsupported platform and a wrong checksum, and Detect faces refuses to run unset up");
+            ? $"PASS vision: Vision.cs downloads hs_vision pinned by checksum, finds and draws faces and people, Detect faces runs in an entity definition{(LocalModel != null ? ", and the recogniser embeds a face" : "")} ({LocalLibrary})"
+            : "PASS vision: Vision.cs refuses an unsupported platform, a wrong checksum and a library of ABI 1, and Detect faces refuses to run unset up");
     }
 
     // ---- Directly: Vision.cs in a load context of its own ----
@@ -186,6 +241,34 @@ static class VisionTests
             return (IDisposable)task.GetType().GetProperty("Result")!.GetValue(task)!;
         }
 
+        public async Task<IDisposable> OpenRecognizer(string? rid = null)
+        {
+            var task = (Task)Invoke(vision.GetMethod("OpenRecognizerAsync")!, null, Files, rid ?? Rid, CancellationToken.None)!;
+            await task;
+            return (IDisposable)task.GetType().GetProperty("Result")!.GetValue(task)!;
+        }
+
+        /// <summary>The recogniser's embedding of <paramref name="face"/>, a face its detector found in <paramref name="image"/>.</summary>
+        public static object Embed(IDisposable recognizer, SharpImage image, object face) =>
+            Invoke(recognizer.GetType().GetMethod("Embed")!, recognizer, image, face)!;
+
+        /// <summary>A <c>FaceEmbedding</c> of this context.</summary>
+        public object Embedding(float[] values, float fit = 0) => Activator.CreateInstance(vision.Assembly.GetType("NodeLib.FaceEmbedding", true)!, values, fit)!;
+
+        public static float Similarity(object embedding, object other) => (float)Invoke(embedding.GetType().GetMethod("Similarity")!, embedding, other)!;
+
+        /// <summary>A <c>DetectedFace</c> of this context, with a score of 0.9 and both mouth corners below the nose.</summary>
+        public object Face(float x, float y, float width, float height, (float X, float Y) rightEye, (float X, float Y) leftEye, (float X, float Y) noseTip)
+        {
+            var point = vision.Assembly.GetType("NodeLib.VisionPoint", true)!;
+            object Point(float px, float py) => Activator.CreateInstance(point, px, py)!;
+            return Activator.CreateInstance(vision.Assembly.GetType("NodeLib.DetectedFace", true)!, x, y, width, height, 0.9f,
+                Point(rightEye.X, rightEye.Y), Point(leftEye.X, leftEye.Y), Point(noseTip.X, noseTip.Y), Point(rightEye.X, noseTip.Y + 20), Point(leftEye.X, noseTip.Y + 20))!;
+        }
+
+        public float EyeDistance(object face) => (float)Invoke(vision.GetMethod("EyeDistance")!, null, face)!;
+        public bool Frontal(object face) => (bool)Invoke(vision.GetMethod("Frontal")!, null, face)!;
+
         public Task Setup() => (Task)Invoke(detection.GetMethod("Setup")!, null, Setups)!;
 
         public SharpImage DetectFaces(SharpImage image, double minScore = 0.7, int inputSize = 320) =>
@@ -198,7 +281,10 @@ static class VisionTests
         public static object People(IDisposable detector, SharpImage image, int inputSize = 416, double minScore = 0.45) =>
             Invoke(detector.GetType().GetMethod("People")!, detector, image, inputSize, minScore)!;
 
-        public SharpImage DrawFaces(SharpImage image, object faces) => (SharpImage)Invoke(vision.GetMethod("DrawFaces")!, null, image, faces)!;
+        MethodInfo Overload(string name, int parameters) => vision.GetMethods().Single(m => m.Name == name && m.GetParameters().Length == parameters);
+
+        public SharpImage DrawFaces(SharpImage image, object faces) => (SharpImage)Invoke(Overload("DrawFaces", 2), null, image, faces)!;
+        public SharpImage DrawFaces(SharpImage image, object faces, string?[] names) => (SharpImage)Invoke(Overload("DrawFaces", 3), null, image, faces, names)!;
         public SharpImage DrawPeople(SharpImage image, object people) => (SharpImage)Invoke(vision.GetMethod("DrawPeople")!, null, image, people)!;
 
         public ValueTask DisposeAsync()
@@ -289,6 +375,131 @@ static class VisionTests
         Check(preview.Snapshot.Methods.Count == 1, "Detect faces is the library's one node: " + string.Join(", ", preview.Snapshot.Methods.Keys));
         Console.WriteLine($"PASS vision: the library compiler takes Vision.cs as library vision without a diagnostic, and its one node is {DetectFacesKind}, set up by FaceDetection");
         return Task.CompletedTask;
+    }
+
+    static async Task AWrongModelChecksumNeverLoads()
+    {
+        await using var server = LoopbackServer.Start();
+        // The library matches its checksum, so only the model, pinned as committed, is wrong.
+        var library = new byte[4096];
+        new Random(43).NextBytes(library);
+        server.Respond($"/libhs_vision-{Rid}.so", new() { Body = library });
+        var bytes = new byte[4096];
+        new Random(44).NextBytes(bytes);
+        server.Respond("/" + ModelName, new() { Body = bytes });
+        var pinned = Regex.Match(Committed(), "const string ModelSha256 = \"([0-9a-f]{64})\";").Groups[1].Value;
+        Check(pinned == "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79", "Vision.cs pins SFace's SHA-256: " + pinned);
+        await using var vision = new Loaded(Rewritten(server.Url("/"), (Rid, Convert.ToHexStringLower(SHA256.HashData(library)))));
+        await ThrowsAsync<InvalidDataException>(() => vision.OpenRecognizer(), "a model that does not match its checksum");
+        Check(server.Count("/" + ModelName) == 1, "the model was requested once");
+        Check(!vision.LoadedLibrary, "nothing was loaded");
+        var directory = Path.Combine(vision.Directory, pinned);
+        Check(!File.Exists(Path.Combine(directory, ModelName)) && (!System.IO.Directory.Exists(directory) || System.IO.Directory.GetFileSystemEntries(directory).Length == 0),
+            "no model file is left: " + string.Join(", ", System.IO.Directory.Exists(directory) ? System.IO.Directory.GetFileSystemEntries(directory) : []));
+        Console.WriteLine("PASS vision: a model download that does not match SFace's pinned checksum fails with InvalidDataException, loads nothing and leaves no file");
+    }
+
+    /// <summary>A C compiler on the PATH, or null.</summary>
+    static string? Compiler() =>
+        (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Select(directory => Path.Combine(directory, "cc")).FirstOrDefault(File.Exists);
+
+    static async Task ALibraryOfAbi1IsRefused()
+    {
+        if (Compiler() is not { } cc)
+        {
+            Console.WriteLine("SKIP vision: no C compiler (cc) to build a library of ABI 1");
+            return;
+        }
+        // A library whose one export says it is ABI 1, as hs_vision 1.0.0's does.
+        var build = Path.Combine(Path.GetTempPath(), "vision-abi1-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(build);
+        try
+        {
+            File.WriteAllText(Path.Combine(build, "abi1.c"), "unsigned int hs_vision_abi_version(void) { return 1; }\n");
+            var output = Path.Combine(build, OperatingSystem.IsMacOS() ? "libabi1.dylib" : "libabi1.so");
+            var start = new System.Diagnostics.ProcessStartInfo(cc) { RedirectStandardError = true, RedirectStandardOutput = true };
+            foreach (var argument in new[] { "-shared", "-fPIC", "-o", output, Path.Combine(build, "abi1.c") }) start.ArgumentList.Add(argument);
+            using (var compile = System.Diagnostics.Process.Start(start)!)
+            {
+                var errors = await compile.StandardError.ReadToEndAsync();
+                await compile.WaitForExitAsync();
+                Check(compile.ExitCode == 0, "cc builds the ABI 1 library: " + errors);
+            }
+            var library = File.ReadAllBytes(output);
+            var model = new byte[64];
+            await using var server = LoopbackServer.Start();
+            server.Respond($"/libhs_vision-{Rid}.so", new() { Body = library });
+            server.Respond("/" + ModelName, new() { Body = model });
+            var source = WithModel(Rewritten(server.Url("/"), (Rid, Convert.ToHexStringLower(SHA256.HashData(library)))), Convert.ToHexStringLower(SHA256.HashData(model)));
+            await using var vision = new Loaded(source);
+            const string Refused = "The vision library is version 1, not 2: the download does not match this code";
+            var detector = await ThrowsAsync<InvalidOperationException>(() => vision.Open(), "a detector from a library of ABI 1");
+            Check(detector.Message == Refused, "the detector's refusal: " + detector.Message);
+            var recognizer = await ThrowsAsync<InvalidOperationException>(() => vision.OpenRecognizer(), "a recogniser from a library of ABI 1");
+            Check(recognizer.Message == Refused, "the recogniser's refusal: " + recognizer.Message);
+            Check(!vision.LoadedLibrary, "the library is not taken as loaded");
+        }
+        finally { System.IO.Directory.Delete(build, true); }
+        Console.WriteLine("PASS vision: a library of ABI 1 is refused, for a detector and for a recogniser, with the version sentence");
+    }
+
+    static async Task SimilarityIsTheDotProduct()
+    {
+        await using var vision = new Loaded(Committed());
+        var random = new Random(45);
+        float[] Unit()
+        {
+            var values = Enumerable.Range(0, 128).Select(_ => (float)(random.NextDouble() * 2 - 1)).ToArray();
+            var length = MathF.Sqrt(values.Sum(v => v * v));
+            return [.. values.Select(v => v / length)];
+        }
+        var a = Unit();
+        var b = Unit();
+        var embedding = vision.Embedding(a, 0.5f);
+        var self = Loaded.Similarity(embedding, vision.Embedding([.. a]));
+        Check(MathF.Abs(self - 1) < 1e-5f, $"an embedding is 1 like itself: {self}");
+        var opposite = Loaded.Similarity(embedding, vision.Embedding([.. a.Select(v => -v)]));
+        Check(MathF.Abs(opposite + 1) < 1e-5f, $"an embedding is -1 like its opposite: {opposite}");
+        var dot = a.Zip(b).Sum(pair => (double)pair.First * pair.Second);
+        var other = Loaded.Similarity(embedding, vision.Embedding(b));
+        Check(Math.Abs(other - dot) < 1e-5, $"another embedding's similarity is the dot product: {other}, not {dot}");
+        Check(Throws<ArgumentException>(() => Loaded.Similarity(embedding, vision.Embedding(new float[127])), "embeddings of 128 and 127 values").Message
+            == "The two embeddings do not have as many values", "embeddings of different lengths are refused");
+
+        // A caller compares embeddings a great many times: n comparisons, called without reflection, allocate nothing.
+        var type = embedding.GetType();
+        ParameterExpression first = Expression.Parameter(typeof(object)), second = Expression.Parameter(typeof(object)), times = Expression.Parameter(typeof(int));
+        ParameterExpression x = Expression.Variable(type), y = Expression.Variable(type), sum = Expression.Variable(typeof(float)), i = Expression.Variable(typeof(int));
+        var done = Expression.Label(typeof(float));
+        var compare = Expression.Lambda<Func<object, object, int, float>>(Expression.Block([x, y, sum, i],
+            Expression.Assign(x, Expression.Unbox(first, type)), Expression.Assign(y, Expression.Unbox(second, type)),
+            Expression.Assign(sum, Expression.Constant(0f)), Expression.Assign(i, Expression.Constant(0)),
+            Expression.Loop(Expression.IfThenElse(Expression.LessThan(i, times),
+                Expression.Block(Expression.AddAssign(sum, Expression.Call(x, type.GetMethod("Similarity")!, y)), Expression.PreIncrementAssign(i)),
+                Expression.Break(done, sum)), done)), first, second, times).Compile();
+        var them = vision.Embedding(b);
+        compare(embedding, them, 10);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var total = compare(embedding, them, 100_000);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Check(allocated == 0 && float.IsFinite(total), $"100,000 comparisons allocate nothing: {allocated} bytes, summing to {total}");
+        Console.WriteLine($"PASS vision: Similarity is the dot product, 1 for an embedding and itself and -1 for its opposite ({other:0.000} for two random ones)");
+    }
+
+    static async Task FrontalNeedsTheEyesApartAndTheNoseBetweenThem()
+    {
+        await using var vision = new Loaded(Committed());
+        // A 100-pixel box: its eyes must be at least 20 pixels apart.
+        var facing = vision.Face(0, 0, 100, 100, (30, 40), (70, 40), (50, 60));
+        Check(vision.EyeDistance(facing) == 40 && vision.Frontal(facing), "eyes 40 apart with the nose between them are frontal");
+        var tilted = vision.Face(0, 0, 100, 100, (30, 30), (60, 70), (45, 60));
+        Check(vision.EyeDistance(tilted) == 50 && vision.Frontal(tilted), $"the eye distance is the straight line between them: {vision.EyeDistance(tilted)}");
+        Check(vision.Frontal(vision.Face(0, 0, 100, 100, (40, 40), (60, 40), (50, 60))), "eyes a fifth of the box apart are frontal");
+        Check(!vision.Frontal(vision.Face(0, 0, 100, 100, (41, 40), (60, 40), (50, 60))), "eyes closer than a fifth of the box are not");
+        Check(!vision.Frontal(vision.Face(0, 0, 100, 100, (30, 40), (70, 40), (75, 60))), "a nose right of both eyes is not");
+        Check(!vision.Frontal(vision.Face(0, 0, 100, 100, (30, 40), (70, 40), (25, 60))), "a nose left of both eyes is not");
+        Check(vision.Frontal(vision.Face(0, 0, 100, 100, (70, 40), (30, 40), (50, 60))), "the eyes' order across the picture does not matter");
+        Console.WriteLine("PASS vision: a face is frontal when its eyes are at least a fifth of its box apart and its nose tip is between them across the picture");
     }
 
     /// <summary>A <see cref="Loaded"/> of <see cref="LocalSource"/> on a server of its own, set up: its detector is the one it owns.</summary>
@@ -439,6 +650,121 @@ static class VisionTests
         IsClosed(Throws<ObjectDisposedException>(() => Loaded.Faces(detector, group), "Faces after a second Dispose"), "Faces after a second Dispose");
         Check(Throws<InvalidOperationException>(() => rig.Vision.DetectFaces(group), "Detect faces after a second Dispose").Message == Stopped, "Detect faces still says it has stopped");
         Console.WriteLine($"PASS vision: the detector closed under 4 detecting threads ({calls.Sum()} calls) ends each on the closed sentence, Detect faces then says it has stopped, and a second Dispose does nothing");
+    }
+
+    static async Task TheProfileOfTheFixtureIsNotFrontal()
+    {
+        await using var rig = await SetUp.Start();
+        var faces = Items(Loaded.Faces(rig.Detector, Photo("group.jpg"), 640));
+        Check(faces.Length == 8, $"group.jpg has 8 faces at 640, the profile among them, not {faces.Length}");
+        static (float X, float Y) Point(object face, string landmark)
+        {
+            var point = face.GetType().GetProperty(landmark)!.GetValue(face)!;
+            return (Get(point, "X"), Get(point, "Y"));
+        }
+        foreach (var face in faces)
+        {
+            var (right, left) = (Point(face, "RightEye"), Point(face, "LeftEye"));
+            var distance = MathF.Sqrt((left.X - right.X) * (left.X - right.X) + (left.Y - right.Y) * (left.Y - right.Y));
+            Check(MathF.Abs(rig.Vision.EyeDistance(face) - distance) < 1e-4f, $"the eye distance is the eyes' distance: {rig.Vision.EyeDistance(face)}, not {distance}");
+        }
+        // The profile, looking to the right of the picture, is the leftmost face.
+        var profile = faces.MinBy(face => Get(face, "X"))!;
+        var notFrontal = faces.Where(face => !rig.Vision.Frontal(face)).ToArray();
+        string Described(object face)
+        {
+            var (right, left, nose) = (Point(face, "RightEye"), Point(face, "LeftEye"), Point(face, "NoseTip"));
+            var (low, high) = (MathF.Min(right.X, left.X), MathF.Max(right.X, left.X));
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"({Get(face, "X"):0},{Get(face, "Y"):0}) {Get(face, "Width"):0} wide: eyes {rig.Vision.EyeDistance(face):0.0} apart ({rig.Vision.EyeDistance(face) / Get(face, "Width"):0.00} of the width), nose {(high > low ? (nose.X - low) / (high - low) : float.NaN):0.00} of the way between them, {(rig.Vision.Frontal(face) ? "frontal" : "not frontal")}");
+        }
+        Check(notFrontal.Length == 1 && ReferenceEquals(notFrontal[0], profile), "only the profile is not frontal: " + string.Join(" | ", faces.Select(Described)));
+        Console.WriteLine("PASS vision: of group.jpg's 8 faces at 640, the profile is not frontal and the other 7 are: " + string.Join(" | ", faces.Select(Described)));
+    }
+
+    static async Task DrawsANameInPlaceOfTheScore()
+    {
+        await using var rig = await SetUp.Start();
+        var group = Photo("group.jpg");
+        var found = Loaded.Faces(rig.Detector, group);
+        var faces = Items(found);
+        Check(faces.Length == 7, $"group.jpg has 7 faces at 320, not {faces.Length}");
+        var plain = rig.Vision.DrawFaces(group.Copy(), found).ToPixels();
+
+        // Without a name, a face's score is drawn, as DrawFaces draws it; a blank name is none.
+        var unnamed = rig.Vision.DrawFaces(group.Copy(), found, [null, "", " ", null, null, null, null]);
+        Check(unnamed.Drawings == 7 * 7 && unnamed.ToPixels().AsSpan().SequenceEqual(plain), $"without names, DrawFaces draws what it draws without them: {unnamed.Drawings} drawings");
+
+        // With names, each in place of its face's score: the picture changes only where those two labels are.
+        string?[] names = ["Ana", null, null, "Marko", null, null, null];
+        var named = rig.Vision.DrawFaces(group.Copy(), found, names);
+        Check(named.Drawings == 7 * 7, $"a named face is drawn with 7 drawings too: {named.Drawings}");
+        var pixels = named.ToPixels();
+        var width = group.Width;
+        bool InLabel(int at, int face)
+        {
+            int column = at / 3 % width, row = at / 3 / width;
+            int x = (int)MathF.Round(Get(faces[face], "X")), y = (int)MathF.Round(Get(faces[face], "Y"));
+            return column >= x - 2 && row >= Math.Max(0, y - 20) - 2 && row <= y + 4;
+        }
+        var changed = Enumerable.Range(0, pixels.Length).Where(at => pixels[at] != plain[at]).ToArray();
+        Check(changed.Any(at => InLabel(at, 0)) && changed.Any(at => InLabel(at, 3)), "both names change their labels");
+        Check(changed.All(at => InLabel(at, 0) || InLabel(at, 3)), $"nothing but the two labels changes: {changed.Count(at => !InLabel(at, 0) && !InLabel(at, 3))} bytes elsewhere");
+
+        // A name goes with its face, in whatever order the faces are given.
+        var reversed = Array.CreateInstance(faces[0].GetType(), faces.Length);
+        for (var i = 0; i < faces.Length; i++) reversed.SetValue(faces[faces.Length - 1 - i], i);
+        Check(rig.Vision.DrawFaces(group.Copy(), reversed, [.. names.Reverse()]).ToPixels().AsSpan().SequenceEqual(pixels), "the faces and names reversed draw the same");
+
+        var refused = Throws<ArgumentException>(() => rig.Vision.DrawFaces(group.Copy(), found, ["Ana"]), "one name for seven faces");
+        Check(refused.Message == "There is one name, or null, for each face", "the names' sentence: " + refused.Message);
+        Console.WriteLine($"PASS vision: DrawFaces with names draws a face's name in place of its score, and its score without one ({changed.Length} bytes of two labels changed)");
+    }
+
+    static async Task EmbedsAFaceOfTheFixture()
+    {
+        await using var server = LoopbackServer.Start();
+        await using var vision = new Loaded(LocalRecognizerSource(server));
+        using var detector = await vision.Open();
+        var group = Photo("group.jpg");
+        var faces = Items(Loaded.Faces(detector, group, 640));
+        using var recognizer = await vision.OpenRecognizer();
+        Check(recognizer.GetType().GetInterfaces().Any(i => i.Name == "IFaceRecognizer"), "the recogniser is an IFaceRecognizer");
+        static (float[] Values, float Fit) Parts(object embedding) =>
+            ((float[])embedding.GetType().GetProperty("Values")!.GetValue(embedding)!, (float)embedding.GetType().GetProperty("Fit")!.GetValue(embedding)!);
+
+        var first = Loaded.Embed(recognizer, group, faces[0]);
+        var (values, fit) = Parts(first);
+        var length = MathF.Sqrt(values.Sum(v => v * v));
+        Check(values.Length == 128 && MathF.Abs(length - 1) < 1e-4f, $"128 values of length 1: {values.Length} of length {length}");
+        Check(float.IsFinite(fit) && fit >= 0, $"the fit is a distance: {fit}");
+        var again = Loaded.Embed(recognizer, group, faces[0]);
+        Check(Parts(again).Values.AsSpan().SequenceEqual(values) && Parts(again).Fit == fit, "the same face gives the same embedding twice");
+        Check(MathF.Abs(Loaded.Similarity(first, again) - 1) < 1e-5f, "an embedding is 1 like itself");
+        var other = Loaded.Similarity(first, Loaded.Embed(recognizer, group, faces[1]));
+        Check(other < 0.5f, $"another person of group.jpg is less alike than a match: {other}");
+
+        // A second recogniser uses the model already downloaded, and gives the same.
+        using var second = await vision.OpenRecognizer();
+        Check(server.Count("/" + ModelName) == 1, $"the model was requested once: {server.Count("/" + ModelName)}");
+        Check(Parts(Loaded.Embed(second, group, faces[0])).Values.AsSpan().SequenceEqual(values), "a second recogniser gives the same embedding");
+        Console.WriteLine($"PASS vision: the recogniser turns a face of group.jpg into 128 values of length 1 (fit {fit:0.00}), the same twice and from a second recogniser, and another person's is {other:0.00} like it");
+    }
+
+    static async Task EmbedAfterDisposeFails()
+    {
+        await using var server = LoopbackServer.Start();
+        await using var vision = new Loaded(LocalRecognizerSource(server));
+        var recognizer = await vision.OpenRecognizer();
+        var image = SharpImage.Blank(64, 48);
+        var face = vision.Face(10, 10, 40, 30, (20, 20), (40, 20), (30, 28));
+        recognizer.Dispose();
+        void IsRecogniserClosed(ObjectDisposedException closed, string what) =>
+            Check(closed.ObjectName == "VisionRecognizer" && closed.Message.StartsWith("The vision recogniser has been closed", StringComparison.Ordinal), $"{what} gives the closed sentence: {closed.Message}");
+        IsRecogniserClosed(Throws<ObjectDisposedException>(() => Loaded.Embed(recognizer, image, face), "Embed after Dispose"), "Embed after Dispose");
+        recognizer.Dispose();
+        IsRecogniserClosed(Throws<ObjectDisposedException>(() => Loaded.Embed(recognizer, image, face), "Embed after a second Dispose"), "Embed after a second Dispose");
+        Console.WriteLine("PASS vision: Embed after the recogniser closed gives the closed sentence, and a second Dispose does nothing");
     }
 
     // ---- End to end: saved as library vision, run by an entity definition ----
