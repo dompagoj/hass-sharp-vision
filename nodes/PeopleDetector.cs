@@ -923,16 +923,20 @@ public class PeopleDetector : SharpDevice
     // The person is written before the group goes, and not the other way: a stop between the two leaves the group, which
     // matches the person at the next start and goes, rather than a group gone with no person made of it. The lock makes
     // no order better: a stop ends the process whatever it holds.
+    // Naming is a sighting of the person here, at the group's last: their last seen moves to it when it is later, at once,
+    // so that the page does not say "not seen yet" of a face it has just seen. It is not a check's face, and Recognised is
+    // not touched.
     void SaveFace(string groupId, string? personId, UiValues? newPerson)
     {
         lock (lists)
         {
-            if (Unknown.Find(groupId) == null) throw new UiRefusal(FaceGone);
+            if (Unknown.Find(groupId) is not { } group) throw new UiRefusal(FaceGone);
             var samples = Unknown.Samples(groupId);
             if (samples.Count == 0) throw new UiRefusal(NoPicture);
             var person = personId != null ? People.AddSamples(personId, samples, learned: false)
                 : newPerson != null ? People.Add(newPerson["first_name"], newPerson["last_name"], samples)
                 : throw new UiRefusal(NoPerson);
+            People.Named(person.Id, group.Last, cameraId);
             Unknown.Named(groupId, person.Id);
             // Other groups of the same face are now recognised, and go too.
             Rematch(People.People);

@@ -99,6 +99,7 @@ static class PeopleDetectorTests
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
                 (nameof(StopClosesTheRecogniserAndARestartKeepsPeopleAndGroups), StopClosesTheRecogniserAndARestartKeepsPeopleAndGroups),
                 (nameof(ThePageListsTheUnknownFacesToNameOrDismiss), ThePageListsTheUnknownFacesToNameOrDismiss),
+                (nameof(NamingAFaceIsASightingOfItsPerson), NamingAFaceIsASightingOfItsPerson),
                 (nameof(AStrangerIsDismissed), AStrangerIsDismissed),
                 (nameof(ThePageListsThePeopleToRenameMergeAndDelete), ThePageListsThePeopleToRenameMergeAndDelete),
                 (nameof(ThePageListsAPersonsSamplesToRemove), ThePageListsAPersonsSamplesToRemove),
@@ -1247,11 +1248,14 @@ static class PeopleDetectorTests
         await Checks(2, "two checks with B alone");
         Check(await Press(rig, "unknown", aId, "save", new { person = NewPerson(Ivan) }) == "done", "Save of A's card as Ivan");
         var list = PeopleOf(rig);
+        // The naming is a sighting of Ivan, at A's card's last; a check's is later.
+        DateTimeOffset? named = Reread(list, Ivan).LastSeen;
+        Check(named != null, "the naming is a sighting of Ivan");
         var seen = Sightings();
         await Checks(5, "five checks with B alone");
         var card = CardOf(Page(rig), "unknown", bId);
         Check(CardsOf(Page(rig), "unknown").Length == 1 && card != null && Detail(card) == null, "B's card stays, and does not suggest Ivan: " + Page(rig)?.ToJsonString());
-        Check(Names().Length == 0 && Reread(list, Ivan).LastSeen == null, "B alone is not named Ivan, and Ivan is not seen: " + string.Join(", ", Names()));
+        Check(Names().Length == 0 && Reread(list, Ivan).LastSeen == named, "B alone is not named Ivan, and Ivan is not seen: " + string.Join(", ", Names()));
         Check(Sightings() > seen, "B's card counts his checks");
 
         // Both in view: A is Ivan, and B's card keeps counting.
@@ -1259,7 +1263,7 @@ static class PeopleDetectorTests
         seen = Sightings();
         await Checks(5, "five checks with both");
         Check(Names().SequenceEqual([First(Ivan)]), "A is named Ivan, and B is not: " + string.Join(", ", Names()));
-        Check(Reread(list, Ivan).LastSeen != null && Sightings() > seen && CardsOf(Page(rig), "unknown").Length == 1, "Ivan is seen, and B's card counts");
+        Check(Reread(list, Ivan).LastSeen > named && Sightings() > seen && CardsOf(Page(rig), "unknown").Length == 1, "Ivan is seen, and B's card counts");
 
         // B alone again, after Ivan was seen with him.
         fake.Embeds(first, a, fit: 9);
@@ -1778,6 +1782,52 @@ static class PeopleDetectorTests
         Check(CardsOf(Page(rig), "unknown").Length == 0, "the maybe's card is gone");
         NoNameIsLogged(rig);
         Console.WriteLine("PASS people detector: the page draws the people as a set of options first, and lists each shown group with its crop, its sightings and a required Person chosen from them (a maybe's chosen) or a new person; Save makes a person of the two names or adds to the one chosen by id, refuses a name someone has, and the attention counts the groups");
+    }
+
+    // Naming a group is a sighting of its person at this camera, at the group's last sighting: a new person's card and option
+    // say so at once; a person last seen earlier, here within the minute, moves forward; one seen since at another camera stays.
+    static async Task NamingAFaceIsASightingOfItsPerson()
+    {
+        using var cameras = Cameras(("camera.porch", "Porch camera"));
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("page-sighting");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        // Ana is recognised at each check, her last seen written at the first only: the checks take less than a minute.
+        fake.Embeds(0, PeopleTests.At(PeopleTests.Unit(1), 0.8, 11));
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 3, "three strangers are drawn: " + Page(rig)?.ToJsonString(), 10);
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        var groups = Shown(rig);
+        DateTimeOffset LastOf(int group) => (DateTimeOffset)groups[group].Last;
+        (DateTimeOffset? At, string? Camera) SeenOf(string name)
+        {
+            var person = Reread(list, name);
+            return (person.LastSeen, person.LastSeenAt);
+        }
+        Check(SeenOf(Ana).At < LastOf(1) && SeenOf(Ana).Camera == "camera.porch", $"Ana was last written as seen before the groups' last sighting: {SeenOf(Ana)} | {LastOf(1):O}");
+        // Ivan is seen at the hall after the groups were last seen here.
+        var atTheHall = DateTimeOffset.UtcNow;
+        list.Seen((string)ivan.Id, atTheHall, "camera.hall");
+
+        Check(await Press(rig, "unknown", (string)groups[0].Id, "save", new { person = NewPerson(Mia) }) == "done", "Save of a new person");
+        Check(SeenOf(Mia) == (LastOf(0), "camera.porch"), $"Mia is last seen at the group's last sighting, here: {SeenOf(Mia)} | {LastOf(0):O}");
+        var mia = (string)Reread(list, Mia).Id;
+        Check(Detail(CardOf(Page(rig), "people", mia)!)!.EndsWith($" · last seen {Moment} at Porch camera", StringComparison.Ordinal), "her card says so at once: " + Page(rig)?.ToJsonString());
+        Check(((string?)OptionsOf(Page(rig)).Single(o => (string)o["id"]! == mia)["detail"])!.EndsWith($" · last seen {Moment} at Porch camera", StringComparison.Ordinal),
+            "and her option: " + Page(rig)?["options"]?.ToJsonString());
+
+        Check(await Press(rig, "unknown", (string)groups[1].Id, "save", new { person = Picked((string)ana.Id) }) == "done", "Save of Ana, chosen");
+        Check(SeenOf(Ana) == (LastOf(1), "camera.porch"), $"Ana's last seen moves forward to the group's last sighting, within the minute of the one written: {SeenOf(Ana)} | {LastOf(1):O}");
+
+        Check(await Press(rig, "unknown", (string)groups[2].Id, "save", new { person = Picked((string)ivan.Id) }) == "done", "Save of Ivan, chosen");
+        Check(SeenOf(Ivan) == (atTheHall, "camera.hall"), $"Ivan, seen at the hall since, stays: {SeenOf(Ivan)}");
+        Check(Detail(CardOf(Page(rig), "people", (string)ivan.Id)!)!.EndsWith($" · last seen {Moment} at camera.hall", StringComparison.Ordinal), "his card names the hall: " + Page(rig)?.ToJsonString());
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: naming a face is a sighting of its person at the group's last sighting here, written at once, and never moves last seen back");
     }
 
     static async Task AStrangerIsDismissed()

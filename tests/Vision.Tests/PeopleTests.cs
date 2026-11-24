@@ -252,6 +252,7 @@ static class PeopleTests
             (nameof(TheLastNamedSampleIsKept), Sync(TheLastNamedSampleIsKept)),
             (nameof(DeleteRemovesEveryKey), Sync(DeleteRemovesEveryKey)),
             (nameof(SeenIsWrittenAtMostOnceAMinute), Sync(SeenIsWrittenAtMostOnceAMinute)),
+            (nameof(NamingIsASightingWrittenAtOnce), Sync(NamingIsASightingWrittenAtOnce)),
             (nameof(TwoListsAddAtOnceAndLoseNoName), TwoListsAddAtOnceAndLoseNoName),
             (nameof(ChangedReachesTheOtherList), ChangedReachesTheOtherList),
             (nameof(AListReloadsToEmptyAfterAClear), AListReloadsToEmptyAfterAClear),
@@ -735,6 +736,28 @@ static class PeopleTests
         list.Seen("gone0000", T0, Camera);
         Check(((object[])Items(List(home.Restarted()).People)).Length == 1, "a sighting of no one adds no one");
         Console.WriteLine("PASS people: last seen is written at most once a minute a person");
+    }
+
+    static void NamingIsASightingWrittenAtOnce()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        string id = list.Add(Named("Ana"), null, Samples(Seeded(960))).Id;
+        (DateTimeOffset? At, string? Camera) Stored()
+        {
+            var ana = Only(List(home.Restarted()), "Ana");
+            return (ana.LastSeen, ana.LastSeenAt);
+        }
+        list.Seen(id, T0, Camera);
+        list.Named(id, T0.AddSeconds(30), "camera.porch");
+        Check(Stored() == (T0.AddSeconds(30), "camera.porch"), "a naming within a minute of a sighting written is written all the same: " + Stored());
+        list.Named(id, T0.AddSeconds(10), Camera);
+        Check(Stored() == (T0.AddSeconds(30), "camera.porch"), "an earlier one does not move last seen back: " + Stored());
+        list.Named(id, T0.AddSeconds(31), Camera);
+        Check(Stored() == (T0.AddSeconds(31), Camera), "a later one moves it forward, a second later too: " + Stored());
+        list.Named("gone0000", T0, Camera);
+        Check(((object[])Items(List(home.Restarted()).People)).Length == 1, "a naming of no one adds no one");
+        Console.WriteLine("PASS people: a naming is a sighting written at once, whatever the minute, and never moves last seen back");
     }
 
     // ---- Two lists on one store ----

@@ -515,6 +515,26 @@ public sealed class PeopleList
             if (seen.TryGetValue(personId, out var last) && (at - last).Duration() < SeenEvery) return;
             seen[personId] = at;
         }
+        WriteSeen(personId, at, camera);
+    }
+
+    /// <summary>
+    /// Notes that a person was named from faces a camera saw, last at <paramref name="at"/>: a sighting, written at once
+    /// whatever the once-a-minute rule of <see cref="Seen"/>, that never moves last seen back. A person no longer in the
+    /// list, or a list that cannot be written, is left as it is.
+    /// </summary>
+    public void Named(string personId, DateTimeOffset at, string camera)
+    {
+        if (!IsId(personId) || Find(personId) == null) return;
+        try { WriteSeen(personId, at, camera); }
+        // The naming is done: a store that refuses the last seen loses only that.
+        catch (InvalidDataException) { }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
+    }
+
+    // Last seen written, unless the person's is as late already; a record gone meanwhile stays gone.
+    void WriteSeen(string personId, DateTimeOffset at, string camera)
+    {
         try { CheckFormat(); }
         catch (PeopleRefusal) { return; }
         var written = data.Update<StoredPerson>(RecordKey(personId), current =>
