@@ -193,6 +193,9 @@ static class PeopleTests
         /// <summary>The shared store, as the detector of definition <paramref name="definition"/> opens it; its <c>Changed</c> actions run off the writer's thread.</summary>
         public SharpData Open(string definition) => Stores.OpenShared(StoreName, new DataUser(definition, "front_door", action => Task.Run(action)));
 
+        /// <summary>The shared store, as a detector opens it whose <c>Changed</c> actions never run: a list on it reloads only when it writes.</summary>
+        public SharpData Deaf(string definition) => Stores.OpenShared(StoreName, new DataUser(definition, "front_door", _ => Task.CompletedTask));
+
         /// <summary>The shared store after a restart: a new <see cref="DataStores"/> on the same root, reading from disk.</summary>
         public SharpData Restarted(string definition = "after") => new DataStores(Root).OpenShared(StoreName, new DataUser(definition, "front_door", action => Task.Run(action)));
 
@@ -251,6 +254,7 @@ static class PeopleTests
             (nameof(AFullPersonGivenALookTheyHaveKeepsWhatTheyHad), Sync(AFullPersonGivenALookTheyHaveKeepsWhatTheyHad)),
             (nameof(SeveralNamedSamplesAreJudgedOneAfterTheOther), Sync(SeveralNamedSamplesAreJudgedOneAfterTheOther)),
             (nameof(LearnedSamplesTakeNoPartInWhichNamedOnesStay), Sync(LearnedSamplesTakeNoPartInWhichNamedOnesStay)),
+            (nameof(ASampleAnotherListAddedIsJudgedWhileTheStoreIsHeld), Sync(ASampleAnotherListAddedIsJudgedWhileTheStoreIsHeld)),
             (nameof(ANewPersonGivenMoreThanFitKeepsTheMostDifferent), Sync(ANewPersonGivenMoreThanFitKeepsTheMostDifferent)),
             (nameof(ACropOverOneMebibyteIsRefused), Sync(ACropOverOneMebibyteIsRefused)),
             (nameof(The201stPersonIsRefused), Sync(The201stPersonIsRefused)),
@@ -762,6 +766,40 @@ static class PeopleTests
     }
 
     static object[] LearnedOf(dynamic person) => ((object[])Items(person.Samples)).Where(s => ((dynamic)s).Learned).ToArray();
+
+    static void ASampleAnotherListAddedIsJudgedWhileTheStoreIsHeld()
+    {
+        using var home = new Home();
+        // List a never hears of list b's changes, so it has in memory only what it wrote.
+        var a = List(home.Deaf("def-a"));
+        var b = List(home.Open("def-b"));
+        void Within(Action action, string what) => Check(Task.Run(action).Wait(TimeSpan.FromSeconds(10)), what + " finishes: it reads inside the store's update");
+
+        // Ana is one short of full; b gives her a 20th, 0.9 alike to her sample on axis 0 and newer, which a does not have.
+        string anaId = a.Add(Named("Ana"), null, Samples(Enumerable.Range(0, 19).Select(axis => (object)Look(Axis(axis), 7200 + axis)).ToArray())).Id;
+        b.AddSamples(anaId, Samples(Look(Between(0, 30, 0.9), 7230)), false);
+        Check(NamedSeeds((object)Only(a, "Ana")).Length == 19, "list a still has her 19");
+        // A new look from a: b's sample makes the closest pair with axis 0's, as alike to the rest, so the older, axis 0's, goes.
+        object? ana = null;
+        Within(() => ana = (object)a.AddSamples(anaId, Samples(Look(Axis(40), 7240)), false), "the save");
+        Check(NamedSeeds(ana!).SequenceEqual([.. Enumerable.Range(7201, 18), 7230, 7240]),
+            "b's sample was judged with its embedding: the older of the pair it makes goes, not b's, and she has 20: " + string.Join(", ", NamedSeeds(ana!)));
+
+        // The same in a merge: Mia is one short, b gives her a 20th, and a merges Ivan's new look into her.
+        string miaId = a.Add(Named("Mia"), null, Samples(Enumerable.Range(0, 19).Select(i => (object)Look(Axis(50 + i), 7300 + i)).ToArray())).Id;
+        string ivanId = a.Add(Named("Ivan"), null, Samples(Look(Axis(80), 7340))).Id;
+        b.AddSamples(miaId, Samples(Look(Between(50, 90, 0.9), 7330)), false);
+        Check(NamedSeeds((object)Only(a, "Mia")).Length == 19, "list a still has her 19");
+        Within(() => a.Merge(ivanId, miaId), "the merge");
+        var mia = Only(a, "Mia");
+        Check(NamedSeeds((object)mia).SequenceEqual([.. Enumerable.Range(7301, 18), 7330, 7340]),
+            "the merge judged b's sample too: " + string.Join(", ", NamedSeeds((object)mia)));
+
+        var check = home.Restarted("check");
+        Check(SampleKeys(check, anaId).Length == 40 && SampleKeys(check, miaId).Length == 40 && check.Keys($"samples/{ivanId}/").Count == 0, "only the samples they list have keys");
+        Check(!OnDisk(home, 7200) && !OnDisk(home, 7300) && OnDisk(home, 7230) && OnDisk(home, 7330), "no file holds the crop of a sample that went");
+        Console.WriteLine("PASS people: a named sample another list added meanwhile is read and judged while the store is held, in a save and in a merge");
+    }
 
     static void ANewPersonGivenMoreThanFitKeepsTheMostDifferent()
     {
