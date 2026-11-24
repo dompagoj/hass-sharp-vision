@@ -418,6 +418,20 @@ static class PeopleDetectorTests
         return arguments;
     }
 
+    /// <summary>
+    /// Waits up to <paramref name="limit"/> (5 s unless given) for the condition, then fails with what
+    /// <paramref name="what"/> says at that moment, so the message is the state it timed out in.
+    /// </summary>
+    static async Task Until(Func<bool> condition, Func<string> what, double limit = 5)
+    {
+        var clock = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (clock.Elapsed >= TimeSpan.FromSeconds(limit)) throw new Exception("timed out waiting: " + what());
+            await Task.Delay(5);
+        }
+    }
+
     /// <summary>Waits up to <paramref name="limit"/> (5 s unless given) for the condition, then fails naming what it waited for.</summary>
     static async Task Until(Func<bool> condition, string what, double limit = 5)
     {
@@ -1258,6 +1272,9 @@ static class PeopleDetectorTests
         string aId = Shown(rig).Single(group => HoldsFace(unknown, group, a)).Id;
         string bId = Shown(rig).Single(group => HoldsFace(unknown, group, b)).Id;
         Check(await Press(rig, "unknown", aId, "save", new { person = NewPerson(Ivan) }) == "done", "Save of A's card as Ivan");
+        // A, still in view, is recognised as Ivan, which begins his visit: he is the last recognised from then on, so what
+        // follows does not depend on whether a check saw A between the Save and A going out of view.
+        await Until(() => Sensor(rig).StartsWith($"{Ivan} | [{Ivan}] |", StringComparison.Ordinal), () => "A is recognised as Ivan: " + Sensor(rig), 10);
         int Sightings() => (int)unknown.Find(bId).Sightings;
         async Task Checks(int count)
         {
@@ -1273,7 +1290,7 @@ static class PeopleDetectorTests
         fake.Turns(last, (float)TurnLimit - 0.03f);
         await Checks(2);
         var seen = Sightings();
-        await Until(() => Sensor(rig) == "Unknown | [] | [] | 1 | -", "the turned face of B is an unknown face: " + Sensor(rig), 10);
+        await Until(() => Sensor(rig) == $"Unknown | [] | [] | 1 | {Ivan}", () => "the turned face of B is an unknown face: " + rig.Shown("recognised"), 10);
         await Checks(3);
         Check(Sightings() > seen && Shown(rig).Length == 1, $"and a sighting of B's card, the only one: {seen} to {Sightings()}, {Shown(rig).Length} cards");
         Check(fake.Placed().Length > 0 && fake.Placed().All(p => PastTheFrontalRule(p.Face)), "B's face is past the frontal rule");
@@ -1282,11 +1299,11 @@ static class PeopleDetectorTests
         var other = Enumerable.Range(300, 200).Select(seed => PeopleTests.At(a, 0.45, seed))
             .First(face => Maybe(face) && PeopleTests.Cosine(face, b) < 0.4 && PeopleTests.Cosine(face, turned) < 0.4);
         fake.Embeds(last, other);
-        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", "a turned maybe of Ivan alone is no unknown face: " + Sensor(rig), 10);
+        await Until(() => Sensor(rig) == $"Nobody | [] | [] | 0 | {Ivan}", () => "a turned maybe of Ivan alone is no unknown face: " + rig.Shown("recognised"), 10);
         seen = Sightings();
         var groups = AllGroups(unknown).Length;
         await Checks(5);
-        Check(Sightings() == seen && AllGroups(unknown).Length == groups && Sensor(rig) == "Nobody | [] | [] | 0 | -",
+        Check(Sightings() == seen && AllGroups(unknown).Length == groups && Sensor(rig) == $"Nobody | [] | [] | 0 | {Ivan}",
             $"it is neither a sighting of B's card nor a group of its own: {seen} to {Sightings()}, {groups} to {AllGroups(unknown).Length} groups, " + Sensor(rig));
         NoNameIsLogged(rig);
         Console.WriteLine("PASS people detector: a turned face that is a maybe of a person but more alike to a card known not to be them is that card's and counts, and a turned maybe no card is alike to is neither");
