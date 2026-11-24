@@ -1,0 +1,779 @@
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Text;
+using HassSharp;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+
+/// <summary>
+/// <c>nodes/People.cs</c>, compiled with <c>nodes/Vision.cs</c> as the library compiler builds them (one assembly, each
+/// wrapped in <c>NodeLib</c>), over real device data: shared stores under a temporary directory, opened as two detectors
+/// in two definitions open <c>Shared("hass-sharp-vision.people")</c>. The embeddings are made up: unit vectors built from
+/// a seed, and vectors at a chosen cosine from another. No native library is needed.
+/// </summary>
+static class PeopleTests
+{
+    const string StoreName = "hass-sharp-vision.people";
+    const string Camera = "camera.front_door";
+    const string LastNamed = "The last sample a person was named with cannot be removed; delete the person instead.";
+
+    static void Check(bool ok, string message) { if (!ok) throw new Exception(message); }
+
+    // ---- People.cs and Vision.cs, compiled together ----
+
+    static readonly Lazy<Assembly> library = new(Compile);
+
+    /// <summary>
+    /// <c>Vision.cs</c> and <c>People.cs</c> compiled into one assembly as the library compiler does (each wrapped in
+    /// <c>NodeLib</c>, with the global usings, the framework's references and unsafe code), without a warning, and loaded
+    /// into a load context of their own.
+    /// </summary>
+    static Assembly Compile()
+    {
+        var parse = new CSharpParseOptions(LanguageVersion.Latest);
+        var trees = new[] { "Vision.cs", "People.cs" }
+            .Select(file => CSharpSyntaxTree.ParseText(NodeLibraryCompiler.WrapSource(File.ReadAllText(Path.Combine(VisionTests.Root, "nodes", file))), parse, path: file))
+            .Append(CSharpSyntaxTree.ParseText(DiagnosticsProvider.GlobalUsings, parse));
+        var compilation = CSharpCompilation.Create("People" + Guid.NewGuid().ToString("N"), trees, NodeLibraryCompiler.FrameworkReferences(),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true, nullableContextOptions: NullableContextOptions.Enable));
+        using var image = new MemoryStream();
+        var emitted = compilation.Emit(image);
+        var problems = emitted.Diagnostics.Where(d => d.Severity >= DiagnosticSeverity.Warning).ToArray();
+        Check(emitted.Success && problems.Length == 0, "People.cs compiles with Vision.cs without a warning: " + string.Join(" | ", problems.Select(d => d.ToString())));
+        image.Position = 0;
+        return new AssemblyLoadContext("people-tests").LoadFromStream(image);
+    }
+
+    static Type Type(string name) => library.Value.GetType("NodeLib." + name, true)!;
+
+    static object? Invoke(MethodInfo method, object? target, params object?[] arguments) =>
+        method.Invoke(target, BindingFlags.DoNotWrapExceptions, null, arguments, null);
+
+    static dynamic Embedding(float[] values, float fit = 1.5f) => Activator.CreateInstance(Type("FaceEmbedding"), values, fit)!;
+
+    static dynamic NewSample(float[] values, byte[] crop, DateTimeOffset at, string camera = Camera, float fit = 1.5f) =>
+        Activator.CreateInstance(Type("NewSample"), (object)Embedding(values, fit), crop, at, camera)!;
+
+    /// <summary>An array of <c>NewSample</c>s, which a <c>PeopleList</c> takes as its <c>IEnumerable&lt;NewSample&gt;</c>.</summary>
+    static dynamic Samples(params object[] samples)
+    {
+        var array = Array.CreateInstance(Type("NewSample"), samples.Length);
+        for (var i = 0; i < samples.Length; i++) array.SetValue(samples[i], i);
+        return array;
+    }
+
+    /// <summary>A person of made-up samples, all named, for the matcher.</summary>
+    static dynamic Person(string id, params float[][] samples)
+    {
+        var array = Array.CreateInstance(Type("FaceSample"), samples.Length);
+        for (var i = 0; i < samples.Length; i++)
+            array.SetValue(Activator.CreateInstance(Type("FaceSample"), $"{id}s{i}", (object)Embedding(samples[i]), DateTimeOffset.UnixEpoch, Camera, false), i);
+        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null)!;
+    }
+
+    static dynamic People(params object[] people)
+    {
+        var array = Array.CreateInstance(Type("Person"), people.Length);
+        for (var i = 0; i < people.Length; i++) array.SetValue(people[i], i);
+        return array;
+    }
+
+    static dynamic DefaultRules => Type("RecognitionRules").GetProperty("Default")!.GetValue(null)!;
+
+    static dynamic Rules(double matchScore, double matchMargin = 0.10, double suggestScore = 0.40) =>
+        Activator.CreateInstance(Type("RecognitionRules"), matchScore, matchMargin, suggestScore, 0.60, 0.15, 16.0, 24.0, 7.0)!;
+
+    static dynamic Match(float[] face, object people, object? rules = null) =>
+        Invoke(Type("FaceMatcher").GetMethod("Match")!, null, (object)Embedding(face), people, rules ?? DefaultRules)!;
+
+    /// <summary>A <c>PeopleList</c> over <paramref name="data"/>; <paramref name="changed"/> runs after it reloads for another's change.</summary>
+    static dynamic List(SharpData data, Func<Task>? changed = null) => Activator.CreateInstance(Type("PeopleList"), data, changed)!;
+
+    /// <summary>
+    /// The items of a list of the compiled library's. Called with a dynamic value, as it always is here, it gives a dynamic
+    /// one, so each call is cast back to <c>object[]</c>: a lambda cannot go into a call that is bound at run time.
+    /// </summary>
+    static object[] Items(dynamic list) => ((IEnumerable<object>)list).ToArray();
+
+    static dynamic Only(dynamic list, string name) => ((object[])Items(list.People)).Single(p => ((dynamic)p).Name == name);
+
+    static string Refused(Action action, string what)
+    {
+        try { action(); }
+        catch (Exception e) when (e.GetType().Name == "PeopleRefusal") { return e.Message; }
+        catch (Exception e) { throw new Exception($"{what}: threw {e.GetType().Name} ({e.Message}), not a PeopleRefusal", e); }
+        throw new Exception($"{what}: was not refused");
+    }
+
+    static T Throws<T>(Action action, string what) where T : Exception
+    {
+        try { action(); }
+        catch (T expected) { return expected; }
+        catch (Exception other) { throw new Exception($"{what}: threw {other.GetType().Name} ({other.Message}), not {typeof(T).Name}", other); }
+        throw new Exception($"{what}: did not throw");
+    }
+
+    static async Task Until(Func<bool> condition, string what)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (!condition())
+        {
+            Check(clock.Elapsed < TimeSpan.FromSeconds(10), "timed out waiting: " + what);
+            await Task.Delay(10);
+        }
+    }
+
+    // ---- Made-up embeddings and crops ----
+
+    /// <summary>A unit vector of 128 values made from a seed.</summary>
+    static float[] Unit(int seed)
+    {
+        var random = new Random(seed);
+        var values = new double[128];
+        for (var i = 0; i < values.Length; i++) values[i] = random.NextDouble() * 2 - 1;
+        return Normalised(values);
+    }
+
+    static float[] Normalised(double[] values)
+    {
+        var length = Math.Sqrt(values.Sum(v => v * v));
+        return values.Select(v => (float)(v / length)).ToArray();
+    }
+
+    /// <summary>A unit vector whose cosine to <paramref name="from"/>, a unit vector, is <paramref name="cosine"/>.</summary>
+    static float[] At(float[] from, double cosine, int seed)
+    {
+        var other = Unit(seed);
+        var along = other.Zip(from).Sum(pair => (double)pair.First * pair.Second);
+        var across = Normalised(other.Zip(from).Select(pair => pair.First - along * pair.Second).ToArray());
+        var sine = Math.Sqrt(1 - cosine * cosine);
+        return Normalised(from.Zip(across).Select(pair => cosine * pair.First + sine * pair.Second).ToArray());
+    }
+
+    static double Cosine(float[] a, float[] b) => a.Zip(b).Sum(pair => pair.First * pair.Second);
+
+    // Each crop carries this marker, which no log line may.
+    const string CropMarker = "crop-of-a-face-";
+
+    /// <summary>The bytes of a made-up crop: a JPEG's first bytes, the marker and a number, then bytes from a seed.</summary>
+    static byte[] Crop(int seed, int length = 600)
+    {
+        var bytes = new byte[length];
+        new Random(seed).NextBytes(bytes);
+        var head = new byte[] { 0xFF, 0xD8, 0xFF }.Concat(Encoding.ASCII.GetBytes(CropMarker + seed)).ToArray();
+        head.CopyTo(bytes, 0);
+        return bytes;
+    }
+
+    static readonly DateTimeOffset T0 = new(2026, 11, 24, 8, 0, 0, TimeSpan.Zero);
+
+    /// <summary>A named sample made from a seed: its vector, a crop and a time <paramref name="seed"/> minutes after <see cref="T0"/>.</summary>
+    static dynamic Seeded(int seed) => NewSample(Unit(seed), Crop(seed), T0.AddMinutes(seed));
+
+    // ---- The stores ----
+
+    /// <summary>
+    /// A temporary directory for the stores' root, removed afterwards, with the one <see cref="DataStores"/> of a running
+    /// HassSharp on it: each <see cref="Open"/> is the shared store as another definition's detector opens it.
+    /// </summary>
+    sealed class Home : IDisposable
+    {
+        public string Root { get; } = Path.Combine(Path.GetTempPath(), "people-tests-" + Guid.NewGuid().ToString("N"));
+        public DataStores Stores { get; }
+        public Home() { Stores = new DataStores(Root); }
+
+        /// <summary>The shared store, as the detector of definition <paramref name="definition"/> opens it; its <c>Changed</c> actions run off the writer's thread.</summary>
+        public SharpData Open(string definition) => Stores.OpenShared(StoreName, new DataUser(definition, "front_door", action => Task.Run(action)));
+
+        /// <summary>The shared store after a restart: a new <see cref="DataStores"/> on the same root, reading from disk.</summary>
+        public SharpData Restarted(string definition = "after") => new DataStores(Root).OpenShared(StoreName, new DataUser(definition, "front_door", action => Task.Run(action)));
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
+        }
+    }
+
+    // ---- The suite ----
+
+    // Every line logged while the suite runs, which no name and no crop may be in.
+    static readonly List<string> logged = [];
+    static readonly Lock logging = new();
+    // Every name the tests give, which no log line may contain.
+    static readonly HashSet<string> names = new(StringComparer.Ordinal);
+
+    static string Named(string name)
+    {
+        lock (logging) names.Add(name.Trim());
+        return name;
+    }
+
+    [RuntimeSuite("--people", Order = 43)]
+    public static async Task Run()
+    {
+        var tests = new List<(string, Func<Task>)>
+        {
+            (nameof(TheRulesAreTheCalibratedDefaults), Sync(TheRulesAreTheCalibratedDefaults)),
+            (nameof(TheBestPersonIsRecognisedByScoreAndMargin), Sync(TheBestPersonIsRecognisedByScoreAndMargin)),
+            (nameof(AtTheMatchScoreExactlyIsRecognised), Sync(AtTheMatchScoreExactlyIsRecognised)),
+            (nameof(TwoPeopleWithinTheMarginAreAMaybe), Sync(TwoPeopleWithinTheMarginAreAMaybe)),
+            (nameof(UnderTheSuggestScoreIsUnknown), Sync(UnderTheSuggestScoreIsUnknown)),
+            (nameof(APersonScoresByTheirBestSample), Sync(APersonScoresByTheirBestSample)),
+            (nameof(AnEmptyListIsUnknown), Sync(AnEmptyListIsUnknown)),
+            (nameof(APersonComesBackFromTheStore), Sync(APersonComesBackFromTheStore)),
+            (nameof(NamesAreTrimmedAndCheckedIgnoringCase), Sync(NamesAreTrimmedAndCheckedIgnoringCase)),
+            (nameof(RenameRefusesATakenName), Sync(RenameRefusesATakenName)),
+            (nameof(SamplesAreCappedAndLearnedOnesReplaced), Sync(SamplesAreCappedAndLearnedOnesReplaced)),
+            (nameof(ACropOverOneMebibyteIsRefused), Sync(ACropOverOneMebibyteIsRefused)),
+            (nameof(The201stPersonIsRefused), Sync(The201stPersonIsRefused)),
+            (nameof(MergeMovesSamplesUpToTheCaps), Sync(MergeMovesSamplesUpToTheCaps)),
+            (nameof(AnInterruptedMergeLeavesBothReadable), Sync(AnInterruptedMergeLeavesBothReadable)),
+            (nameof(TheLastNamedSampleIsKept), Sync(TheLastNamedSampleIsKept)),
+            (nameof(DeleteRemovesEveryKey), Sync(DeleteRemovesEveryKey)),
+            (nameof(SeenIsWrittenAtMostOnceAMinute), Sync(SeenIsWrittenAtMostOnceAMinute)),
+            (nameof(TwoListsAddAtOnceAndLoseNoName), TwoListsAddAtOnceAndLoseNoName),
+            (nameof(ChangedReachesTheOtherList), ChangedReachesTheOtherList),
+            (nameof(AListReloadsToEmptyAfterAClear), AListReloadsToEmptyAfterAClear),
+            (nameof(ANameWithoutItsPersonIsListedWithoutSamples), Sync(ANameWithoutItsPersonIsListedWithoutSamples)),
+            (nameof(SamplesNoOneListsAreIgnored), Sync(SamplesNoOneListsAreIgnored)),
+            (nameof(AnEmbeddingOfTheWrongLengthIsLeftOut), Sync(AnEmbeddingOfTheWrongLengthIsLeftOut)),
+            (nameof(ANewerFormatIsNeitherReadNorWritten), Sync(ANewerFormatIsNeitherReadNorWritten)),
+            (nameof(UnreadableNamesAreNeitherReadNorWritten), Sync(UnreadableNamesAreNeitherReadNorWritten)),
+        };
+        var failures = new List<string>();
+        var log = PyInterop.Log;
+        PyInterop.Log = (level, line) =>
+        {
+            lock (logging) logged.Add(line);
+            log?.Invoke(level, line);
+        };
+        try
+        {
+            foreach (var (name, test) in tests)
+                try { await test(); }
+                catch (Exception e) { failures.Add($"{name}: {e}"); }
+        }
+        finally { PyInterop.Log = log; }
+        try { NoNameOrCropIsLogged(); }
+        catch (Exception e) { failures.Add($"{nameof(NoNameOrCropIsLogged)}: {e}"); }
+        if (failures.Count > 0) throw new Exception($"People: {failures.Count} failing:\n" + string.Join("\n", failures));
+        Console.WriteLine("PASS people: People.cs keeps one shared list of named people with their face samples, and matches a face by best sample and margin");
+    }
+
+    static Func<Task> Sync(Action test) => () => { test(); return Task.CompletedTask; };
+
+    // ---- The rules and the matcher ----
+
+    static void TheRulesAreTheCalibratedDefaults()
+    {
+        var rules = DefaultRules;
+        Check(rules.MatchScore == 0.50 && rules.MatchMargin == 0.10 && rules.SuggestScore == 0.40 && rules.LearnScore == 0.60 && rules.LearnMargin == 0.15
+            && rules.UsableEyes == 16.0 && rules.LearnEyes == 24.0 && rules.FitLimit == 7.0, "the defaults are docs/calibration.md's: " + rules);
+        Check(rules.WithMatchScore(0.50).Equals(rules), "a match score of 0.50 gives the defaults back: " + rules.WithMatchScore(0.50));
+        var moved = rules.WithMatchScore(0.70);
+        Check(moved.SuggestScore == 0.60 && moved.MatchScore == 0.70 && moved.LearnScore == 0.80, "0.70 moves the suggest and learn scores with it: " + moved);
+        Check(moved.MatchMargin == 0.10 && moved.LearnMargin == 0.15 && moved.UsableEyes == 16.0 && moved.LearnEyes == 24.0 && moved.FitLimit == 7.0,
+            "nothing else moves: " + moved);
+        Console.WriteLine("PASS people: the rules are the calibrated defaults, and a match score moves the suggest and learn scores a tenth either side");
+    }
+
+    static void TheBestPersonIsRecognisedByScoreAndMargin()
+    {
+        var face = Unit(1);
+        var match = Match(face, People(Person("ana", At(face, 0.8, 2)), Person("ivan", At(face, 0.3, 3)), Person("mia", At(face, 0.3, 4))));
+        Check(match.Kind.ToString() == "Recognised" && match.Person.Id == "ana", $"recognised as ana: {match}");
+        Check(Math.Abs(match.Score - 0.8) < 1e-5 && Math.Abs(match.Margin - 0.5) < 1e-5, $"score 0.8 and margin 0.5: {match.Score}, {match.Margin}");
+        Console.WriteLine("PASS people: a face at 0.8 from one person and 0.3 from the others is recognised, with a score of 0.8 and a margin of 0.5");
+    }
+
+    static void AtTheMatchScoreExactlyIsRecognised()
+    {
+        var face = Unit(5);
+        var sample = At(face, 0.55, 6);
+        var people = People(Person("ana", sample));
+        double score = (float)Embedding(sample).Similarity(Embedding(face));
+        var at = Match(face, people, Rules(score));
+        Check(at.Kind.ToString() == "Recognised" && at.Person.Id == "ana" && at.Score == score, $"at the match score exactly: {at}");
+        var under = Match(face, people, Rules(Math.BitIncrement(score)));
+        Check(under.Kind.ToString() == "Maybe" && under.Person.Id == "ana", $"just under the match score: {under}");
+        Check(Math.Abs(at.Margin - score) < 1e-9, $"alone, the margin is the whole score: {at.Margin}");
+        Console.WriteLine("PASS people: a face at the match score exactly is recognised, and just under it is a maybe");
+    }
+
+    static void TwoPeopleWithinTheMarginAreAMaybe()
+    {
+        var face = Unit(7);
+        var match = Match(face, People(Person("ivan", At(face, 0.62, 8)), Person("ana", At(face, 0.68, 9))));
+        Check(match.Kind.ToString() == "Maybe" && match.Person.Id == "ana", $"a maybe for the better: {match}");
+        Check(Math.Abs(match.Score - 0.68) < 1e-5 && Math.Abs(match.Margin - 0.06) < 1e-5, $"score 0.68, margin 0.06: {match}");
+        Console.WriteLine("PASS people: a face over the match score for two people within the margin is a maybe for the better");
+    }
+
+    static void UnderTheSuggestScoreIsUnknown()
+    {
+        var face = Unit(10);
+        var match = Match(face, People(Person("ana", At(face, 0.35, 11))));
+        Check(match.Kind.ToString() == "Unknown" && match.Person == null, $"unknown, with no one: {match}");
+        Check(Math.Abs(match.Score - 0.35) < 1e-5, $"its best score is still given: {match.Score}");
+        Console.WriteLine("PASS people: a face under the suggest score is unknown");
+    }
+
+    static void APersonScoresByTheirBestSample()
+    {
+        var face = Unit(12);
+        var match = Match(face, People(Person("ana", At(face, 0.2, 13), At(face, 0.75, 14), At(face, 0.4, 15)), Person("ivan", At(face, 0.5, 16))));
+        Check(match.Person.Id == "ana" && Math.Abs(match.Score - 0.75) < 1e-5 && Math.Abs(match.Margin - 0.25) < 1e-5, $"ana by her best sample: {match}");
+        Console.WriteLine("PASS people: a person's score is their best sample's");
+    }
+
+    static void AnEmptyListIsUnknown()
+    {
+        var match = Match(Unit(17), People());
+        Check(match.Kind.ToString() == "Unknown" && match.Person == null, $"an empty list: {match}");
+        var withoutSamples = Match(Unit(17), People(Person("ana")));
+        Check(withoutSamples.Kind.ToString() == "Unknown" && withoutSamples.Person == null, $"a person without samples: {withoutSamples}");
+        Console.WriteLine("PASS people: an empty list, or one whose people have no samples, gives unknown");
+    }
+
+    // ---- The list ----
+
+    static void APersonComesBackFromTheStore()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        Check(((object[])Items(list.People)).Length == 0, "a new store has no one");
+        var first = NewSample(Unit(20), Crop(20), T0, "camera.porch", fit: 2.25f);
+        var second = NewSample(Unit(21), Crop(21, 5000), T0.AddMinutes(3), Camera, fit: 0.5f);
+        var added = list.Add(Named("  Ana Kovač "), Samples(first, second));
+        Check(added.Name == "Ana Kovač" && ((object[])Items(added.Samples)).Length == 2, $"the name is trimmed and both samples are kept: {added.Name}");
+
+        var again = List(home.Restarted());
+        var ana = ((object[])Items(again.People)).Single();
+        dynamic person = ana;
+        Check(person.Id == added.Id && person.Name == "Ana Kovač" && person.Added == added.Added && person.LastSeen == null && person.LastSeenAt == null,
+            $"the same person: {person.Id} {person.Added}");
+        var samples = ((object[])Items(person.Samples));
+        object[] given = [first, second];
+        Check(samples.Length == 2, $"two samples: {samples.Length}");
+        for (var i = 0; i < 2; i++)
+        {
+            dynamic stored = samples[i], sent = given[i];
+            float[] values = stored.Embedding.Values, original = sent.Embedding.Values;
+            Check(values.Select(BitConverter.SingleToInt32Bits).SequenceEqual(original.Select(BitConverter.SingleToInt32Bits)), $"sample {i}'s embedding comes back bit for bit");
+            Check(stored.Embedding.Fit == sent.Embedding.Fit && stored.At == sent.At && stored.Camera == sent.Camera && stored.Learned == false,
+                $"sample {i}'s fit, time, camera and kind: {stored}");
+            byte[] crop = again.Crop((string)stored.Id);
+            Check(crop.SequenceEqual((byte[])sent.CropJpeg), $"sample {i}'s crop comes back byte for byte");
+        }
+        Check(again.Crop("nosuchsample") == null, "a sample no one has has no crop");
+        Check(again.Named("ana kovač ").Id == added.Id && again.Named(" ANA KOVAČ") != null && again.Named("Ana") == null, "Named ignores case and surrounding spaces");
+        Console.WriteLine("PASS people: a person added comes back after a restart, embeddings bit for bit and crops byte for byte");
+    }
+
+    static void NamesAreTrimmedAndCheckedIgnoringCase()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        list.Add(Named("Ana"), Samples(Seeded(30)));
+        var taken = Refused(() => list.Add(Named("  aNA "), Samples(Seeded(31))), "a name taken but for case and spaces");
+        Check(taken == "aNA is already someone else's name.", "the refusal: " + taken);
+        Check(Refused(() => list.Add("   ", Samples(Seeded(32))), "a blank name") == "A name cannot be empty.", "a blank name is refused");
+        var longest = new string('x', 64);
+        Check(Refused(() => list.Add(longest + "y", Samples(Seeded(33))), "65 characters") == "A name is at most 64 characters.", "65 characters are refused");
+        list.Add(Named(" " + longest + " "), Samples(Seeded(34)));
+        Check(Refused(() => list.Add(Named("Mia"), Samples()), "no samples") == "Mia needs a face to be named with.", "a person needs a sample");
+        Check(((object[])Items(list.People)).Select(p => (string)((dynamic)p).Name).Order(StringComparer.Ordinal).SequenceEqual(["Ana", longest]), "only Ana and the 64 x's were added");
+        Check(((object[])Items(List(home.Restarted()).People)).Length == 2, "nothing refused was stored");
+        Console.WriteLine("PASS people: a name is trimmed, at most 64 characters, and taken whatever its case and surrounding spaces");
+    }
+
+    static void RenameRefusesATakenName()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        var ana = list.Add(Named("Ana"), Samples(Seeded(40)));
+        list.Add(Named("Ivan"), Samples(Seeded(41)));
+        var refused = Refused(() => list.Rename((string)ana.Id, Named(" ivan")), "a rename to a taken name");
+        Check(refused == "ivan is already someone else's name.", "the refusal: " + refused);
+        list.Rename((string)ana.Id, Named(" ANA "));
+        Check(Only(list, "ANA").Id == ana.Id, "a rename to its own name in another case");
+        list.Rename((string)ana.Id, Named("Ana Marija"));
+        Check(Only(List(home.Restarted()), "Ana Marija").Id == ana.Id, "the rename is stored");
+        Check(Refused(() => list.Rename("gone0000", "Mia"), "a rename of no one") == "This person is no longer in the list.", "a person no one has");
+        Console.WriteLine("PASS people: a rename to a taken name is refused, and to its own name in another case is not");
+    }
+
+    static void SamplesAreCappedAndLearnedOnesReplaced()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Enumerable.Range(100, 19).Select(seed => (object)Seeded(seed)).ToArray()));
+        string id = ana.Id;
+        list.AddSamples(id, Samples(Seeded(119)), false);
+        Check(((object[])Items(Only(list, "Ana").Samples)).Length == 20, "20 named samples");
+        Check(Refused(() => list.AddSamples(id, Samples(Seeded(120)), false), "the 21st named sample") == "Ana has no room for more samples.", "the 21st named sample is refused");
+        Check(Refused(() => list.Add(Named("Mia"), Samples(Enumerable.Range(130, 21).Select(seed => (object)Seeded(seed)).ToArray())), "21 samples at once")
+            == "Mia has no room for more samples.", "a person named with 21 samples is refused");
+
+        // 20 learned samples, the oldest first, then a 21st, which replaces the oldest learned one.
+        for (var i = 0; i < 20; i++) list.AddSamples(id, Samples(NewSample(Unit(200 + i), Crop(200 + i), T0.AddHours(1 + i))), true);
+        var learned = ((object[])Items(Only(list, "Ana").Samples)).Where(s => ((dynamic)s).Learned).ToArray();
+        Check(learned.Length == 20, $"20 learned samples: {learned.Length}");
+        string oldest = ((dynamic)learned.MinBy(s => (DateTimeOffset)((dynamic)s).At)!).Id;
+        var person = list.AddSamples(id, Samples(NewSample(Unit(300), Crop(300), T0.AddDays(2))), true);
+        var after = ((object[])Items(person.Samples));
+        Check(after.Count(s => ((dynamic)s).Learned) == 20 && after.Count(s => !((dynamic)s).Learned) == 20, $"still 20 learned and 20 named: {after.Length}");
+        Check(after.All(s => ((dynamic)s).Id != oldest) && list.Crop(oldest) == null, "the oldest learned sample is gone, crop and all");
+        Check(data.Keys($"samples/{id}/{oldest}/").Count == 0, "the replaced sample's keys are removed");
+        Check(after.Any(s => ((dynamic)s).At == T0.AddDays(2)), "the new learned sample is kept");
+        Check(((object[])Items(Only(List(home.Restarted()), "Ana").Samples)).Length == 40, "40 samples are stored");
+        Check(Refused(() => list.AddSamples("gone0000", Samples(Seeded(1)), true), "samples for no one") == "This person is no longer in the list.", "samples for a person no one has");
+        Console.WriteLine("PASS people: the 21st named sample is refused, and the 21st learned one replaces the oldest learned");
+    }
+
+    static void ACropOverOneMebibyteIsRefused()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        list.Add(Named("Ana"), Samples(NewSample(Unit(50), Crop(50, 1024 * 1024), T0)));
+        Throws<ArgumentException>(() => list.Add(Named("Ivan"), Samples(NewSample(Unit(51), Crop(51, 1024 * 1024 + 1), T0))), "a crop over 1 MiB");
+        Throws<ArgumentException>(() => list.Add(Named("Ivan"), Samples(NewSample(new float[64], Crop(52), T0))), "an embedding of 64 values");
+        Check(((object[])Items(list.People)).Length == 1 && List(home.Restarted()).Named("Ivan") == null, "nothing of Ivan was stored");
+        Console.WriteLine("PASS people: a crop over 1 MiB, or an embedding without 128 values, is refused");
+    }
+
+    static void The201stPersonIsRefused()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        for (var i = 0; i < 200; i++) list.Add($"Person {i}", Samples(NewSample(Unit(1000 + i), Crop(1000 + i, 40), T0)));
+        Check(((object[])Items(list.People)).Length == 200, "200 people");
+        var refused = Refused(() => list.Add(Named("Mia"), Samples(Seeded(60))), "the 201st person");
+        Check(refused == "The list has room for 200 people; delete someone to add another.", "the refusal: " + refused);
+        Check(((object[])Items(List(home.Restarted()).People)).Length == 200, "200 people are stored");
+        Console.WriteLine("PASS people: the 201st person is refused");
+    }
+
+    static void MergeMovesSamplesUpToTheCaps()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Enumerable.Range(400, 15).Select(seed => (object)Seeded(seed)).ToArray()));
+        var ivan = list.Add(Named("Ivan"), Samples(Enumerable.Range(500, 10).Select(seed => (object)Seeded(seed)).ToArray()));
+        string anaId = ana.Id, ivanId = ivan.Id;
+        for (var i = 0; i < 3; i++) list.AddSamples(ivanId, Samples(NewSample(Unit(600 + i), Crop(600 + i), T0.AddHours(i))), true);
+        list.Seen(ivanId, T0.AddDays(1), "camera.porch");
+        list.Seen(anaId, T0.AddHours(5), Camera);
+        var newestNamed = ((object[])Items(Only(list, "Ivan").Samples)).Where(s => !((dynamic)s).Learned).OrderByDescending(s => (DateTimeOffset)((dynamic)s).At).Take(5)
+            .Select(s => (string)((dynamic)s).Id).ToHashSet();
+
+        list.Merge(ivanId, anaId);
+        Check(list.Named("Ivan") == null && ((object[])Items(list.People)).Length == 1, "Ivan is gone");
+        var merged = Only(list, "Ana");
+        var samples = ((object[])Items(merged.Samples));
+        Check(samples.Count(s => !((dynamic)s).Learned) == 20 && samples.Count(s => ((dynamic)s).Learned) == 3, $"20 named and 3 learned: {samples.Length}");
+        Check(newestNamed.All(id => samples.Any(s => ((dynamic)s).Id == id)), "Ivan's newest named samples filled Ana's room");
+        Check(merged.LastSeen == T0.AddDays(1) && merged.LastSeenAt == "camera.porch", $"the later last seen is kept: {merged.LastSeen} {merged.LastSeenAt}");
+        Check(samples.All(s => list.Crop((string)((dynamic)s).Id) != null), "every sample kept has its crop");
+        Check(data.Keys($"people/{ivanId}").Count == 0 && data.Keys($"samples/{ivanId}/").Count == 0, "none of Ivan's keys is left: " + string.Join(", ", data.Keys()));
+        var stored = Only(List(home.Restarted()), "Ana");
+        Check(((object[])Items(stored.Samples)).Length == 23, "the merge is stored");
+        Check(Refused(() => list.Merge(anaId, anaId), "a merge into itself") == "A person cannot be merged with themselves.", "a merge into itself");
+        Check(Refused(() => list.Merge(anaId, "gone0000"), "a merge into no one") == "This person is no longer in the list.", "a merge into no one");
+        Console.WriteLine("PASS people: a merge moves samples up to the caps, named first, keeps the later last seen and removes the source");
+    }
+
+    static void AnInterruptedMergeLeavesBothReadable()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Seeded(700), Seeded(701)));
+        var ivan = list.Add(Named("Ivan"), Samples(Seeded(702), Seeded(703), Seeded(704)));
+        string anaId = ana.Id, ivanId = ivan.Id;
+        var ivans = ((object[])Items(ivan.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+
+        // The merge's first step, as an interruption after the samples are written and before the source is removed leaves it.
+        var moved = ((object)list).GetType().GetMethod("MoveSamples", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new Exception("PeopleList has no MoveSamples step");
+        Invoke(moved, list, ivanId, anaId);
+
+        var after = List(home.Restarted());
+        var anaAfter = ((object[])Items(Only(after, "Ana").Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        var ivanAfter = ((object[])Items(Only(after, "Ivan").Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        Check(anaAfter.Length == 5 && ivans.All(anaAfter.Contains), "Ana has Ivan's samples: " + string.Join(", ", anaAfter));
+        Check(ivanAfter.Order(StringComparer.Ordinal).SequenceEqual(ivans.Order(StringComparer.Ordinal)), "Ivan still has his");
+        Check(anaAfter.All(id => after.Crop(id) != null) && ivanAfter.All(id => after.Crop(id) != null), "every sample has its crop");
+
+        // A second merge, by another detector, finishes the job, without a sample twice.
+        var other = List(home.Open("def-b"));
+        other.Merge(ivanId, anaId);
+        var done = ((object[])Items(Only(List(home.Restarted()), "Ana").Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        Check(done.Length == 5 && done.Distinct().Count() == 5, "Ana has five samples, each once: " + string.Join(", ", done));
+        Check(other.Named("Ivan") == null && data.Keys($"samples/{ivanId}/").Count == 0 && data.Keys($"people/{ivanId}").Count == 0, "Ivan is gone: " + string.Join(", ", data.Keys()));
+        Console.WriteLine("PASS people: an interrupted merge leaves both people readable, and a second merge finishes it");
+    }
+
+    static void TheLastNamedSampleIsKept()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Seeded(800), Seeded(801)));
+        string id = ana.Id;
+        var learned = list.AddSamples(id, Samples(Seeded(802)), true);
+        var named = ((object[])Items(ana.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        string learnedId = ((object[])Items(learned.Samples)).Select(s => (dynamic)s).Single(s => s.Learned).Id;
+
+        list.RemoveSample(id, learnedId);
+        list.RemoveSample(id, named[0]);
+        Check(((object[])Items(Only(list, "Ana").Samples)).Select(s => (string)((dynamic)s).Id).SequenceEqual([named[1]]), "one named sample is left");
+        Check(data.Keys($"samples/{id}/{named[0]}/").Count == 0 && data.Keys($"samples/{id}/{learnedId}/").Count == 0, "the removed samples' keys are gone");
+        Check(Refused(() => list.RemoveSample(id, named[1]), "the last named sample") == LastNamed, "the last named sample is kept");
+        Check(((object[])Items(Only(List(home.Restarted()), "Ana").Samples)).Length == 1, "it is still stored");
+        list.RemoveSample(id, "nosuchsample");
+        list.RemoveSample("gone0000", "nosuchsample");
+        Console.WriteLine("PASS people: a sample is removed with its keys, except the last named one");
+    }
+
+    static void DeleteRemovesEveryKey()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Seeded(900), Seeded(901)));
+        list.AddSamples((string)ana.Id, Samples(Seeded(902)), true);
+        list.Seen((string)ana.Id, T0, Camera);
+        var before = data.Keys();
+        list.Delete((string)ana.Id);
+        Check(((object[])Items(list.People)).Length == 0 && list.Named("Ana") == null, "Ana is gone");
+        Check(data.Keys().SequenceEqual(["format", "names"]), "only the format and the names are left: " + string.Join(", ", data.Keys()) + " of " + string.Join(", ", before));
+        Check(data.Get<Dictionary<string, string>>("names")!.Count == 0, "the names are empty");
+        list.Delete((string)ana.Id);
+        list.Add(Named("ana"), Samples(Seeded(903)));
+        Console.WriteLine("PASS people: a delete removes the person's every key, and frees the name");
+    }
+
+    static void SeenIsWrittenAtMostOnceAMinute()
+    {
+        using var home = new Home();
+        var list = List(home.Open("def-a"));
+        string id = list.Add(Named("Ana"), Samples(Seeded(950))).Id;
+        DateTimeOffset? Stored() => Only(List(home.Restarted()), "Ana").LastSeen;
+        list.Seen(id, T0, Camera);
+        Check(Stored() == T0 && Only(list, "Ana").LastSeenAt == Camera, "the first sighting is written");
+        list.Seen(id, T0.AddSeconds(59), "camera.porch");
+        Check(Stored() == T0, "a sighting within a minute is not written: " + Stored());
+        list.Seen(id, T0.AddSeconds(61), "camera.porch");
+        Check(Stored() == T0.AddSeconds(61) && Only(List(home.Restarted()), "Ana").LastSeenAt == "camera.porch", "a sighting a minute later is: " + Stored());
+        list.Seen("gone0000", T0, Camera);
+        Check(((object[])Items(List(home.Restarted()).People)).Length == 1, "a sighting of no one adds no one");
+        Console.WriteLine("PASS people: last seen is written at most once a minute a person");
+    }
+
+    // ---- Two lists on one store ----
+
+    static async Task TwoListsAddAtOnceAndLoseNoName()
+    {
+        using var home = new Home();
+        var a = List(home.Open("def-a"));
+        var b = List(home.Open("def-b"));
+        using var reading = new CancellationTokenSource();
+        var reads = 0;
+        // Reads the snapshot over and over while both write and reload.
+        var reader = Task.Run(() =>
+        {
+            while (!reading.IsCancellationRequested)
+            {
+                foreach (var person in ((object[])Items(a.People))) _ = ((object[])Items(((dynamic)person).Samples)).Length;
+                reads++;
+            }
+        });
+        var adds = Enumerable.Range(0, 16).SelectMany(i => new[]
+        {
+            Task.Run(() => { a.Add(Named($"A {i}"), Samples(Seeded(2000 + i))); }),
+            Task.Run(() => { b.Add(Named($"B {i}"), Samples(Seeded(3000 + i))); }),
+        }).ToArray();
+        await Task.WhenAll(adds);
+        reading.Cancel();
+        await reader;
+        var stored = ((object[])Items(List(home.Restarted()).People)).Select(p => (string)((dynamic)p).Name).Order(StringComparer.Ordinal).ToArray();
+        var expected = Enumerable.Range(0, 16).SelectMany(i => new[] { $"A {i}", $"B {i}" }).Order(StringComparer.Ordinal).ToArray();
+        Check(stored.SequenceEqual(expected), $"all 32 names are stored: {stored.Length}");
+        await Until(() => ((object[])Items(a.People)).Length == 32 && ((object[])Items(b.People)).Length == 32, "both lists to hold all 32");
+        Check(reads > 0, "the snapshot was read meanwhile");
+        Console.WriteLine($"PASS people: two lists adding 16 people each at once lose no name, and their snapshots read meanwhile ({reads} reads)");
+    }
+
+    static async Task ChangedReachesTheOtherList()
+    {
+        using var home = new Home();
+        var (ranA, ranB) = (0, 0);
+        var a = List(home.Open("def-a"), () => { Interlocked.Increment(ref ranA); return Task.CompletedTask; });
+        dynamic? seen = null;
+        dynamic b = null!;
+        b = List(home.Open("def-b"), () =>
+        {
+            seen = b.Named("Ana");
+            Interlocked.Increment(ref ranB);
+            return Task.CompletedTask;
+        });
+        var ana = a.Add(Named("Ana"), Samples(Seeded(4000)));
+        await Until(() => Volatile.Read(ref ranB) > 0 && seen != null, "B's change action, after B reloaded, to see Ana");
+        Check(seen!.Id == ana.Id && ((object[])Items(seen.Samples)).Length == 1, "B sees Ana with her sample");
+        b.Rename((string)ana.Id, Named("Ana Marija"));
+        await Until(() => a.Named("Ana Marija") != null, "A to see B's rename");
+        await Task.Delay(200);
+        var ownRuns = Volatile.Read(ref ranA);
+        a.Delete((string)ana.Id);
+        await Until(() => b.Named("Ana Marija") == null, "B to see A's delete");
+        await Task.Delay(200);
+        Check(Volatile.Read(ref ranA) == ownRuns, $"A's own delete ran A's change action {ranA - ownRuns} times");
+        Console.WriteLine("PASS people: a change one list makes reloads the other and runs its change action, and never the writer's own");
+    }
+
+    static async Task AListReloadsToEmptyAfterAClear()
+    {
+        using var home = new Home();
+        var a = List(home.Open("def-a"));
+        var b = List(home.Open("def-b"));
+        a.Add(Named("Ana"), Samples(Seeded(4100)));
+        a.Add(Named("Ivan"), Samples(Seeded(4101)));
+        await Until(() => ((object[])Items(b.People)).Length == 2, "B to see both");
+        // Stored data's dialog, or a device's button, clears the store.
+        home.Open("def-c").Clear();
+        await Until(() => ((object[])Items(a.People)).Length == 0 && ((object[])Items(b.People)).Length == 0, "both lists to reload to empty");
+        a.Reload();
+        Check(((object[])Items(a.People)).Length == 0, "a reload after the clear is empty");
+        a.Add(Named("Ana"), Samples(Seeded(4102)));
+        Check(((object[])Items(a.People)).Length == 1, "a person is added after the clear");
+        Console.WriteLine("PASS people: a list reloads to empty after the store is cleared, and is written again after");
+    }
+
+    // ---- What an interruption or a hand deletion leaves ----
+
+    static void ANameWithoutItsPersonIsListedWithoutSamples()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        string id = list.Add(Named("Ana"), Samples(Seeded(5000))).Id;
+        data.Remove($"people/{id}");
+        list.Reload();
+        var ana = Only(list, "Ana");
+        Check(((object[])Items(ana.Samples)).Length == 0 && ana.Added == DateTimeOffset.MinValue, $"Ana is listed without samples, added at an unknown time: {ana}");
+        Check(Match(Unit(5000), list.People).Kind.ToString() == "Unknown", "a person without samples matches no one");
+        Check(Refused(() => list.Add(Named("ana"), Samples(Seeded(5001))), "her name") == "ana is already someone else's name.", "her name stays taken");
+        var again = list.AddSamples(id, Samples(Seeded(5002)), false);
+        Check(((object[])Items(again.Samples)).Length == 1, "a sample can be added to her again");
+        list.Delete(id);
+        Check(data.Keys().SequenceEqual(["format", "names"]), "and she can be deleted: " + string.Join(", ", data.Keys()));
+        Console.WriteLine("PASS people: a name whose person is gone is listed without samples, and can be given samples or deleted");
+    }
+
+    static void SamplesNoOneListsAreIgnored()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        string id = list.Add(Named("Ana"), Samples(Seeded(5100))).Id;
+        byte[] embedding = new byte[512];
+        data.SetBytes("samples/nobody00/sample00/embedding", embedding);
+        data.SetBytes("samples/nobody00/sample00/crop", Crop(5101));
+        data.SetBytes($"samples/{id}/unlisted0/embedding", embedding);
+        data.Set("people/nobody01", new { added = T0, samples = Array.Empty<object>() });
+        list.Reload();
+        Check(((object[])Items(list.People)).Length == 1 && ((object[])Items(Only(list, "Ana").Samples)).Length == 1, "only Ana and her one listed sample are loaded");
+        Check(list.Crop("sample00") == null, "a sample no one lists has no crop");
+        Console.WriteLine("PASS people: samples and people that no name lists are ignored");
+    }
+
+    static void AnEmbeddingOfTheWrongLengthIsLeftOut()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Seeded(5200), Seeded(5201)));
+        string id = ana.Id;
+        var ids = ((object[])Items(ana.Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        data.SetBytes($"samples/{id}/{ids[0]}/embedding", new byte[100]);
+        data.Remove($"samples/{id}/{ids[1]}/crop");
+        var again = List(home.Restarted());
+        var samples = ((object[])Items(Only(again, "Ana").Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        Check(samples.SequenceEqual([ids[1]]), "the sample whose embedding has 100 bytes is left out: " + string.Join(", ", samples));
+        Check(again.Crop(ids[1]) == null, "a sample whose crop is gone has none, and is still used");
+        Console.WriteLine("PASS people: a sample whose embedding is not 512 bytes is left out, and one without its crop is kept");
+    }
+
+    /// <summary>Every key of the store with its bytes, to see that nothing was written.</summary>
+    static string Contents(SharpData data) => string.Join("|", data.Keys().Select(key =>
+    {
+        try { return key + "=" + Convert.ToHexString(data.GetBytes(key)!); }
+        catch (InvalidOperationException) { return key + "=" + System.Text.Json.JsonSerializer.Serialize(data.Get<System.Text.Json.JsonElement>(key)); }
+    }));
+
+    static void ANewerFormatIsNeitherReadNorWritten()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        string id = list.Add(Named("Ana"), Samples(Seeded(5300))).Id;
+        data.Set("format", 2);
+        var before = Contents(data);
+        var newer = List(home.Restarted());
+        Check(((object[])Items(newer.People)).Length == 0, "a store of a newer format is not read");
+        const string Newer = "The people list was saved by a newer hass-sharp-vision; update this one to change it.";
+        Check(Refused(() => newer.Add(Named("Ivan"), Samples(Seeded(5301))), "an add") == Newer, "an add is refused");
+        list.Reload();
+        Check(Refused(() => list.Rename(id, "Mia"), "a rename") == Newer, "a rename is refused");
+        Check(Refused(() => list.Delete(id), "a delete") == Newer, "a delete is refused");
+        Check(Refused(() => list.AddSamples(id, Samples(Seeded(5302)), true), "samples") == Newer, "samples are refused");
+        Check(Refused(() => list.RemoveSample(id, "nosuchsample"), "a sample's removal") == Newer, "a sample's removal is refused");
+        Check(Refused(() => list.Merge(id, id + "x"), "a merge") == Newer, "a merge is refused");
+        list.Seen(id, T0, Camera);
+        Check(Contents(data) == before, "nothing was written");
+        data.Set("format", "one");
+        var unreadable = List(home.Restarted());
+        Check(((object[])Items(unreadable.People)).Length == 0, "a format that is not a number is not read either");
+        Check(Refused(() => unreadable.Add(Named("Ivan"), Samples(Seeded(5303))), "an add") == "The people list cannot be read; delete it in Stored data to start again.",
+            "nor written");
+        Console.WriteLine("PASS people: a store of a newer format is neither read nor written, and the refusal says so");
+    }
+
+    static void UnreadableNamesAreNeitherReadNorWritten()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        list.Add(Named("Ana"), Samples(Seeded(5400)));
+        data.SetBytes("names", [1, 2, 3]);
+        var before = Contents(data);
+        var damaged = List(home.Restarted());
+        Check(((object[])Items(damaged.People)).Length == 0, "unreadable names give no one");
+        var refused = Refused(() => damaged.Add(Named("Ivan"), Samples(Seeded(5401))), "an add");
+        Check(refused == "The people list cannot be read; delete it in Stored data to start again.", "the refusal: " + refused);
+        Check(Contents(data) == before, "nothing was written");
+        Console.WriteLine("PASS people: names that cannot be read give an empty list, and changes are refused");
+    }
+
+    // ---- Privacy ----
+
+    /// <summary>No line logged while the suite ran has a name it gave, or a crop's bytes, as text, hex or base64.</summary>
+    static void NoNameOrCropIsLogged()
+    {
+        string[] lines;
+        string[] given;
+        lock (logging) (lines, given) = ([.. logged], [.. names]);
+        Check(given.Length > 30, $"the suite gave names: {given.Length}");
+        var marker = Encoding.ASCII.GetBytes(CropMarker);
+        var forms = new[] { CropMarker, Convert.ToHexString(marker), Convert.ToHexStringLower(marker), Convert.ToBase64String(marker)[..^4] };
+        foreach (var line in lines)
+        {
+            Check(!given.Any(name => line.Contains(name, StringComparison.OrdinalIgnoreCase)), "a log line has a name: " + line.Length + " characters");
+            Check(!forms.Any(form => line.Contains(form, StringComparison.Ordinal)), "a log line has a crop's bytes");
+        }
+        Console.WriteLine($"PASS people: none of the {lines.Length} lines logged has a name or a crop's bytes");
+    }
+}

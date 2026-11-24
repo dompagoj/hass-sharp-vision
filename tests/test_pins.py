@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VISION = ROOT / "nodes" / "Vision.cs"
+PEOPLE = ROOT / "nodes" / "People.cs"
 PEOPLE_DETECTOR = ROOT / "nodes" / "PeopleDetector.cs"
 SUMS = ROOT / "native" / "SHA256SUMS"
 CARGO = ROOT / "native" / "Cargo.toml"
@@ -106,7 +107,7 @@ class PinsTest(unittest.TestCase):
         self.assertEqual(model(), fetched())
 
     def test_node_files_name_this_version(self):
-        for path in (VISION, PEOPLE_DETECTOR):
+        for path in (VISION, PEOPLE, PEOPLE_DETECTOR):
             with self.subTest(path.name):
                 self.assertEqual(header(path), version())
 

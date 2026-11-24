@@ -116,7 +116,7 @@ jobs:
           HS_VISION_REQUIRE_LIBRARY: '1'
         run: >-
           dotnet run --project tests/Vision.Tests --disable-build-servers
-          -p:HassSharpRoot=${{ github.workspace }}/.hass-sharp -- --vision --people-detector --vision-manifest
+          -p:HassSharpRoot=${{ github.workspace }}/.hass-sharp -- --vision --people --people-detector --vision-manifest
       - name: Manifest
         # hass_sharp.toml and the files it lists, read by hass-sharp's external.py, as Add external reads them.
         if: env.HASS_SHARP_REF != 'none'

@@ -153,18 +153,19 @@ The crate's tests, from `native/`, with the toolchain `native/rust-toolchain.tom
 cargo test --release --locked
 ```
 
-The C# tests build `nodes/Vision.cs` and `nodes/PeopleDetector.cs` against a hass-sharp checkout, with every file of
-its runtime suite:
+The C# tests build `nodes/Vision.cs`, `nodes/People.cs` and `nodes/PeopleDetector.cs` against a hass-sharp checkout,
+with every file of its runtime suite:
 
 ```sh
-dotnet run --project tests/Vision.Tests --disable-build-servers -p:HassSharpRoot=/path/to/hass-sharp -- --vision --people-detector --vision-manifest
+dotnet run --project tests/Vision.Tests --disable-build-servers -p:HassSharpRoot=/path/to/hass-sharp -- --vision --people --people-detector --vision-manifest
 ```
 
 `HASS_SHARP_ROOT` may name the checkout instead of `-p:HassSharpRoot`. `--vision` runs the tests of `Vision.cs`,
-`--people-detector` those of `PeopleDetector.cs`, and `--vision-manifest` imports both as **Add external** does and
-previews `nodes/front_door_people.json`. The checkout must be on hass-sharp's branch
-`face-detection-and-external-import`, which has `[NodeSetup]`, the node library import and the still picture of the
-runtime suite's fake ffmpeg. The tests need the .NET 11 SDK, Python 3 (the fake ffmpeg is a Python script) and
+`--people` those of `People.cs` (the people list and the matcher, over device data in a temporary directory, with
+made-up embeddings), `--people-detector` those of `PeopleDetector.cs`, and `--vision-manifest` imports `Vision.cs` and
+`PeopleDetector.cs` as **Add external** does and previews `nodes/front_door_people.json`. The checkout must be on
+hass-sharp's branch `face-detection-and-external-import`, which has `[NodeSetup]`, the node library import and the
+still picture of the runtime suite's fake ffmpeg. The tests need the .NET 11 SDK, Python 3 (the fake ffmpeg is a Python script) and
 libjpeg-turbo. CI's C# job runs them against the hass-sharp commit that `HASS_SHARP_REF` in `ci.yaml` pins by its
 full sha, now one on that branch; once HassSharp releases these APIs, the pin moves to the commit of that release's
 tag.
@@ -199,7 +200,7 @@ A change to the library is released as a new version:
    `native/`. If a dependency changed, run `native/build.sh --licenses` too.
 2. Run `native/build.sh` for all four RIDs and copy `native/dist/SHA256SUMS` into `native/SHA256SUMS`. In `Vision.cs`,
    set `Source` to `https://github.com/dompagoj/hass-sharp-vision/releases/download/v<version>/` and the pinned table
-   (between `// pinned:begin` and `// pinned:end`) to those checksums. In both node files, set the version in the first
+   (between `// pinned:begin` and `// pinned:end`) to those checksums. In every node file, set the version in the first
    line's comment. `python3 -m unittest discover -s tests` checks all of these. Commit, push, and wait for CI to pass.
 3. The owner tags that commit `v<version>` and pushes the tag.
 4. `release.yaml` runs every test of `ci.yaml`, checks that the tag is the crate's version and is not released yet,
