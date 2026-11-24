@@ -3,11 +3,13 @@
 # linux-musl-arm64 and linux-musl-x64 (the Home Assistant container, Alpine) and linux-arm64 and linux-x64
 # (glibc 2.31 or later, built on Debian bullseye). Each build runs in Docker from the pinned toolchain, is checked
 # (musl: it needs only libc.musl and libgcc_s; glibc: no symbol newer than GLIBC_2.31) and is loaded once
-# through ctypes: a musl build in the Home Assistant image it runs in, a glibc build in Debian bullseye.
+# through ctypes: a musl build in the Home Assistant image it runs in, a glibc build in Debian bullseye. Loaded, it
+# must return the ABI version of src/lib.rs's ABI_VERSION, open a detector and export the recogniser's functions.
 #
 #   native/build.sh [--out DIR] [RID ...]   builds the RIDs given, or all four, into DIR (default native/dist),
 #                                           as DIR/libhs_vision-<rid>.so with DIR/SHA256SUMS for them
 #   native/build.sh --licenses              rewrites native/THIRD-PARTY-LICENSES and builds nothing
+#   native/build.sh --abi-version           prints the ABI version the load check expects and builds nothing
 #
 # Prerequisites: a Docker engine, and emulation for a RID of another architecture than the engine's (colima:
 # colima start --vz-rosetta, or install binfmt). Nothing is installed on the host: the sources go into each
@@ -37,10 +39,16 @@ die() {
 }
 
 usage() {
-  echo "usage: native/build.sh [--out DIR] [RID ...] | native/build.sh --licenses" >&2
+  echo "usage: native/build.sh [--out DIR] [RID ...] | native/build.sh --licenses | native/build.sh --abi-version" >&2
   echo "RIDs: $ALL_RIDS" >&2
   exit 2
 }
+
+# The ABI version the load check expects: the one hs_vision_abi_version returns, from the crate's source.
+ABI_VERSION=$(sed -n 's/^pub const ABI_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' "$here/src/lib.rs")
+case $ABI_VERSION in
+  '' | *[!0-9]*) die "src/lib.rs does not state its ABI version once, as pub const ABI_VERSION: u32 = <n>;" ;;
+esac
 
 # Writes the crate's sources as a tar stream to stdout, without macOS metadata. Extra files from native/ may follow.
 sources() {
@@ -145,17 +153,21 @@ if [ "$(printf "%s\n%s\n" "$newest" "$GLIBC_MAX" | sort -V | tail -n 1)" != "$GL
 fi
 out=$(python3 -c "$SMOKE" "$so")
 echo "smoke in $GNU_IMAGE:" $out
-[ "$out" = "$(printf "1\nTrue")" ] || { echo "smoke failed"; exit 1; }
+[ "$out" = "$SMOKE_EXPECTED" ] || { echo "smoke failed: expected" $SMOKE_EXPECTED; exit 1; }
 cat "$so" >&3
 '
 
+# Prints the ABI version, whether a detector opened, and whether the recogniser's functions are exported (opening a
+# recogniser needs the model file, which the library does not embed).
 SMOKE='import ctypes,sys
 l=ctypes.CDLL(sys.argv[1])
 l.hs_vision_open.restype=ctypes.c_void_p
 print(l.hs_vision_abi_version())
 d=l.hs_vision_open()
 print(bool(d))
-l.hs_vision_close(ctypes.c_void_p(d))'
+l.hs_vision_close(ctypes.c_void_p(d))
+print(all(hasattr(l,n) for n in ("hs_vision_open_recognizer","hs_vision_embed","hs_vision_close_recognizer")))'
+SMOKE_EXPECTED=$(printf '%s\nTrue\nTrue' "$ABI_VERSION")
 
 # Loads a musl build in the Home Assistant image of its platform. Home Assistant publishes both platforms, so a
 # failed pull stops the script.
@@ -166,7 +178,7 @@ smoke_musl() {
   out=$(docker run -i --rm --platform "$platform" --entrypoint sh -e SMOKE="$SMOKE" "$HA_IMAGE" \
     -c 'cat > /tmp/libhs_vision.so && python3 -c "$SMOKE" /tmp/libhs_vision.so' <"$so")
   echo "smoke in $HA_IMAGE ($platform): $(echo "$out" | tr '\n' ' ')" >&2
-  [ "$out" = "$(printf '1\nTrue')" ] || die "smoke failed for $so"
+  [ "$out" = "$SMOKE_EXPECTED" ] || die "smoke failed for $so: expected $(echo "$SMOKE_EXPECTED" | tr '\n' ' ')"
 }
 
 build_rid() {
@@ -185,6 +197,7 @@ build_rid() {
     *)
       sources | docker run -i --rm --platform "$platform" ${build_jobs:+-e CARGO_BUILD_JOBS="$build_jobs"} \
         -e RUST_VERSION="$RUST_VERSION" -e GLIBC_MAX="$GLIBC_MAX" -e GNU_IMAGE="$GNU_IMAGE" -e SMOKE="$SMOKE" \
+        -e SMOKE_EXPECTED="$SMOKE_EXPECTED" \
         "$GNU_IMAGE" sh -c "$GNU_BUILD" >"$part"
       ;;
   esac
@@ -233,6 +246,11 @@ while [ $# -gt 0 ]; do
     --licenses)
       [ $# -eq 1 ] || usage
       licenses
+      exit 0
+      ;;
+    --abi-version)
+      [ $# -eq 1 ] || usage
+      echo "$ABI_VERSION"
       exit 0
       ;;
     --out)

@@ -1,9 +1,11 @@
 """The pins in nodes/Vision.cs follow native/: its checksum table is native/SHA256SUMS, its download URL is the release
 of the crate's version, its model's name and SHA-256 are those native/fetch-model.sh fetches, and the first line of
-each node file names that version. With HS_VISION_CHECK_RELEASE=1 (CI), the release's own SHA256SUMS is compared too."""
+each node file names that version, and the ABI version Vision.cs requires and native/build.sh's load check expects is
+the crate's. With HS_VISION_CHECK_RELEASE=1 (CI), the release's own SHA256SUMS is compared too."""
 
 import os
 import re
+import subprocess
 import tomllib
 import unittest
 import urllib.error
@@ -17,12 +19,16 @@ PEOPLE_DETECTOR = ROOT / "nodes" / "PeopleDetector.cs"
 SUMS = ROOT / "native" / "SHA256SUMS"
 CARGO = ROOT / "native" / "Cargo.toml"
 FETCH_MODEL = ROOT / "native" / "fetch-model.sh"
+LIB = ROOT / "native" / "src" / "lib.rs"
+BUILD = ROOT / "native" / "build.sh"
 
 SOURCE = re.compile(r'^\s*const string Source = "([^"]*)";\s*$', re.MULTILINE)
 RELEASE = re.compile(r"^https://github\.com/dompagoj/hass-sharp-vision/releases/download/v(\d+\.\d+\.\d+)/$")
 HEADER = re.compile(r"^// hass-sharp-vision (\d+\.\d+\.\d+), from https://github\.com/dompagoj/hass-sharp-vision$")
 MODEL_NAME = re.compile(r'^\s*const string ModelName = "([^"]*)";\s*$', re.MULTILINE)
 MODEL_SHA256 = re.compile(r'^\s*const string ModelSha256 = "([^"]*)";\s*$', re.MULTILINE)
+ABI_VERSION = re.compile(r"^pub const ABI_VERSION: u32 = (\d+);$", re.MULTILINE)
+VISION_ABI_VERSION = re.compile(r"^\s*const int AbiVersion = (\d+);\s*$", re.MULTILINE)
 ENTRY = re.compile(r'^\s*\["([^"]+)"\] = "([0-9a-f]{64})",\s*$')
 
 
@@ -88,6 +94,22 @@ def sums(text: str) -> list[tuple[str, str]]:
     return entries
 
 
+def abi_version() -> int:
+    """The ABI version the crate's hs_vision_abi_version returns."""
+    found = ABI_VERSION.findall(LIB.read_text(encoding="utf-8"))
+    if len(found) != 1:
+        raise AssertionError(f"native/src/lib.rs has {len(found)} lines of the form pub const ABI_VERSION: u32 = <n>; not 1")
+    return int(found[0])
+
+
+def vision_abi_version() -> int:
+    """The ABI version Vision.cs requires of the library."""
+    found = VISION_ABI_VERSION.findall(VISION.read_text(encoding="utf-8"))
+    if len(found) != 1:
+        raise AssertionError(f"Vision.cs has {len(found)} lines of the form const int AbiVersion = <n>; not 1")
+    return int(found[0])
+
+
 def version() -> str:
     with CARGO.open("rb") as cargo:
         return tomllib.load(cargo)["package"]["version"]
@@ -110,6 +132,13 @@ class PinsTest(unittest.TestCase):
         for path in (VISION, PEOPLE, PEOPLE_DETECTOR):
             with self.subTest(path.name):
                 self.assertEqual(header(path), version())
+
+    def test_abi_version_is_the_crates(self):
+        crate = abi_version()
+        self.assertEqual(vision_abi_version(), crate, "Vision.cs requires another ABI version than the crate's")
+        built = subprocess.run(["bash", str(BUILD), "--abi-version"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertEqual(built.stdout, f"{crate}\n", "native/build.sh's load check expects another ABI version than the crate's")
 
     @unittest.skipUnless(os.environ.get("HS_VISION_CHECK_RELEASE") == "1", "the release is compared only with HS_VISION_CHECK_RELEASE=1")
     def test_release_matches(self):
