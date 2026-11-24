@@ -99,6 +99,7 @@ static class PeopleDetectorTests
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
                 (nameof(StopClosesTheRecogniserAndARestartKeepsPeopleAndGroups), StopClosesTheRecogniserAndARestartKeepsPeopleAndGroups),
                 (nameof(ThePageListsTheUnknownFacesToNameOrDismiss), ThePageListsTheUnknownFacesToNameOrDismiss),
+                (nameof(TheUnknownCardsKeepTheirPlaces), TheUnknownCardsKeepTheirPlaces),
                 (nameof(NamingAFaceIsASightingOfItsPerson), NamingAFaceIsASightingOfItsPerson),
                 (nameof(AStrangerIsDismissed), AStrangerIsDismissed),
                 (nameof(ThePageListsThePeopleToRenameMergeAndDelete), ThePageListsThePeopleToRenameMergeAndDelete),
@@ -1002,7 +1003,7 @@ static class PeopleDetectorTests
         return type?.GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(device) ?? throw new Exception($"PeopleDetector has no {name}");
     }
 
-    /// <summary>The unknown groups the running detector of <paramref name="definition"/> shows, the newest sighting first.</summary>
+    /// <summary>The unknown groups the running detector of <paramref name="definition"/> shows, the group first seen first.</summary>
     static dynamic[] Shown(Rig rig, string definition = "porch") => [.. VisionTests.Items((object)Member(rig.Detector(definition), "Unknown").Shown).Select(group => (dynamic)group)];
 
     static bool IsScore(string text) => System.Text.RegularExpressions.Regex.IsMatch(text, @"^\d\.\d\d$");
@@ -1720,7 +1721,7 @@ static class PeopleDetectorTests
         Check((string)unknown["title"]! == "Unknown faces" && unknown["attention"]!.GetValue<bool>() && (string)unknown["empty"]! == "No unknown faces.", "the unknown list: " + unknown.ToJsonString());
         var groups = Shown(rig);
         var cards = CardsOf(page, "unknown");
-        Check(cards.Select(c => (string)c["id"]!).SequenceEqual(groups.Select(g => (string)g.Id)), "a card for each shown group, in the order shown (the newest sighting first): " + string.Join(",", cards.Select(c => (string)c["id"]!)));
+        Check(cards.Select(c => (string)c["id"]!).SequenceEqual(groups.Select(g => (string)g.Id)), "a card for each shown group, in the order shown (the group first seen first): " + string.Join(",", cards.Select(c => (string)c["id"]!)));
         Check(page["attention"]!.GetValue<int>() == 3 && await Waiting(rig) == 3, $"the three wait: {page["attention"]}, {await Waiting(rig)}");
         var unknownFaces = Member(rig.Detector(), "Unknown");
         foreach (var card in cards)
@@ -1786,6 +1787,56 @@ static class PeopleDetectorTests
 
     // Naming a group is a sighting of its person at this camera, at the group's last sighting: a new person's card and option
     // say so at once; a person last seen earlier, here within the minute, moves forward; one seen since at another camera stays.
+    // The panel reads the page again every 2 seconds while someone works on a card: a card stays where it is when its
+    // group or another is seen again, and a new one is added at the end, so that a click never lands on a card that moved
+    // under the pointer.
+    static async Task TheUnknownCardsKeepTheirPlaces()
+    {
+        using var fake = new Fake(await Spots());
+        Show();
+        await using var rig = await Rig.Start("page-order");
+        var list = PeopleOf(rig);
+        string[] names = [Ana, Ivan, Mia, Ivo];
+        for (var spot = 0; spot < names.Length; spot++) Named(list, names[spot], spot + 1);
+        // The face at each of the four spots embedded is the one named for it, or a stranger of its own.
+        void Known(int spot) => fake.Embeds(spot, PeopleTests.At(PeopleTests.Unit(spot + 1), 0.8, 20 + spot));
+        void Stranger(int spot) => fake.Embeds(spot, PeopleTests.Unit(8000 + spot));
+        string[] Ids() => [.. CardsOf(Page(rig), "unknown").Select(card => (string)card["id"]!)];
+        string Drawn() => string.Join(",", Ids());
+        Stranger(0);
+        Known(1);
+        Known(2);
+        Known(3);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => Ids().Length == 1, "the first stranger is drawn: " + Drawn(), 10);
+        var first = Ids()[0];
+
+        // The first stranger goes, and another comes: its card is added after the first's.
+        Known(0);
+        Stranger(1);
+        await Until(() => Ids().Length == 2, "the second stranger is drawn: " + Drawn(), 10);
+        var second = Ids().Single(id => id != first);
+        Check(Ids().SequenceEqual([first, second]), $"the second card is added after the first: {Drawn()}, the first {first}");
+
+        // The first is seen again, and a third comes: the first stays first, and the third is last.
+        Stranger(0);
+        Known(1);
+        Stranger(2);
+        await Until(() => Ids().Length == 3, "the third stranger is drawn: " + Drawn(), 10);
+        var third = Ids().Single(id => id != first && id != second);
+        Check(Ids().SequenceEqual([first, second, third]), $"the cards keep their places, and the third is last: {Drawn()}, the first {first}, the second {second}");
+
+        // The first is dismissed while its face is in frame, alone: the group made of it again is drawn last.
+        Known(2);
+        Check(await Press(rig, "unknown", first, "dismiss", new { person = (object?)null }) == "done", "Dismiss of the first");
+        await Until(() => Ids().Length == 3 && !Ids().Contains(first), "the first face's group is made and drawn again: " + Drawn(), 10);
+        var again = Ids().Single(id => id != second && id != third);
+        Check(Ids().SequenceEqual([second, third, again]), $"the group made again is drawn last, the others where they were: {Drawn()}, the second {second}, the third {third}");
+        Hide();
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: the unknown cards keep their places across checks, a new one is added at the end, and a group made again comes back last");
+    }
+
     static async Task NamingAFaceIsASightingOfItsPerson()
     {
         using var cameras = Cameras(("camera.porch", "Porch camera"));

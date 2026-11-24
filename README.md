@@ -272,13 +272,13 @@ The page is in the definition's editor, under **Device** in the bottom drawer. O
 it. It has two lists, and a third when asked:
 
 - **Unknown faces**, which wait for you (their number is on the node's card and the definition's): one card for each
-  shown group, the newest sighting first, with its largest face, how often and when it was seen, and "Might be …" for
-  a suggested person. To name the face, press **Person**: a dialog lists the people you have named, each with their
-  face, how many samples they have and when they were last seen, and a box to search them by name. Choose one with a
-  click, or with the arrow keys and Enter; or choose **+ New person** under the list, fill in **First name** (and
-  **Last name** if you like), and press **Use**. Then press **Save**: the group's samples go to the person you chose,
-  or make the new person. A suggested person is chosen already, so **Save** alone accepts the suggestion. **Dismiss**
-  deletes the group.
+  shown group, the one first seen first, with its largest face, how often and when it was seen, and "Might be …" for
+  a suggested person. A card stays where it is when faces are seen again, and a new one is added at the end. To name
+  the face, press **Person**: a dialog lists the people you have named, each with their face, how many samples they
+  have and when they were last seen, and a box to search them by name. Choose one with a click, or with the arrow keys
+  and Enter; or choose **+ New person** under the list, fill in **First name** (and **Last name** if you like), and
+  press **Use**. Then press **Save**: the group's samples go to the person you chose, or make the new person. A
+  suggested person is chosen already, so **Save** alone accepts the suggestion. **Dismiss** deletes the group.
 - **People**, by full name, each with their newest named face, how many samples they have (and how many learned), and
   when and at which camera they were last seen. **Save** renames them to the **First name** and **Last name** on their
   card. To merge two cards of one person, press **Merge into** on the card to remove, choose the person to keep in its

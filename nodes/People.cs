@@ -1055,7 +1055,11 @@ public sealed class FaceGroups
         Publish();
     }
 
-    /// <summary>The groups seen at least <see cref="ShownAt"/> times, the newest sighting first: a snapshot, replaced by each change.</summary>
+    /// <summary>
+    /// The groups seen at least <see cref="ShownAt"/> times, the group first seen first (by id when two were first seen at
+    /// once): a snapshot, replaced by each change. A later sighting moves no group, and a new one is last, so that the
+    /// page's cards keep their order while someone works on one.
+    /// </summary>
     public IReadOnlyList<FaceGroup> Shown => Volatile.Read(ref shown);
 
     /// <summary>Whether the store is of another format, or its format cannot be read: then it has no groups and is never written.</summary>
@@ -1453,7 +1457,7 @@ public sealed class FaceGroups
     /// <summary>Replaces <see cref="Shown"/> with the groups shown now.</summary>
     void Publish()
     {
-        var list = groups.Values.Where(IsShown).OrderByDescending(group => group.Last).ThenBy(group => group.Id, StringComparer.Ordinal).Select(group => group.View()).ToList();
+        var list = groups.Values.Where(IsShown).OrderBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal).Select(group => group.View()).ToList();
         Volatile.Write(ref shown, list.AsReadOnly());
     }
 
