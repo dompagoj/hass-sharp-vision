@@ -113,8 +113,9 @@ The device opens the camera's live feed, at most 1280 pixels wide, when the defi
 interval whether or not anyone watches the camera. Each check takes the newest frame, finds the faces at an input size
 of 640 and the people at 416, recognises the faces it can (below), shows the frame with what it found on the device's
 camera, and sets the entities. Measured in the Home Assistant container on one arm64 host, faces at 640 take about
-29 ms and people at 416 about 35 ms. Each face recognised adds to that, so with a short **Check every** and several
-faces in view the detector checks less often than set.
+29 ms and people at 416 about 35 ms. Each face recognised adds about 45 ms there, measured under load: a check with
+four faces recognised took about 250 ms, with people detected too and a second detector running beside it. So with a
+short **Check every** and several faces in view the detector checks less often than set.
 
 The native library is downloaded once, the first time the definition starts, and loaded from the kept file after
 that. There are builds for Linux on arm64 and x64, with musl (the Home Assistant container) and with glibc:

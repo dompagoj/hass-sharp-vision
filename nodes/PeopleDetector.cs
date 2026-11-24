@@ -10,18 +10,26 @@ public class PeopleDetectorCamera : SharpCamera
 }
 
 /// <summary>
-/// A device that watches one of Home Assistant's cameras and reports the faces and people it sees: whether one is seen
-/// (held on for <see cref="StayOnFor"/> after the last), how many are in the newest frame checked, and when one was last
-/// seen; and a camera that shows each frame checked with what was found drawn on it. With <see cref="RecogniseFaces"/>
-/// on, it recognises the clear faces of each frame against the people list every People detector shares
-/// (<see cref="PeopleList"/>), groups the ones it does not know (<see cref="FaceGroups"/>), and learns new looks of the
-/// people it is sure of; its page on the Device tab lists the unknown faces to name or dismiss, the people to rename,
-/// merge and delete, and a person's samples to remove. Drop it in an entity definition as a node of its own and give it
-/// a camera; or derive a C# device node's class from it, such as <c>public class FrontDoor : PeopleDetector { }</c>. It
-/// downloads the vision library pinned by Vision.cs as the definition starts, and the face recognition model in the
-/// background once it has started. Setup, Start and Stop are its own; a derived class may still add entities in its
-/// constructor.
+/// Watches a Home Assistant camera and reports the faces and people it sees, and recognises the faces of the people you
+/// name. Its page, on the Device tab, lists the faces it does not know, for you to name.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The step list shows the summary above, so it names no member. The device reports whether a face or a person is seen
+/// (held on for <see cref="StayOnFor"/> after the last), how many are in the newest frame checked, and when one was last
+/// seen; and it has a camera that shows each frame checked with what was found drawn on it, its entities in the order
+/// its constructor gives. With <see cref="RecogniseFaces"/> on, it recognises the clear faces of each frame against the
+/// people list every People detector shares (<see cref="PeopleList"/>), groups the ones it does not know
+/// (<see cref="FaceGroups"/>), and learns new looks of the people it is sure of; its page lists the unknown faces to
+/// name or dismiss, the people to rename, merge and delete, and a person's samples to remove.
+/// </para>
+/// <para>
+/// Drop it in an entity definition as a node of its own and give it a camera; or derive a C# device node's class from
+/// it, such as <c>public class FrontDoor : PeopleDetector { }</c>. It downloads the vision library pinned by Vision.cs
+/// as the definition starts, and the face recognition model in the background once it has started. Setup, Start and
+/// Stop are its own; a derived class may still add entities in its constructor.
+/// </para>
+/// </remarks>
 [Node("People detector", Category = "Vision")]
 public class PeopleDetector : SharpDevice
 {

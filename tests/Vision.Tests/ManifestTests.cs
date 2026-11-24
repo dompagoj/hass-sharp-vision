@@ -125,7 +125,29 @@ static class ManifestTests
         Check(settings.Select(s => Text(s, "key")).SequenceEqual(keys), "its eleven settings, in order: " + string.Join(",", settings.Select(s => Text(s, "key"))));
         Check(settings.Where(s => s["required"]?.GetValue<bool>() == true).Select(s => Text(s, "key")).SequenceEqual(["Camera"]) && Text(settings[0], "domain") == "camera",
             "only Camera, a camera, is required: " + entry["classSignature"]!.ToJsonString());
+
+        // The step list shows the class's summary: a sentence or two for someone choosing a step, with nothing dropped.
+        Check(Text(entry, "description") == PeopleDetectorDescription, "the description is the class's short summary: " + Text(entry, "description"));
+        Plain(Text(entry, "description"), 300, "the People detector's description");
+        foreach (var setting in settings) Plain(Text(setting, "description"), 300, $"the description of the setting {Text(setting, "key")}");
+
+        // Detect faces and its inputs, the same.
+        var detect = catalog["catalog"]!["nodes"]![DetectFacesKind]!.AsObject();
+        Plain(Text(detect, "description"), 300, "Detect faces' description");
+        var inputs = detect["inputs"]?.AsObject() ?? throw new Exception("Detect faces has its inputs: " + detect.ToJsonString());
+        Check(inputs.Count == 3, "Detect faces has three inputs: " + inputs.ToJsonString());
+        foreach (var (key, input) in inputs) Plain(Text(input, "description"), 300, $"the description of Detect faces' input {key}");
     });
+
+    const string PeopleDetectorDescription = "Watches a Home Assistant camera and reports the faces and people it sees, and recognises the faces of the people you name. Its page, on the Device tab, lists the faces it does not know, for you to name.";
+
+    /// <summary>
+    /// A description the panel shows: there, not empty, at most <paramref name="longest"/> characters, and with nothing
+    /// left out of it, as a dropped reference leaves "()" or two spaces.
+    /// </summary>
+    static void Plain(string? text, int longest, string what) =>
+        Check(text is { Length: > 0 } && text.Length <= longest && !text.Contains("()", StringComparison.Ordinal) && !text.Contains("  ", StringComparison.Ordinal),
+            $"{what} is plain text of at most {longest} characters: {text?.Length} characters, {text}");
 
     static async Task TheRepositoryFrontDoorPeoplePreviews() => await Fresh("front-door", async api =>
     {
