@@ -78,9 +78,18 @@ public enum MatchKind
 /// <param name="Margin">How far the best score is above the second-best person's; the whole score when there is none.</param>
 public sealed record FaceMatch(MatchKind Kind, Person? Person, double Score, double Margin);
 
-/// <summary>Compares a face's embedding with every sample of every person.</summary>
+/// <summary>Compares a face's embedding with every sample of every person, and judges whether a recognised face is learned.</summary>
 public static class FaceMatcher
 {
+    /// <summary>
+    /// The cosine at or over which a face adds nothing to a sample: such a face is not learned, and a group keeps the
+    /// larger of the two.
+    /// </summary>
+    public const double Alike = 0.9;
+
+    /// <summary>How long after a person's last learned sample the next one may be learned.</summary>
+    public static readonly TimeSpan LearnedEvery = TimeSpan.FromMinutes(10);
+
     /// <summary>
     /// The person a face is: a person's score is their best sample's cosine; the face is recognised when the best score is
     /// at least <see cref="RecognitionRules.MatchScore"/> and beats the second-best person's by at least
@@ -113,6 +122,33 @@ public static class FaceMatcher
             : bestScore >= rules.SuggestScore ? MatchKind.Maybe
             : MatchKind.Unknown;
         return new(kind, kind == MatchKind.Unknown ? null : best, bestScore, margin);
+    }
+
+    /// <summary>
+    /// Whether a recognised face is kept as a learned sample of its person: its score is at least
+    /// <see cref="RecognitionRules.LearnScore"/> and its margin at least <see cref="RecognitionRules.LearnMargin"/>; it is
+    /// at least <see cref="RecognitionRules.MatchScore"/> from one of the person's named samples, so that a learned sample
+    /// never qualifies another and the learned ones cannot drift away from the faces the user named; it has at least
+    /// <see cref="RecognitionRules.LearnEyes"/> pixels between the eyes; it is under <see cref="Alike"/> from every sample
+    /// the person has; and the person gained no learned sample in the <see cref="LearnedEvery"/> before
+    /// <paramref name="now"/>.
+    /// </summary>
+    /// <param name="face">The face's embedding.</param>
+    /// <param name="eyes">The pixels between the face's eyes.</param>
+    /// <param name="match">The face's match, from <see cref="Match"/>.</param>
+    /// <param name="now">When the face was seen.</param>
+    /// <param name="rules">The lines to judge by.</param>
+    public static bool Learns(FaceEmbedding face, double eyes, FaceMatch match, DateTimeOffset now, RecognitionRules rules)
+    {
+        ArgumentNullException.ThrowIfNull(match);
+        ArgumentNullException.ThrowIfNull(rules);
+        if (match.Kind != MatchKind.Recognised || match.Person is not { } person) return false;
+        if (match.Score < rules.LearnScore || match.Margin < rules.LearnMargin || eyes < rules.LearnEyes) return false;
+        var samples = person.Samples;
+        if (!samples.Any(sample => !sample.Learned && sample.Embedding.Similarity(face) >= rules.MatchScore)) return false;
+        if (samples.Any(sample => sample.Embedding.Similarity(face) >= Alike)) return false;
+        var learned = samples.Where(sample => sample.Learned).Select(sample => (DateTimeOffset?)sample.At).Max();
+        return learned is not { } last || now - last >= LearnedEvery;
     }
 }
 
@@ -163,7 +199,7 @@ public sealed class PeopleList
     public const int LargestCrop = 1024 * 1024;
 
     const int Format = 1;
-    const int Values = 128;
+    internal const int Values = 128;
     const int IdLength = 12;
     const string IdCharacters = "abcdefghijklmnopqrstuvwxyz0123456789";
     static readonly TimeSpan SeenEvery = TimeSpan.FromMinutes(1);
@@ -636,12 +672,23 @@ public sealed class PeopleList
     }
 
     /// <summary>An embedding's 128 values; null when it is gone, damaged or not 512 bytes.</summary>
-    float[]? ReadEmbedding(string key)
+    float[]? ReadEmbedding(string key) => EmbeddingValues(TryBytes(key));
+
+    /// <summary>The 128 values of an embedding's stored bytes; null when there are none or they are not 512.</summary>
+    internal static float[]? EmbeddingValues(byte[]? bytes)
     {
-        if (TryBytes(key) is not { Length: Values * sizeof(float) } bytes) return null;
+        if (bytes is not { Length: Values * sizeof(float) }) return null;
         var values = new float[Values];
         for (var i = 0; i < Values; i++) values[i] = BinaryPrimitives.ReadSingleLittleEndian(bytes.AsSpan(i * sizeof(float)));
         return values;
+    }
+
+    /// <summary>An embedding's 128 values as they are stored: little-endian floats.</summary>
+    internal static byte[] EmbeddingBytes(float[] values)
+    {
+        var bytes = new byte[Values * sizeof(float)];
+        for (var v = 0; v < Values; v++) BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(v * sizeof(float)), values[v]);
+        return bytes;
     }
 
     byte[]? TryBytes(string key)
@@ -661,8 +708,7 @@ public sealed class PeopleList
         for (var i = 0; i < listed.Count; i++)
         {
             var (sample, face) = (listed[i], given[i]);
-            var bytes = new byte[Values * sizeof(float)];
-            for (var v = 0; v < Values; v++) BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(v * sizeof(float)), face.Embedding.Values[v]);
+            var bytes = EmbeddingBytes(face.Embedding.Values);
             Store(() =>
             {
                 data.SetBytes(EmbeddingKey(personId, sample.Id), bytes);
@@ -738,10 +784,10 @@ public sealed class PeopleList
     }
 
     /// <summary>A new id: 12 lower-case letters and digits, from a cryptographic random source.</summary>
-    static string NewId() => RandomNumberGenerator.GetString(IdCharacters, IdLength);
+    internal static string NewId() => RandomNumberGenerator.GetString(IdCharacters, IdLength);
 
     /// <summary>Whether a string can be an id here, and so a part of a key.</summary>
-    static bool IsId(string? id) => id is { Length: > 0 and <= 32 } && id.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9');
+    internal static bool IsId(string? id) => id is { Length: > 0 and <= 32 } && id.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9');
 
     static string RecordKey(string personId) => $"people/{personId}";
     static string EmbeddingKey(string personId, string sampleId) => $"samples/{personId}/{sampleId}/embedding";
@@ -756,4 +802,539 @@ public sealed class PeopleList
 
     /// <summary>An add, a delete or a merge's removal of a person, as <c>unfinished/&lt;id&gt;</c> notes it while it runs.</summary>
     internal sealed record Unfinished(DateTimeOffset At, bool Removing);
+}
+
+/// <summary>A group of faces of someone the people list does not have, as one detector saw them.</summary>
+/// <param name="Id">The group's id: short, URL-safe and meaningless.</param>
+/// <param name="Sightings">How many checks saw the group; the faces of one check count once.</param>
+/// <param name="First">When the group was first seen.</param>
+/// <param name="Last">When the group was last seen.</param>
+/// <param name="SuggestedPersonId">The id of the person the group might be; null when there is none.</param>
+public sealed record FaceGroup(string Id, int Sightings, DateTimeOffset First, DateTimeOffset Last, string? SuggestedPersonId);
+
+/// <summary>
+/// The faces one People detector sees that the people list does not know, grouped by likeness so that the user can name
+/// them, and kept in the detector's own store. A face joins every group it is at least
+/// <see cref="RecognitionRules.MatchScore"/> from a sample of, and the groups it joins become one, the oldest; a face
+/// close to none starts a group. A group is shown (<see cref="Shown"/>) from its <see cref="ShownAt"/>th sighting.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The store's keys: <c>format</c>, 1; <c>groups</c>, a JSON array of the groups' ids; <c>groups/&lt;id&gt;</c>, a group
+/// without its embeddings and crops; <c>groups/&lt;id&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats; and
+/// <c>groups/&lt;id&gt;/&lt;sampleId&gt;/crop</c>, the JPEG.
+/// </para>
+/// <para>
+/// Memory is the truth while the detector runs, and the store follows: a group is written when it starts, gains or loses
+/// a sample, is joined with another, is first shown or has its suggestion changed by <see cref="Rematch"/>, and its last
+/// seen and count otherwise at most once a minute (<see cref="WrittenEvery"/>). A restart can lose up to a minute of a
+/// group's sightings.
+/// </para>
+/// <para>
+/// A new group's samples are written before its record, and its record before the index lists it; a group removed leaves
+/// the index first, then its record and samples go. Only this detector writes its store, and a revision of it loads the
+/// store only after the one before has stopped, so loading removes every key under <c>groups/</c> that the index and the
+/// groups' records do not list: what an interruption left, which nothing is still writing. A group whose record cannot
+/// be read, or has no sample left, is dropped with its keys; an index that cannot be read drops every group, as this is
+/// a cache of faces the user has not named. A store of another format is neither read nor written, and has no groups.
+/// A store cleared while the detector runs is noticed at the next change, and the groups in memory are forgotten, so
+/// that none is written back.
+/// </para>
+/// <para>
+/// <see cref="Shown"/> is a snapshot that each change replaces and never changes, read without waiting. One lock guards
+/// the groups, and each change holds it across its writes to the store, so that a check's sighting and a page's removal
+/// cannot interleave their writes and leave a removed group's sample behind. <see cref="Samples"/> and
+/// <see cref="Crop"/> read the store outside it, and <see cref="Rematch"/> matches the samples outside it. Nothing here
+/// is logged.
+/// </para>
+/// </remarks>
+public sealed class FaceGroups
+{
+    /// <summary>The sightings from which a group is shown.</summary>
+    public const int ShownAt = 3;
+    /// <summary>The most groups a detector keeps; a new one beyond drops the group seen longest ago.</summary>
+    public const int MostGroups = 50;
+    /// <summary>The most samples a group keeps.</summary>
+    public const int MostSamples = 5;
+    /// <summary>How long a group has from its first sighting to be shown; one that is not is dropped.</summary>
+    public static readonly TimeSpan ShownWithin = TimeSpan.FromHours(1);
+    /// <summary>How often at most a group's last seen and count are written when nothing else of it changes.</summary>
+    public static readonly TimeSpan WrittenEvery = TimeSpan.FromMinutes(1);
+
+    const int Format = 1;
+    const string IndexKey = "groups";
+
+    readonly SharpData data;
+    readonly string camera;
+    readonly RecognitionRules rules;
+    // False for a store of another format, which is neither read nor written.
+    readonly bool ours;
+    // Guards groups and formatted, and is held across each change's writes to the store.
+    readonly Lock gate = new();
+    readonly Dictionary<string, Group> groups = new(StringComparer.Ordinal);
+    // Whether the store has its format: one found without it afterwards was cleared.
+    bool formatted;
+    IReadOnlyList<FaceGroup> shown = Array.Empty<FaceGroup>();
+
+    /// <summary>The groups a detector keeps in its store, loaded.</summary>
+    /// <param name="data">The detector's own store, its <c>Data</c>.</param>
+    /// <param name="camera">The entity id of the detector's camera, which the samples were seen at.</param>
+    /// <param name="rules">
+    /// The lines to group by. A change of the detector's settings saves its definition, which makes a new detector and
+    /// so new groups, read from the same store.
+    /// </param>
+    public FaceGroups(SharpData data, string camera, RecognitionRules rules)
+    {
+        this.data = data ?? throw new ArgumentNullException(nameof(data));
+        this.camera = camera ?? throw new ArgumentNullException(nameof(camera));
+        this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
+        var format = ReadFormat();
+        ours = format is null or Format;
+        if (!ours) return;
+        formatted = format == Format;
+        Load();
+        Publish();
+    }
+
+    /// <summary>The groups seen at least <see cref="ShownAt"/> times, the newest sighting first: a snapshot, replaced by each change.</summary>
+    public IReadOnlyList<FaceGroup> Shown => Volatile.Read(ref shown);
+
+    /// <summary>Every group, shown or not, by first sighting.</summary>
+    internal IReadOnlyList<FaceGroup> All
+    {
+        get { lock (gate) return groups.Values.OrderBy(group => group.First).Select(group => group.View()).ToList().AsReadOnly(); }
+    }
+
+    /// <summary>A group, shown or not; null when there is none of that id.</summary>
+    public FaceGroup? Find(string id)
+    {
+        lock (gate) return id != null && groups.TryGetValue(id, out var group) ? group.View() : null;
+    }
+
+    /// <summary>
+    /// Notes a face that the people list does not know, or only suggests a person for, seen in a check. It joins every
+    /// group it is at least <see cref="RecognitionRules.MatchScore"/> from a sample of, which become one, the group first
+    /// seen; it starts a group when there is none. A group counts one sighting a check, so the faces of one check are
+    /// given the same <paramref name="now"/>. A group not shown within <see cref="ShownWithin"/> is dropped first.
+    /// </summary>
+    /// <param name="face">The face's embedding.</param>
+    /// <param name="crop">Makes the face's crop, a JPEG of at most 1 MiB; called once when the face is kept as one of the group's samples, and not at all otherwise.</param>
+    /// <param name="eyes">The pixels between the face's eyes: a group keeps its larger faces.</param>
+    /// <param name="now">When the check saw the face.</param>
+    /// <param name="suggestedPersonId">The person the face might be, from a maybe; null for none, which leaves the group's suggestion as it is.</param>
+    /// <exception cref="ArgumentException">The embedding has no 128 values, or the crop is null or over 1 MiB.</exception>
+    public void Seen(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggestedPersonId)
+    {
+        ArgumentNullException.ThrowIfNull(crop);
+        if (face.Values is not { Length: PeopleList.Values }) throw new ArgumentException("A face's embedding has 128 values");
+        if (!ours) return;
+        var suggested = PeopleList.IsId(suggestedPersonId) ? suggestedPersonId : null;
+        lock (gate)
+        {
+            Cleared();
+            Drop(groups.Values.Where(group => !IsShown(group) && now - group.First >= ShownWithin).ToList());
+            var close = groups.Values
+                .Where(group => group.Samples.Any(sample => sample.Embedding.Similarity(face) >= rules.MatchScore))
+                .OrderBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal)
+                .ToList();
+            if (close.Count == 0) Start(face, crop, eyes, now, suggested);
+            else Join(close, face, crop, eyes, now, suggested);
+            Publish();
+        }
+    }
+
+    /// <summary>
+    /// Matches every group's samples against the people list again, after it changed: a group a sample of which is now
+    /// recognised as someone is removed; one a sample of which is a maybe suggests that person; a suggestion whose person
+    /// is gone is cleared.
+    /// </summary>
+    /// <param name="people">The people list, such as <see cref="PeopleList.People"/>.</param>
+    /// <param name="rules">The lines to judge by.</param>
+    public void Rematch(IReadOnlyList<Person> people, RecognitionRules rules)
+    {
+        ArgumentNullException.ThrowIfNull(people);
+        ArgumentNullException.ThrowIfNull(rules);
+        if (!ours) return;
+        List<(Group Group, GroupSample[] Samples)> taken;
+        lock (gate) taken = groups.Values.Select(group => (group, group.Samples.ToArray())).ToList();
+        // Matched outside the lock: it can take a while against a full list, and a check should not wait for it.
+        var judged = taken.Select(item => (item.Group, Matches: item.Samples.Select(sample => FaceMatcher.Match(sample.Embedding, people, rules)).ToList())).ToList();
+        lock (gate)
+        {
+            Cleared();
+            var recognised = new List<Group>();
+            foreach (var (group, matches) in judged)
+            {
+                // Removed or joined into another meanwhile.
+                if (!groups.TryGetValue(group.Id, out var current) || current != group) continue;
+                if (matches.Any(match => match.Kind == MatchKind.Recognised))
+                {
+                    recognised.Add(group);
+                    continue;
+                }
+                var maybe = matches.Where(match => match.Kind == MatchKind.Maybe).MaxBy(match => match.Score);
+                var suggested = maybe?.Person?.Id ?? (people.Any(person => person.Id == group.Suggested) ? group.Suggested : null);
+                if (suggested == group.Suggested) continue;
+                group.Suggested = suggested;
+                WriteRecord(group);
+            }
+            Drop(recognised);
+            Publish();
+        }
+    }
+
+    /// <summary>
+    /// Drops the groups that are due: one not shown within <see cref="ShownWithin"/> of its first sighting, and a shown
+    /// one not seen for <paramref name="keep"/>.
+    /// </summary>
+    /// <param name="now">The time now.</param>
+    /// <param name="keep">How long a shown group is kept after its last sighting: the detector's <i>Keep unknown faces for</i>.</param>
+    public void Expire(DateTimeOffset now, TimeSpan keep)
+    {
+        if (!ours) return;
+        lock (gate)
+        {
+            Cleared();
+            Drop(groups.Values.Where(group => IsShown(group) ? now - group.Last >= keep : now - group.First >= ShownWithin).ToList());
+            Publish();
+        }
+    }
+
+    /// <summary>Removes a group with its samples, once it is named or dismissed. Nothing when it is gone already.</summary>
+    public void Remove(string id)
+    {
+        if (!ours || id == null) return;
+        lock (gate)
+        {
+            Cleared();
+            if (!groups.TryGetValue(id, out var group)) return;
+            Drop([group]);
+            Publish();
+        }
+    }
+
+    /// <summary>
+    /// A group's samples, the largest faces first, with their crops read from the store, as
+    /// <see cref="PeopleList.Add"/> and <see cref="PeopleList.AddSamples"/> take them; a sample whose crop is gone is left
+    /// out. Empty when there is no such group.
+    /// </summary>
+    public IReadOnlyList<NewSample> Samples(string id)
+    {
+        var samples = new List<NewSample>();
+        foreach (var sample in Taken(id))
+            if (TryBytes(CropKey(id, sample.Id)) is { } crop) samples.Add(new NewSample(sample.Embedding, crop, sample.At, camera));
+        return samples.AsReadOnly();
+    }
+
+    /// <summary>The crop of a group's largest face, as stored; null when there is no such group or crop.</summary>
+    public byte[]? Crop(string groupId)
+    {
+        foreach (var sample in Taken(groupId))
+            if (TryBytes(CropKey(groupId, sample.Id)) is { } crop) return crop;
+        return null;
+    }
+
+    // ---- Changes; each under the lock ----
+
+    /// <summary>Starts a group of one face, dropping the group seen longest ago when there are <see cref="MostGroups"/>.</summary>
+    void Start(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
+    {
+        var bytes = Made(crop);
+        if (groups.Count >= MostGroups) Drop([groups.Values.OrderBy(group => group.Last).ThenBy(group => group.Id, StringComparer.Ordinal).First()]);
+        var group = new Group(PeopleList.NewId()) { Sightings = 1, First = now, Last = now, Suggested = suggested };
+        var sample = new GroupSample(PeopleList.NewId(), face, eyes, now);
+        group.Samples.Add(sample);
+        groups[group.Id] = group;
+        WriteSample(group.Id, sample, bytes);
+        WriteRecord(group);
+        ChangeIndex(index => index.Add(group.Id));
+    }
+
+    /// <summary>
+    /// A face joins the groups it is close to: they become the first, with every sighting (this check's once), the best
+    /// of their samples, and the face as a sample when it adds to them.
+    /// </summary>
+    void Join(List<Group> close, FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
+    {
+        var (group, others) = (close[0], close.Skip(1).ToList());
+        var seenNow = close.Count(g => g.Last == now);
+        var sightings = close.Sum(g => g.Sightings) - Math.Max(0, seenNow - 1) + (seenNow == 0 ? 1 : 0);
+        // Each sample once: an interrupted join can leave a sample's copy in both groups, which keeps its id.
+        var pooled = new List<(Group Owner, GroupSample Sample)>();
+        foreach (var g in close)
+        foreach (var sample in g.Samples)
+            if (!pooled.Any(item => item.Sample.Id == sample.Id)) pooled.Add((g, sample));
+        var kept = Best(pooled);
+        var (keep, replaced) = Admits(kept.Select(k => k.Sample).ToList(), face, eyes);
+        // The crop is made before anything changes, as it may throw.
+        var bytes = keep ? Made(crop) : null;
+
+        var added = keep ? new GroupSample(PeopleList.NewId(), face, eyes, now) : null;
+        var samples = kept.Select(k => k.Sample).Where(sample => sample != replaced).ToList();
+        if (added != null) samples.Add(added);
+        var moved = kept.Where(k => k.Owner != group && k.Sample != replaced).Select(k => (k.Owner.Id, k.Sample)).ToList();
+        var dropped = group.Samples.Where(sample => !samples.Contains(sample)).ToList();
+        var firstShown = !IsShown(group) && sightings >= ShownAt;
+        group.Sightings = sightings;
+        var latest = close.Max(g => g.Last);
+        group.Last = latest > now ? latest : now;
+        group.Suggested = suggested ?? group.Suggested ?? others.Select(g => g.Suggested).FirstOrDefault(s => s != null);
+        group.Samples = samples;
+        foreach (var other in others) groups.Remove(other.Id);
+
+        foreach (var (from, sample) in moved) CopySample(from, group.Id, sample);
+        if (added != null) WriteSample(group.Id, added, bytes!);
+        if (others.Count > 0 || added != null || dropped.Count > 0 || firstShown || group.Written is not { } written || (now - written).Duration() >= WrittenEvery)
+            WriteRecord(group);
+        if (others.Count > 0)
+        {
+            var gone = others.Select(other => other.Id).ToHashSet(StringComparer.Ordinal);
+            ChangeIndex(index => index.RemoveAll(gone.Contains));
+            foreach (var other in others) Forget(other.Id);
+        }
+        foreach (var sample in dropped) RemoveSampleKeys(group.Id, sample.Id);
+    }
+
+    /// <summary>At most <see cref="MostSamples"/> of the samples: the largest faces first, those unlike the ones chosen before the rest.</summary>
+    static List<(Group Owner, GroupSample Sample)> Best(List<(Group Owner, GroupSample Sample)> samples)
+    {
+        if (samples.Count <= MostSamples) return samples;
+        var largest = samples.OrderByDescending(item => item.Sample.Eyes).ToList();
+        var chosen = new List<(Group Owner, GroupSample Sample)>();
+        foreach (var item in largest)
+            if (chosen.Count < MostSamples && chosen.All(c => c.Sample.Embedding.Similarity(item.Sample.Embedding) < FaceMatcher.Alike)) chosen.Add(item);
+        foreach (var item in largest)
+            if (chosen.Count < MostSamples && !chosen.Contains(item)) chosen.Add(item);
+        return chosen;
+    }
+
+    /// <summary>
+    /// Whether a group keeps a face as a sample, and which sample it takes the place of: a face alike to a sample replaces
+    /// it when larger and is not kept otherwise; one unlike every sample is added when there is room, and replaces the
+    /// smallest when it is larger.
+    /// </summary>
+    static (bool Keep, GroupSample? Replaced) Admits(List<GroupSample> samples, FaceEmbedding face, double eyes)
+    {
+        if (samples.Count == 0) return (true, null);
+        var closest = samples.MaxBy(sample => sample.Embedding.Similarity(face))!;
+        if (closest.Embedding.Similarity(face) >= FaceMatcher.Alike) return eyes > closest.Eyes ? (true, closest) : (false, null);
+        if (samples.Count < MostSamples) return (true, null);
+        var smallest = samples.MinBy(sample => sample.Eyes)!;
+        return eyes > smallest.Eyes ? (true, smallest) : (false, null);
+    }
+
+    /// <summary>Removes groups: from the index first, then their records and samples.</summary>
+    void Drop(List<Group> dropped)
+    {
+        if (dropped.Count == 0) return;
+        foreach (var group in dropped) groups.Remove(group.Id);
+        var gone = dropped.Select(group => group.Id).ToHashSet(StringComparer.Ordinal);
+        ChangeIndex(index => index.RemoveAll(gone.Contains));
+        foreach (var group in dropped) Forget(group.Id);
+    }
+
+    /// <summary>Forgets every group when the store was cleared since this last wrote to it, so that none is written back.</summary>
+    void Cleared()
+    {
+        if (!formatted || data.Keys("format").Contains("format")) return;
+        groups.Clear();
+        formatted = false;
+    }
+
+    /// <summary>Replaces <see cref="Shown"/> with the groups shown now.</summary>
+    void Publish()
+    {
+        var list = groups.Values.Where(IsShown).OrderByDescending(group => group.Last).ThenBy(group => group.Id, StringComparer.Ordinal).Select(group => group.View()).ToList();
+        Volatile.Write(ref shown, list.AsReadOnly());
+    }
+
+    static bool IsShown(Group group) => group.Sightings >= ShownAt;
+
+    /// <exception cref="ArgumentException">The crop is null or over 1 MiB.</exception>
+    static byte[] Made(Func<byte[]> crop)
+    {
+        var bytes = crop() ?? throw new ArgumentException("A face's crop cannot be null");
+        if (bytes.Length > PeopleList.LargestCrop) throw new ArgumentException("A face's crop takes at most 1 MiB");
+        return bytes;
+    }
+
+    /// <summary>A group's samples, the largest first; none when there is no such group.</summary>
+    GroupSample[] Taken(string id)
+    {
+        if (!ours || id == null) return [];
+        lock (gate) return groups.TryGetValue(id, out var group) ? [.. group.Samples.OrderByDescending(sample => sample.Eyes)] : [];
+    }
+
+    // ---- Loading ----
+
+    /// <summary>Reads the groups, and removes what an interruption left; see the remarks.</summary>
+    void Load()
+    {
+        List<string>? index;
+        var rewrite = false;
+        try { index = data.Get<List<string>>(IndexKey); }
+        catch (InvalidDataException) { (index, rewrite) = (null, true); }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { (index, rewrite) = (null, true); }
+        foreach (var id in index ?? [])
+        {
+            if (!PeopleList.IsId(id) || groups.ContainsKey(id) || Read(id) is not { } group)
+            {
+                rewrite = true;
+                continue;
+            }
+            groups[id] = group;
+        }
+        foreach (var key in data.Keys("groups/"))
+        {
+            var parts = key.Split('/');
+            var listed = groups.TryGetValue(parts[1], out var group)
+                && (parts.Length == 2 || parts.Length == 4 && group.Samples.Any(sample => sample.Id == parts[2]));
+            if (listed) continue;
+            try { data.Remove(key); }
+            catch (Exception e) when (e is not ObjectDisposedException) { }
+        }
+        if (rewrite) Try(() => data.Set(IndexKey, groups.Keys.Order(StringComparer.Ordinal).ToList()));
+    }
+
+    /// <summary>A group as its record and samples have it; null when its record cannot be read or no sample of it can.</summary>
+    Group? Read(string id)
+    {
+        StoredGroup? record;
+        try { record = data.Get<StoredGroup>(RecordKey(id)); }
+        catch (InvalidDataException) { return null; }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return null; }
+        if (record == null) return null;
+        var group = new Group(id)
+        {
+            Sightings = Math.Max(1, record.Sightings),
+            First = record.First,
+            Last = record.Last,
+            Suggested = PeopleList.IsId(record.Suggested) ? record.Suggested : null,
+            Written = record.Last,
+        };
+        foreach (var sample in record.Samples ?? [])
+        {
+            if (sample == null || !PeopleList.IsId(sample.Id) || group.Samples.Count >= MostSamples || group.Samples.Any(s => s.Id == sample.Id)) continue;
+            if (PeopleList.EmbeddingValues(TryBytes(EmbeddingKey(id, sample.Id))) is { } values)
+                group.Samples.Add(new GroupSample(sample.Id, new FaceEmbedding(values, sample.Fit), sample.Eyes, sample.At));
+        }
+        return group.Samples.Count == 0 ? null : group;
+    }
+
+    /// <summary>The store's format; null when none is written yet, and -1 when it cannot be read.</summary>
+    int? ReadFormat()
+    {
+        try { return data.Get<int?>("format"); }
+        catch (InvalidDataException) { return -1; }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return -1; }
+    }
+
+    byte[]? TryBytes(string key)
+    {
+        try { return data.GetBytes(key); }
+        catch (InvalidDataException) { return null; }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return null; }
+    }
+
+    // ---- Writing; each under the lock ----
+
+    /// <summary>
+    /// A write to the store, after the format when the store has none. One the store refuses (it is full, or a key is of
+    /// the wrong kind) is left out: memory stays the truth, and the next load drops what the store lacks.
+    /// </summary>
+    void Try(Action write)
+    {
+        try
+        {
+            if (!formatted)
+            {
+                data.Update<int?>("format", current => current ?? Format);
+                formatted = true;
+            }
+            write();
+        }
+        catch (InvalidDataException) { }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
+    }
+
+    void ChangeIndex(Action<List<string>> change) => Try(() => data.Update<List<string>>(IndexKey, index =>
+    {
+        index ??= [];
+        change(index);
+        return index;
+    }));
+
+    void WriteSample(string groupId, GroupSample sample, byte[] crop) => Try(() =>
+    {
+        data.SetBytes(EmbeddingKey(groupId, sample.Id), PeopleList.EmbeddingBytes(sample.Embedding.Values));
+        data.SetBytes(CropKey(groupId, sample.Id), crop);
+    });
+
+    /// <summary>Copies a sample of a group being joined into another, keeping its id; one whose crop is gone is copied without it.</summary>
+    void CopySample(string fromId, string intoId, GroupSample sample)
+    {
+        var crop = TryBytes(CropKey(fromId, sample.Id));
+        Try(() =>
+        {
+            data.SetBytes(EmbeddingKey(intoId, sample.Id), PeopleList.EmbeddingBytes(sample.Embedding.Values));
+            if (crop != null) data.SetBytes(CropKey(intoId, sample.Id), crop);
+        });
+    }
+
+    void WriteRecord(Group group)
+    {
+        var record = new StoredGroup(group.First, group.Last, group.Sightings, group.Suggested,
+            group.Samples.Select(sample => new StoredGroupSample(sample.Id, sample.At, sample.Eyes, sample.Embedding.Fit)).ToList());
+        Try(() => data.Set(RecordKey(group.Id), record));
+        group.Written = group.Last;
+    }
+
+    /// <summary>Removes a group's record and every key of its samples, as far as it can.</summary>
+    void Forget(string groupId)
+    {
+        try
+        {
+            data.Remove(RecordKey(groupId));
+            foreach (var key in data.Keys($"groups/{groupId}/")) data.Remove(key);
+        }
+        catch (Exception e) when (e is not ObjectDisposedException) { }
+    }
+
+    void RemoveSampleKeys(string groupId, string sampleId)
+    {
+        try
+        {
+            data.Remove(EmbeddingKey(groupId, sampleId));
+            data.Remove(CropKey(groupId, sampleId));
+        }
+        catch (Exception e) when (e is not ObjectDisposedException) { }
+    }
+
+    static string RecordKey(string groupId) => $"groups/{groupId}";
+    static string EmbeddingKey(string groupId, string sampleId) => $"groups/{groupId}/{sampleId}/embedding";
+    static string CropKey(string groupId, string sampleId) => $"groups/{groupId}/{sampleId}/crop";
+
+    /// <summary>A group in memory; changed only under the lock.</summary>
+    sealed class Group(string id)
+    {
+        public string Id { get; } = id;
+        public int Sightings { get; set; }
+        public DateTimeOffset First { get; set; }
+        public DateTimeOffset Last { get; set; }
+        public string? Suggested { get; set; }
+        public List<GroupSample> Samples { get; set; } = [];
+        /// <summary>The last seen its record was last written with; null when it never was.</summary>
+        public DateTimeOffset? Written { get; set; }
+
+        public FaceGroup View() => new(Id, Sightings, First, Last, Suggested);
+    }
+
+    /// <summary>A sample of a group: its face, how large it was, and when it was seen; the crop is in the store only.</summary>
+    sealed record GroupSample(string Id, FaceEmbedding Embedding, double Eyes, DateTimeOffset At);
+
+    /// <summary>A group as <c>groups/&lt;id&gt;</c> keeps it: without its embeddings and crops.</summary>
+    internal sealed record StoredGroup(DateTimeOffset First, DateTimeOffset Last, int Sightings, string? Suggested, List<StoredGroupSample>? Samples);
+
+    /// <summary>A sample as its group's record lists it.</summary>
+    internal sealed record StoredGroupSample(string Id, DateTimeOffset At, double Eyes, float Fit);
 }

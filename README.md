@@ -161,8 +161,8 @@ dotnet run --project tests/Vision.Tests --disable-build-servers -p:HassSharpRoot
 ```
 
 `HASS_SHARP_ROOT` may name the checkout instead of `-p:HassSharpRoot`. `--vision` runs the tests of `Vision.cs`,
-`--people` those of `People.cs` (the people list and the matcher, over device data in a temporary directory, with
-made-up embeddings), `--people-detector` those of `PeopleDetector.cs`, and `--vision-manifest` imports `Vision.cs` and
+`--people` those of `People.cs` (the people list, the matcher, the unknown-face groups and the learning rule, over
+device data in a temporary directory, with made-up embeddings), `--people-detector` those of `PeopleDetector.cs`, and `--vision-manifest` imports `Vision.cs` and
 `PeopleDetector.cs` as **Add external** does and previews `nodes/front_door_people.json`. The checkout must be on
 hass-sharp's branch `face-detection-and-external-import`, which has `[NodeSetup]`, the node library import and the
 still picture of the runtime suite's fake ffmpeg. The tests need the .NET 11 SDK, Python 3 (the fake ffmpeg is a Python script) and

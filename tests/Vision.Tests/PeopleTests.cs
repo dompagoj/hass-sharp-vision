@@ -188,6 +188,15 @@ static class PeopleTests
         /// <summary>The shared store after a restart: a new <see cref="DataStores"/> on the same root, reading from disk.</summary>
         public SharpData Restarted(string definition = "after") => new DataStores(Root).OpenShared(StoreName, new DataUser(definition, "front_door", action => Task.Run(action)));
 
+        /// <summary>The private store of the detector <c>front_door</c> of definition <c>def-a</c>, as its <c>Data</c>.</summary>
+        public SharpData Device() => Stores.OpenDevice(new DataUser("def-a", "front_door", action => Task.Run(action)));
+
+        /// <summary>That detector's private store after a restart, or as its next revision opens it.</summary>
+        public SharpData RestartedDevice() => new DataStores(Root).OpenDevice(new DataUser("def-a", "front_door", action => Task.Run(action)));
+
+        /// <summary>The directory of that detector's private store: a file per key.</summary>
+        public string DeviceDirectory => Path.Combine(Root, "devices", "def-a", "front_door");
+
         public void Dispose()
         {
             if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
@@ -242,6 +251,26 @@ static class PeopleTests
             (nameof(AnInterruptedAddLeavesNoFaceData), Sync(AnInterruptedAddLeavesNoFaceData)),
             (nameof(AnInterruptedDeleteLeavesNoFaceData), Sync(AnInterruptedDeleteLeavesNoFaceData)),
             (nameof(AnInterruptedMergeLeavesNoFaceData), Sync(AnInterruptedMergeLeavesNoFaceData)),
+            (nameof(AFaceStartsAGroupAndACloseOneJoinsIt), Sync(AFaceStartsAGroupAndACloseOneJoinsIt)),
+            (nameof(TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder), Sync(TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder)),
+            (nameof(AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce), Sync(AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce)),
+            (nameof(GroupsExpire), Sync(GroupsExpire)),
+            (nameof(The51stGroupDropsTheOneSeenLongestAgo), Sync(The51stGroupDropsTheOneSeenLongestAgo)),
+            (nameof(AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces), Sync(AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces)),
+            (nameof(RematchRemovesRecognisedGroupsAndUpdatesSuggestions), Sync(RematchRemovesRecognisedGroupsAndUpdatesSuggestions)),
+            (nameof(TheNextRevisionReadsTheSameGroups), Sync(TheNextRevisionReadsTheSameGroups)),
+            (nameof(LastSeenAndCountAreWrittenAtMostOnceAMinute), Sync(LastSeenAndCountAreWrittenAtMostOnceAMinute)),
+            (nameof(ARemovedGroupLeavesNoFaceData), Sync(ARemovedGroupLeavesNoFaceData)),
+            (nameof(WhatAnInterruptionLeavesOfGroupsIsCleanedUp), Sync(WhatAnInterruptionLeavesOfGroupsIsCleanedUp)),
+            (nameof(ANewerFormatOfGroupsIsNeitherReadNorWritten), Sync(ANewerFormatOfGroupsIsNeitherReadNorWritten)),
+            (nameof(AClearedStoreGetsNoGroupBack), Sync(AClearedStoreGetsNoGroupBack)),
+            (nameof(AFaceIsLearnedWhenAllFiveHold), Sync(AFaceIsLearnedWhenAllFiveHold)),
+            (nameof(AFaceUnderTheLearnScoreIsNotLearned), Sync(AFaceUnderTheLearnScoreIsNotLearned)),
+            (nameof(AFaceUnderTheLearnMarginIsNotLearned), Sync(AFaceUnderTheLearnMarginIsNotLearned)),
+            (nameof(AFaceAnchoredOnlyOnALearnedSampleIsNotLearned), Sync(AFaceAnchoredOnlyOnALearnedSampleIsNotLearned)),
+            (nameof(ASmallFaceIsNotLearned), Sync(ASmallFaceIsNotLearned)),
+            (nameof(AFaceThatAddsNothingIsNotLearned), Sync(AFaceThatAddsNothingIsNotLearned)),
+            (nameof(OneLearnedSampleInTenMinutes), Sync(OneLearnedSampleInTenMinutes)),
         };
         var failures = new List<string>();
         var log = PyInterop.Log;
@@ -260,7 +289,7 @@ static class PeopleTests
         try { NoNameOrCropIsLogged(); }
         catch (Exception e) { failures.Add($"{nameof(NoNameOrCropIsLogged)}: {e}"); }
         if (failures.Count > 0) throw new Exception($"People: {failures.Count} failing:\n" + string.Join("\n", failures));
-        Console.WriteLine("PASS people: People.cs keeps one shared list of named people with their face samples, and matches a face by best sample and margin");
+        Console.WriteLine("PASS people: People.cs keeps one shared list of named people with their face samples, matches a face by best sample and margin, groups the faces nobody matches and learns a face it is sure of");
     }
 
     static Func<Task> Sync(Action test) => () => { test(); return Task.CompletedTask; };
@@ -861,6 +890,462 @@ static class PeopleTests
         Check(samples.Length == 3 && samples.All(sample => after.Crop(sample) != null), "Ana has her sample and Ivan's two, with their crops: " + samples.Length);
         Check(KeysOf(stored, anaId).Length == 7, "Ana's record and three samples are stored");
         Console.WriteLine("PASS people: an interrupted merge leaves none of the source's face data once a list is made on the store");
+    }
+
+    // ---- Unknown faces ----
+
+    /// <summary>The unknown-face groups of the detector whose private store is <paramref name="data"/>, at <see cref="Camera"/>.</summary>
+    static Faces Groups(SharpData data, object? rules = null) => new(Activator.CreateInstance(Type("FaceGroups"), data, Camera, rules ?? (object)DefaultRules)!);
+
+    /// <summary>
+    /// A <c>FaceGroups</c> of the compiled library's, called through <c>dynamic</c> behind members of known types, so
+    /// that what they give can go into a lambda.
+    /// </summary>
+    sealed class Faces(object target)
+    {
+        readonly dynamic groups = target;
+
+        /// <summary>
+        /// A face the people list does not know, seen in the check at <paramref name="now"/>; its crop is made from
+        /// <paramref name="seed"/>, and each time it is asked for counts in <paramref name="crops"/>.
+        /// </summary>
+        public void See(float[] face, DateTimeOffset now, double eyes = 20, string? suggested = null, int seed = 0, int[]? crops = null)
+        {
+            Func<byte[]> crop = () =>
+            {
+                if (crops != null) crops[0]++;
+                return PeopleTests.Crop(seed);
+            };
+            groups.Seen(Embedding(face), crop, eyes, now, suggested);
+        }
+
+        /// <summary>Every group, shown or not, as the internal <c>All</c> gives them.</summary>
+        public dynamic[] All
+        {
+            get
+            {
+                object target = groups;
+                var all = target.GetType().GetProperty("All", BindingFlags.Instance | BindingFlags.NonPublic) ?? throw new Exception("FaceGroups has no All");
+                return ((IEnumerable<object>)all.GetValue(target)!).Select(group => (dynamic)group).ToArray();
+            }
+        }
+
+        public dynamic[] Shown => ((IEnumerable<object>)groups.Shown).Select(group => (dynamic)group).ToArray();
+        public dynamic[] Samples(string id) => ((IEnumerable<object>)groups.Samples(id)).Select(sample => (dynamic)sample).ToArray();
+        public dynamic Find(string id) => groups.Find(id);
+        public byte[]? Crop(string id) => groups.Crop(id);
+        public void Remove(string id) => groups.Remove(id);
+        public void Expire(DateTimeOffset now, TimeSpan keep) => groups.Expire(now, keep);
+        public void Rematch(object people) => groups.Rematch((dynamic)people, DefaultRules);
+    }
+
+    static bool Holds(dynamic[] samples, float[] face) => samples.Any(sample => ((float[])sample.Embedding.Values).SequenceEqual(face));
+
+    static void AFaceStartsAGroupAndACloseOneJoinsIt()
+    {
+        using var home = new Home();
+        var a = Unit(7000);
+        var b = At(a, 0.55, 7001);
+        double score = (float)Embedding(b).Similarity(Embedding(a));
+        var c = At(a, score - 0.01, 7002);
+        Check(Cosine(b, c) < score - 0.01, $"the face just under is not close to the one that joined either: {Cosine(b, c)}");
+        var groups = Groups(home.Device(), (object)Rules(score));
+        groups.See(a, T0);
+        var started = groups.All;
+        Check(started.Length == 1 && started[0].Sightings == 1 && started[0].First == T0 && started[0].Last == T0 && started[0].SuggestedPersonId == null,
+            "a face starts a group: " + string.Join(", ", started));
+        Check(groups.Shown.Length == 0, "a group of one sighting is not shown");
+        groups.See(b, T0.AddSeconds(1));
+        groups.See(c, T0.AddSeconds(2));
+        var all = groups.All.OrderBy(group => (DateTimeOffset)group.First).ToArray();
+        Check(all.Length == 2 && all[0].Id == started[0].Id && all[0].Sightings == 2 && all[0].Last == T0.AddSeconds(1),
+            "the face at the match score exactly joined the group: " + string.Join(", ", all));
+        Check(all[1].Sightings == 1 && all[1].First == T0.AddSeconds(2), "the face just under it started another");
+        Check(groups.Samples((string)all[0].Id).Length == 2, "the face that joined is one of the group's samples");
+        Check(groups.Find((string)all[1].Id).Equals(all[1]) && groups.Find("nosuchgroup") == null, "Find gives a group by its id, shown or not");
+        Console.WriteLine("PASS people: a face starts a group, one at the match score from a sample joins it, and one just under starts another");
+    }
+
+    static void TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (a, c) = (Unit(7010), Unit(7011));
+        var d = Normalised(a.Zip(c).Select(pair => (double)pair.First + pair.Second).ToArray());
+        Check(Cosine(a, c) < 0.3 && Cosine(d, a) >= 0.5 && Cosine(d, c) >= 0.5 && Cosine(d, a) < 0.9, "d is close to both, and they are not to each other");
+        for (var i = 0; i < 3; i++) groups.See(a, T0.AddSeconds(i), seed: 7010);
+        for (var i = 3; i < 6; i++) groups.See(c, T0.AddSeconds(i), seed: 7011);
+        var shown = groups.Shown;
+        Check(shown.Length == 2, "two groups are shown");
+        var older = shown.Single(group => group.First == T0);
+        var younger = shown.Single(group => group.First == T0.AddSeconds(3));
+        Check(shown[0].Id == younger.Id, "the newest sighting first");
+
+        groups.See(d, T0.AddSeconds(6), seed: 7012);
+        var joined = groups.All;
+        Check(joined.Length == 1 && joined[0].Id == older.Id && joined[0].Sightings == 7 && joined[0].First == T0 && joined[0].Last == T0.AddSeconds(6),
+            "the two are joined into the older, with every sighting: " + string.Join(", ", joined));
+        var samples = groups.Samples((string)older.Id);
+        Check(samples.Length == 3 && Holds(samples, a) && Holds(samples, c) && Holds(samples, d), $"the group has the samples of both and the new face: {samples.Length}");
+        Check(samples.All(sample => sample.Camera == Camera && ((byte[])sample.CropJpeg).Length == 600), "each sample has its camera and its crop");
+        Check(data.Keys($"groups/{younger.Id}").Count == 0, "none of the younger group's keys is left: " + string.Join(", ", data.Keys()));
+        var next = Groups(home.RestartedDevice());
+        Check(next.All.Single().Id == older.Id && next.Samples((string)older.Id).Length == 3, "the join is stored");
+        Console.WriteLine("PASS people: two groups a new face is close to are joined into the older");
+    }
+
+    static void AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce()
+    {
+        using var home = new Home();
+        var groups = Groups(home.Device());
+        var a = Unit(7020);
+        // Two faces of one group in one frame: one check, one sighting.
+        groups.See(a, T0);
+        groups.See(At(a, 0.95, 7021), T0);
+        Check(groups.All.Single().Sightings == 1, "two faces in one check are one sighting");
+        groups.See(a, T0.AddSeconds(1));
+        Check(groups.All.Single().Sightings == 2 && groups.Shown.Length == 0, "two sightings are not shown");
+        groups.See(a, T0.AddSeconds(2));
+        var shown = groups.Shown;
+        Check(shown.Length == 1 && shown[0].Sightings == 3 && shown[0].Last == T0.AddSeconds(2), "the third sighting shows the group: " + string.Join(", ", shown));
+        Console.WriteLine("PASS people: a group is shown at its third sighting, and the faces of one check are one sighting");
+    }
+
+    static void GroupsExpire()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var keep = TimeSpan.FromDays(7);
+        var (a, c) = (Unit(7030), Unit(7031));
+        groups.See(a, T0);
+        groups.See(a, T0.AddMinutes(1));
+        for (var i = 0; i < 3; i++) groups.See(c, T0.AddSeconds(i));
+        string unshown = groups.All.Single(group => group.Sightings == 2).Id, shown = groups.Shown.Single().Id;
+
+        groups.Expire(T0.AddMinutes(59), keep);
+        Check(groups.All.Length == 2, "an unshown group stays for its first hour");
+        groups.Expire(T0.AddHours(1), keep);
+        Check(groups.All.Single().Id == shown && data.Keys($"groups/{unshown}").Count == 0, "an unshown group is gone after an hour, with its keys");
+        var last = T0.AddSeconds(2);
+        groups.Expire(last + keep - TimeSpan.FromSeconds(1), keep);
+        Check(groups.Shown.Length == 1, "a shown group stays for the keep time");
+        groups.Expire(last + keep, keep);
+        Check(groups.All.Length == 0 && groups.Shown.Length == 0 && data.Keys("groups/").Count == 0, "a shown group is gone after the keep time: " + string.Join(", ", data.Keys()));
+
+        // A face of a group not shown within its hour starts another, also before an Expire.
+        var later = T0.AddDays(10);
+        groups.See(a, later);
+        groups.See(a, later.AddMinutes(1));
+        groups.See(a, later.AddMinutes(61));
+        var again = groups.All.Single();
+        Check(again.First == later.AddMinutes(61) && again.Sightings == 1, "the late sighting starts a group of its own: " + again);
+        Console.WriteLine("PASS people: an unshown group is gone after an hour, and a shown one after the keep time");
+    }
+
+    static void The51stGroupDropsTheOneSeenLongestAgo()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var faces = Enumerable.Range(0, 51).Select(i => Unit(7100 + i)).ToArray();
+        var closest = faces.SelectMany((face, i) => faces.Skip(i + 1).Select(other => Cosine(face, other))).Max();
+        Check(closest < 0.5, $"the 51 faces are each other's strangers: {closest}");
+        for (var i = 0; i < 50; i++) groups.See(faces[i], T0.AddSeconds(i));
+        groups.See(faces[0], T0.AddSeconds(100));
+        Check(groups.All.Length == 50, "50 groups");
+        string longestAgo = groups.All.Single(group => group.First == T0.AddSeconds(1)).Id;
+        groups.See(faces[50], T0.AddSeconds(101));
+        var all = groups.All;
+        Check(all.Length == 50 && all.All(group => group.Id != longestAgo), "the group seen longest ago is gone");
+        Check(all.Any(group => group.First == T0) && all.Any(group => group.First == T0.AddSeconds(101)), "the first group, seen again, stays, and the new one is kept");
+        Check(data.Keys($"groups/{longestAgo}").Count == 0, "none of its keys is left");
+        Check(Groups(home.RestartedDevice()).All.Length == 50, "50 groups are stored");
+        Console.WriteLine("PASS people: the 51st group drops the one seen longest ago");
+    }
+
+    static void AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        int[] crops = [0];
+        var a = Unit(7200);
+        groups.See(a, T0, eyes: 20, seed: 7200, crops: crops);
+        string id = groups.All.Single().Id;
+        Check(crops[0] == 1, "the first face's crop is made once");
+        groups.See(At(a, 0.95, 7201), T0.AddSeconds(1), eyes: 18, seed: 7201, crops: crops);
+        Check(crops[0] == 1 && groups.Samples(id).Length == 1, "a smaller face like a sample is not kept, and its crop is not made");
+        var larger = At(a, 0.95, 7202);
+        groups.See(larger, T0.AddSeconds(2), eyes: 30, seed: 7202, crops: crops);
+        var samples = groups.Samples(id);
+        Check(crops[0] == 2 && samples.Length == 1 && Holds(samples, larger) && ((byte[])samples[0].CropJpeg).SequenceEqual(Crop(7202)),
+            "a larger face like a sample takes its place, with its crop");
+
+        var unlike = Enumerable.Range(0, 6).Select(i => At(a, 0.7, 7210 + i)).ToArray();
+        Check(unlike.All(face => Cosine(face, larger) is >= 0.5 and < 0.9), "each unlike face joins the group and adds something to it");
+        Check(unlike.SelectMany((face, i) => unlike.Skip(i + 1).Select(other => Cosine(face, other))).Max() < 0.9, "the unlike faces are unlike each other");
+        for (var i = 0; i < 4; i++) groups.See(unlike[i], T0.AddSeconds(3 + i), eyes: 25, seed: 7210 + i, crops: crops);
+        Check(crops[0] == 6 && groups.Samples(id).Length == 5, "four unlike faces fill the group's five samples");
+        groups.See(unlike[4], T0.AddSeconds(10), eyes: 40, seed: 7214, crops: crops);
+        samples = groups.Samples(id);
+        Check(crops[0] == 7 && samples.Length == 5 && Holds(samples, unlike[4]) && Holds(samples, larger), "a larger unlike face is kept in place of a smallest one");
+        Check(unlike.Take(4).Count(face => !Holds(samples, face)) == 1, "one of the smallest went");
+        groups.See(unlike[5], T0.AddSeconds(11), eyes: 10, seed: 7215, crops: crops);
+        samples = groups.Samples(id);
+        Check(crops[0] == 7 && samples.Length == 5 && !Holds(samples, unlike[5]), "a smaller face is not kept in a full group, and its crop is not made");
+        Check(data.Keys($"groups/{id}/").Count == 10, "the store has the five samples' embeddings and crops only: " + string.Join(", ", data.Keys($"groups/{id}/")));
+        Check(groups.All.Single().Sightings == 9, "every check was a sighting");
+        Console.WriteLine("PASS people: a group keeps at most five samples, preferring larger faces and unlike ones, and makes a crop only for a face it keeps");
+    }
+
+    static void RematchRemovesRecognisedGroupsAndUpdatesSuggestions()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (a, c) = (Unit(7300), Unit(7301));
+        for (var i = 0; i < 3; i++) groups.See(a, T0.AddSeconds(i));
+        for (var i = 0; i < 3; i++) groups.See(c, T0.AddSeconds(i), suggested: i == 0 ? "ivan" : null);
+        string aId = groups.Shown.Single(group => group.First == T0 && group.SuggestedPersonId == null).Id;
+        string cId = groups.All.Single(group => group.Id != aId).Id;
+        Check(groups.Find(cId).SuggestedPersonId == "ivan", "a sighting's suggestion is kept, and one without leaves it");
+
+        groups.Rematch((object)People(Person("ana", At(a, 0.8, 7302)), Person("mia", At(c, 0.45, 7303))));
+        var left = groups.All;
+        Check(left.Length == 1 && left[0].Id == cId && data.Keys($"groups/{aId}").Count == 0, "the group that is now Ana is removed, keys and all");
+        Check(left[0].SuggestedPersonId == "mia", "the group that is now a maybe for Mia suggests her: " + left[0]);
+        groups.Rematch((object)People(Person("ana", At(a, 0.8, 7302))));
+        Check(groups.Find(cId).SuggestedPersonId == null, "a suggestion whose person is gone is cleared");
+        Check(Groups(home.RestartedDevice()).All.Single().SuggestedPersonId == null, "the cleared suggestion is stored");
+        Console.WriteLine("PASS people: matching the groups again removes one that is now someone, and updates and clears suggestions");
+    }
+
+    static void TheNextRevisionReadsTheSameGroups()
+    {
+        using var home = new Home();
+        var groups = Groups(home.Device());
+        var (a, c) = (Unit(7400), Unit(7401));
+        var b = At(a, 0.7, 7402);
+        groups.See(a, T0, eyes: 30, suggested: "ivan", seed: 7400);
+        groups.See(b, T0.AddSeconds(1), seed: 7402);
+        groups.See(a, T0.AddSeconds(2), seed: 7400);
+        groups.See(c, T0.AddSeconds(3), seed: 7401);
+        var next = Groups(home.RestartedDevice());
+        string Listed(Faces g) => string.Join(" | ", g.All.Select(group => (string)group.ToString()).Order(StringComparer.Ordinal));
+        Check(Listed(next) == Listed(groups), $"the same groups: {Listed(next)} against {Listed(groups)}");
+        Check(next.Shown.Length == 1 && next.Shown[0].Equals(groups.Shown[0]), "the same group is shown");
+        string id = next.Shown[0].Id;
+        var samples = next.Samples(id);
+        Check(samples.Length == 2 && Holds(samples, a) && Holds(samples, b), "the same samples, embeddings bit for bit");
+        var first = samples.Single(sample => ((float[])sample.Embedding.Values).SequenceEqual(a));
+        Check(((byte[])first.CropJpeg).SequenceEqual(Crop(7400)) && first.At == T0 && first.Camera == Camera && first.Embedding.Fit == 1.5f, "with its crop, time, camera and fit");
+        Check(next.Crop(id)!.SequenceEqual(Crop(7400)), "the group's crop is its largest face's");
+        Console.WriteLine("PASS people: the detector's next revision reads the same groups from its store");
+    }
+
+    /// <summary>Each file of a store's directory with its write time and bytes: two differ when a write happened in between.</summary>
+    static Dictionary<string, string> Files(string directory) => !Directory.Exists(directory) ? [] :
+        Directory.EnumerateFiles(directory).ToDictionary(file => Path.GetFileName(file), file => File.GetLastWriteTimeUtc(file).Ticks + ":" + Convert.ToHexString(File.ReadAllBytes(file)));
+
+    static void LastSeenAndCountAreWrittenAtMostOnceAMinute()
+    {
+        using var home = new Home();
+        var groups = Groups(home.Device());
+        var face = Unit(7500);
+        var written = new List<int>();
+        var before = Files(home.DeviceDirectory);
+        for (var s = 0; s <= 130; s++)
+        {
+            groups.See(face, T0.AddSeconds(s));
+            var after = Files(home.DeviceDirectory);
+            if (after.Count != before.Count || after.Any(file => !before.TryGetValue(file.Key, out var was) || was != file.Value)) written.Add(s);
+            before = after;
+        }
+        // Started, shown, then once a minute.
+        Check(written.SequenceEqual([0, 2, 62, 122]), "written at: " + string.Join(", ", written));
+        Check(groups.All.Single().Sightings == 131, "every check is counted in memory");
+        var stored = Groups(home.RestartedDevice()).All.Single();
+        Check(stored.Sightings == 123 && stored.Last == T0.AddSeconds(122), "the store has the count and last seen of the last write: " + stored);
+        Console.WriteLine("PASS people: a group's last seen and count are written at most once a minute, and when it is first shown");
+    }
+
+    static void ARemovedGroupLeavesNoFaceData()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (a, c) = (Unit(7600), Unit(7601));
+        for (var i = 0; i < 3; i++) groups.See(a, T0.AddSeconds(i), seed: 7600);
+        groups.See(c, T0.AddSeconds(3), seed: 7601);
+        string aId = groups.Shown.Single().Id;
+        Check(groups.Crop(aId)!.SequenceEqual(Crop(7600)), "the group has a crop");
+        groups.Remove(aId);
+        Check(groups.Find(aId) == null && groups.Shown.Length == 0 && data.Keys($"groups/{aId}").Count == 0, "the group is gone, keys and all");
+        Check(groups.Samples(aId).Length == 0 && groups.Crop(aId) == null, "it has no samples and no crop");
+        groups.Remove(aId);
+        groups.Remove("nosuchgroup");
+        Check(Groups(home.RestartedDevice()).All.Single().First == T0.AddSeconds(3), "the store has only the other group");
+        Console.WriteLine("PASS people: a group removed leaves none of its keys");
+    }
+
+    static void WhatAnInterruptionLeavesOfGroupsIsCleanedUp()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        for (var i = 0; i < 3; i++) groups.See(Unit(7700), T0.AddSeconds(i), seed: 7700);
+        string id = groups.Shown.Single().Id;
+        // A group started or removed half way: its record and samples without its id in the index.
+        data.Set("groups/orphan000001", new { first = T0, last = T0, sightings = 1, samples = new[] { new { id = "sample000001", at = T0, eyes = 20.0, fit = 1.5f } } });
+        data.SetBytes("groups/orphan000001/sample000001/embedding", new byte[512]);
+        data.SetBytes("groups/orphan000001/sample000001/crop", Crop(7701));
+        // A sample written before its group's record listed it.
+        data.SetBytes($"groups/{id}/stray0000001/embedding", new byte[512]);
+        data.SetBytes($"groups/{id}/stray0000001/crop", Crop(7702));
+        // An index that lists a group whose record is gone.
+        data.Update<List<string>>("groups", index => [.. index!, "norecord0001"]);
+        data.SetBytes("groups/norecord0001/sample000002/crop", Crop(7703));
+
+        var next = Groups(home.RestartedDevice());
+        var stored = home.RestartedDevice();
+        Check(stored.Keys("groups/orphan000001").Count == 0 && stored.Keys("groups/norecord0001").Count == 0 && stored.Keys($"groups/{id}/stray0000001/").Count == 0,
+            "nothing of them is left: " + string.Join(", ", stored.Keys()));
+        Check(next.All.Single().Id == id && next.Samples(id).Length == 1 && stored.Keys($"groups/{id}/").Count == 2, "the group is kept with its sample");
+        Check(stored.Get<List<string>>("groups")!.SequenceEqual([id]), "the index lists it alone");
+
+        // An index that cannot be read: every group goes, as it is a detector's own cache of faces.
+        stored.SetBytes("groups", [1, 2, 3]);
+        var fresh = Groups(home.RestartedDevice());
+        var check = home.RestartedDevice();
+        Check(fresh.All.Length == 0 && check.Keys("groups/").Count == 0, "no group is left: " + string.Join(", ", check.Keys()));
+        fresh.See(Unit(7704), T0.AddMinutes(5));
+        Check(fresh.All.Length == 1 && Groups(home.RestartedDevice()).All.Length == 1, "and the groups are written again");
+        Console.WriteLine("PASS people: what an interrupted change of the groups leaves is removed when the groups are next loaded");
+    }
+
+    static void ANewerFormatOfGroupsIsNeitherReadNorWritten()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var a = Unit(7800);
+        for (var i = 0; i < 3; i++) groups.See(a, T0.AddSeconds(i));
+        string id = groups.Shown.Single().Id;
+        foreach (var format in new object[] { 2, "one" })
+        {
+            data.Set("format", format);
+            var before = Contents(home.RestartedDevice());
+            var newer = Groups(home.RestartedDevice());
+            Check(newer.All.Length == 0 && newer.Shown.Length == 0, $"a store of format {format} is not read");
+            for (var i = 0; i < 3; i++) newer.See(a, T0.AddMinutes(1 + i));
+            newer.See(Unit(7801), T0.AddMinutes(5));
+            newer.Rematch((object)People());
+            newer.Remove(id);
+            newer.Expire(T0.AddDays(30), TimeSpan.FromDays(7));
+            Check(newer.Samples(id).Length == 0 && newer.Crop(id) == null && newer.All.Length == 0, "nor are groups made");
+            Check(Contents(home.RestartedDevice()) == before, $"nothing was written to a store of format {format}");
+        }
+        Console.WriteLine("PASS people: a store of groups of a newer format is neither read nor written");
+    }
+
+    static void AClearedStoreGetsNoGroupBack()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (a, c) = (Unit(7900), Unit(7901));
+        for (var i = 0; i < 3; i++) groups.See(a, T0.AddSeconds(i));
+        groups.See(c, T0.AddSeconds(3));
+        var old = groups.All.Select(group => (string)group.Id).ToArray();
+        // The store is cleared while the detector runs.
+        data.Clear();
+        groups.See(a, T0.AddSeconds(4));
+        var all = groups.All;
+        Check(all.Length == 1 && all[0].Sightings == 1 && all[0].First == T0.AddSeconds(4) && groups.Shown.Length == 0, "the groups from before are forgotten: " + string.Join(", ", all));
+        var keys = home.RestartedDevice().Keys();
+        Check(old.All(id => !keys.Any(key => key.Contains(id))), "none of them is written back: " + string.Join(", ", keys));
+        Console.WriteLine("PASS people: a store cleared while the detector runs gets none of its groups back");
+    }
+
+    // ---- Learning ----
+
+    /// <summary>A person of made-up samples, each named or learned at a time.</summary>
+    static dynamic PersonOf(string id, params (float[] Values, bool Learned, DateTimeOffset At)[] samples)
+    {
+        var array = Array.CreateInstance(Type("FaceSample"), samples.Length);
+        for (var i = 0; i < samples.Length; i++)
+            array.SetValue(Activator.CreateInstance(Type("FaceSample"), $"{id}s{i}", (object)Embedding(samples[i].Values), samples[i].At, Camera, samples[i].Learned), i);
+        return Activator.CreateInstance(Type("Person"), id, id, DateTimeOffset.UnixEpoch, array, null, null)!;
+    }
+
+    /// <summary>Whether a face of <paramref name="eyes"/> pixels between the eyes, recognised in <paramref name="people"/> by the default rules, is learned.</summary>
+    static bool Learns(float[] face, double eyes, object people, DateTimeOffset now)
+    {
+        var match = Match(face, people);
+        Check(match.Kind.ToString() == "Recognised" && match.Person.Id == "ana", $"the face is recognised as Ana: {match}");
+        return (bool)Invoke(Type("FaceMatcher").GetMethod("Learns")!, null, (object)Embedding(face), eyes, (object)match, now, (object)DefaultRules)!;
+    }
+
+    static readonly DateTimeOffset Now = T0.AddDays(1);
+
+    static void AFaceIsLearnedWhenAllFiveHold()
+    {
+        var face = Unit(8000);
+        var people = People(PersonOf("ana", (At(face, 0.75, 8001), false, T0), (At(face, 0.2, 8002), true, Now.AddMinutes(-10))), Person("ivan", At(face, 0.3, 8003)));
+        Check(Learns(face, 30, people, Now), "a face over every line is learned");
+        Check(Learns(face, 24, people, Now), "24 pixels between the eyes are enough");
+        Console.WriteLine("PASS people: a face over the learn score and margin, anchored on a named sample, large, new and the first in ten minutes is learned");
+    }
+
+    static void AFaceUnderTheLearnScoreIsNotLearned()
+    {
+        var face = Unit(8010);
+        Check(!Learns(face, 30, People(PersonOf("ana", (At(face, 0.58, 8011), false, T0)), Person("ivan", At(face, 0.2, 8012))), Now), "a face at 0.58 is recognised, not learned");
+        Console.WriteLine("PASS people: a face under the learn score is not learned");
+    }
+
+    static void AFaceUnderTheLearnMarginIsNotLearned()
+    {
+        var face = Unit(8020);
+        Check(!Learns(face, 30, People(PersonOf("ana", (At(face, 0.75, 8021), false, T0)), Person("ivan", At(face, 0.63, 8022))), Now), "a face 0.12 ahead of the next is recognised, not learned");
+        Console.WriteLine("PASS people: a face under the learn margin is not learned");
+    }
+
+    static void AFaceAnchoredOnlyOnALearnedSampleIsNotLearned()
+    {
+        var face = Unit(8030);
+        var ivan = Person("ivan", At(face, 0.2, 8033));
+        // Ana's only sample over the match score is a learned one: a learned sample never qualifies another.
+        Check(!Learns(face, 30, People(PersonOf("ana", (At(face, 0.45, 8031), false, T0), (At(face, 0.75, 8032), true, T0)), ivan), Now), "no named sample anchors it");
+        Check(Learns(face, 30, People(PersonOf("ana", (At(face, 0.55, 8031), false, T0), (At(face, 0.75, 8032), true, T0)), ivan), Now), "a named sample over the match score does");
+        Console.WriteLine("PASS people: a face whose only sample over the match score is a learned one is not learned");
+    }
+
+    static void ASmallFaceIsNotLearned()
+    {
+        var face = Unit(8040);
+        Check(!Learns(face, 23.9, People(PersonOf("ana", (At(face, 0.75, 8041), false, T0)), Person("ivan", At(face, 0.2, 8042))), Now), "23.9 pixels between the eyes are too few");
+        Console.WriteLine("PASS people: a face under the learn size is not learned");
+    }
+
+    static void AFaceThatAddsNothingIsNotLearned()
+    {
+        var face = Unit(8050);
+        var people = People(PersonOf("ana", (At(face, 0.75, 8051), false, T0), (At(face, 0.91, 8052), true, T0)), Person("ivan", At(face, 0.2, 8053)));
+        Check(!Learns(face, 30, people, Now), "a face at 0.91 from a sample adds nothing");
+        Console.WriteLine("PASS people: a face at 0.9 or more from one of the person's samples is not learned");
+    }
+
+    static void OneLearnedSampleInTenMinutes()
+    {
+        var face = Unit(8060);
+        var ivan = Person("ivan", At(face, 0.2, 8063));
+        Check(!Learns(face, 30, People(PersonOf("ana", (At(face, 0.75, 8061), false, T0), (At(face, 0.2, 8062), true, Now.AddMinutes(-9))), ivan), Now),
+            "a person who gained a learned sample nine minutes ago gains none");
+        Check(Learns(face, 30, People(PersonOf("ana", (At(face, 0.75, 8061), false, T0), (At(face, 0.2, 8062), true, Now.AddMinutes(-10))), ivan), Now), "ten minutes later one is");
+        Console.WriteLine("PASS people: a person gains at most one learned sample in ten minutes");
     }
 
     // ---- Privacy ----
