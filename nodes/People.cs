@@ -75,7 +75,7 @@ public enum MatchKind
 /// <param name="Kind">Whether the face is recognised, a maybe or unknown.</param>
 /// <param name="Person">The best person; null when the face is unknown.</param>
 /// <param name="Score">The best person's score, the cosine of their closest sample; 0 when no one has a sample.</param>
-/// <param name="Margin">How far the best score is above the second-best person's (0 when there is none).</param>
+/// <param name="Margin">How far the best score is above the second-best person's; the whole score when there is none.</param>
 public sealed record FaceMatch(MatchKind Kind, Person? Person, double Score, double Margin);
 
 /// <summary>Compares a face's embedding with every sample of every person.</summary>
@@ -125,15 +125,22 @@ public static class FaceMatcher
 /// The store's keys: <c>format</c>, 1; <c>names</c>, a JSON object from each person's id to their name, which every
 /// create, rename, merge and delete changes with one <see cref="SharpData.Update{T}"/>, so that two detectors lose no
 /// change and never give two people one name; <c>people/&lt;id&gt;</c>, the person without embeddings and crops;
-/// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats; and
-/// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/crop</c>, the JPEG.
+/// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats;
+/// <c>samples/&lt;personId&gt;/&lt;sampleId&gt;/crop</c>, the JPEG; and <c>unfinished/&lt;personId&gt;</c> while an add, a
+/// delete or a merge's removal of that person runs: when it began, and whether it removes them.
 /// </para>
 /// <para>
 /// A change is written so that an interruption leaves nothing that matters: a sample's embedding and crop before the
-/// person lists it, a person before their name, and a name removed before the person and the samples. Loading ignores
-/// what that can leave: a person or a sample no name or person lists. A name whose person is gone is listed without
-/// samples, so that it can be given samples or deleted; a sample whose embedding is gone or not 512 bytes is left out.
-/// A store of another format is neither read nor written.
+/// person lists it, a person before their name, and a name removed before the person and the samples. An add notes its
+/// new person in <c>unfinished/</c> before it writes anything of theirs, and a removal before it removes the name; each
+/// takes its note out when it is done. A list made on the store, and each delete, finishes what an interruption left:
+/// a person a note names who has no name loses their record and samples, unless the note is an add's begun less than
+/// ten minutes ago, which may still be writing on another detector; a person who has a name keeps everything. Ids are
+/// never reused, so finishing a removal races with nothing. Until then loading ignores what is left: a person or a
+/// sample no name or person lists. Samples left under a person who keeps their name (by an interrupted sample addition
+/// or merge copy) stay until the person is deleted. A name whose person is gone is listed without samples, so that it
+/// can be given samples or deleted; a sample whose embedding is gone or not 512 bytes is left out. A store of another
+/// format is neither read nor written.
 /// </para>
 /// <para>
 /// <see cref="People"/> is a snapshot that a reload replaces and never changes, safe to read while another thread
@@ -160,6 +167,8 @@ public sealed class PeopleList
     const int IdLength = 12;
     const string IdCharacters = "abcdefghijklmnopqrstuvwxyz0123456789";
     static readonly TimeSpan SeenEvery = TimeSpan.FromMinutes(1);
+    // How long an add's note in unfinished/ is taken for one still writing.
+    static readonly TimeSpan Unfinishing = TimeSpan.FromMinutes(10);
 
     const string Newer = "The people list was saved by a newer hass-sharp-vision; update this one to change it.";
     const string Unreadable = "The people list cannot be read; delete it in Stored data to start again.";
@@ -189,6 +198,7 @@ public sealed class PeopleList
             Reload();
             if (changed != null) await changed();
         });
+        Finish();
         Reload();
     }
 
@@ -242,6 +252,7 @@ public sealed class PeopleList
         var id = NewId();
         var listed = given.Select(sample => new StoredSample(NewId(), sample.At, sample.Camera, false, sample.Embedding.Fit)).ToList();
         var record = new StoredPerson(DateTimeOffset.UtcNow, null, null, listed);
+        Store(() => data.Set(UnfinishedKey(id), new Unfinished(record.Added, false)));
         try
         {
             WriteSamples(id, listed, given);
@@ -256,8 +267,10 @@ public sealed class PeopleList
         catch
         {
             Forget(id);
+            Finished(id);
             throw;
         }
+        Finished(id);
         Reload();
         return Find(id) ?? new Person(id, trimmed, record.Added, given.Select((sample, i) => Sample(listed[i], sample.Embedding.Values)).ToArray(), null, null);
     }
@@ -345,6 +358,13 @@ public sealed class PeopleList
         // Merged or deleted already.
         if (!IsId(fromId) || !names.ContainsKey(fromId)) return;
         MoveSamples(fromId, intoId);
+        // Deleted meanwhile, by another detector: what was just copied to them goes, and the source stays.
+        if (!ReadNames().ContainsKey(intoId))
+        {
+            Forget(intoId);
+            Reload();
+            throw new PeopleRefusal(Gone);
+        }
         RemovePerson(fromId);
         Reload();
     }
@@ -357,6 +377,7 @@ public sealed class PeopleList
         if (!IsId(personId)) return;
         RemovePerson(personId);
         lock (gate) seen.Remove(personId);
+        Finish();
         Reload();
     }
 
@@ -460,12 +481,65 @@ public sealed class PeopleList
         });
     }
 
-    /// <summary>Removes a person: their name first, then their record and every key of their samples.</summary>
+    /// <summary>
+    /// Removes a person: notes the removal in <c>unfinished/</c>, removes their name, then their record and every key of
+    /// their samples, and takes the note out.
+    /// </summary>
     void RemovePerson(string personId)
     {
+        // A store without room even for the note is still emptied, the name first, as before there were notes.
+        try { data.Set(UnfinishedKey(personId), new Unfinished(DateTimeOffset.UtcNow, true)); }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
         // A name gone already is not written again, which would only make every other detector reload.
         if (ReadNames().ContainsKey(personId)) ChangeNames(names => names.Remove(personId));
         Forget(personId);
+        Finished(personId);
+    }
+
+    /// <summary>
+    /// Finishes what an interrupted add, delete or merge left, as each note in <c>unfinished/</c> says: a person without a
+    /// name loses their record and samples, unless the note is an add's begun less than ten minutes ago; the note goes
+    /// once its person has a name or nothing left, or, for a removal of someone who kept their name, once it is old.
+    /// </summary>
+    void Finish()
+    {
+        if (ReadFormat() != Format) return;
+        var notes = data.Keys("unfinished/");
+        if (notes.Count == 0) return;
+        // Read after the notes, so that an add's note it finds was written before the names it reads.
+        Dictionary<string, string> names;
+        try { names = ReadNames(); }
+        catch (PeopleRefusal) { return; }
+        var now = DateTimeOffset.UtcNow;
+        foreach (var key in notes)
+        {
+            var id = key["unfinished/".Length..];
+            if (!IsId(id)) continue;
+            Unfinished? note;
+            try { note = data.Get<Unfinished>(key); }
+            catch (InvalidDataException) { note = null; }
+            catch (InvalidOperationException e) when (e is not ObjectDisposedException) { note = null; }
+            // A note that cannot be read is taken for an old add's.
+            var removing = note?.Removing ?? false;
+            var old = note == null || now - note.At >= Unfinishing;
+            if (names.ContainsKey(id))
+            {
+                // A removal begun just now may be about to remove the name.
+                if (!removing || old) Finished(id);
+            }
+            else if (removing || old)
+            {
+                Forget(id);
+                Finished(id);
+            }
+        }
+    }
+
+    /// <summary>Takes a person's note out of <c>unfinished/</c>, as far as it can.</summary>
+    void Finished(string personId)
+    {
+        try { data.Remove(UnfinishedKey(personId)); }
+        catch (Exception e) when (e is not ObjectDisposedException) { }
     }
 
     // ---- Loading ----
@@ -672,10 +746,14 @@ public sealed class PeopleList
     static string RecordKey(string personId) => $"people/{personId}";
     static string EmbeddingKey(string personId, string sampleId) => $"samples/{personId}/{sampleId}/embedding";
     static string CropKey(string personId, string sampleId) => $"samples/{personId}/{sampleId}/crop";
+    static string UnfinishedKey(string personId) => $"unfinished/{personId}";
 
     /// <summary>A person as <c>people/&lt;id&gt;</c> keeps them: without their name, embeddings and crops.</summary>
     internal sealed record StoredPerson(DateTimeOffset Added, DateTimeOffset? LastSeen, string? LastSeenAt, List<StoredSample>? Samples);
 
     /// <summary>A sample as its person's record lists it: its embedding and crop are keys of their own.</summary>
     internal sealed record StoredSample(string Id, DateTimeOffset At, string Camera, bool Learned, float Fit);
+
+    /// <summary>An add, a delete or a merge's removal of a person, as <c>unfinished/&lt;id&gt;</c> notes it while it runs.</summary>
+    internal sealed record Unfinished(DateTimeOffset At, bool Removing);
 }

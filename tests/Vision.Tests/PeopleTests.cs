@@ -239,6 +239,9 @@ static class PeopleTests
             (nameof(AnEmbeddingOfTheWrongLengthIsLeftOut), Sync(AnEmbeddingOfTheWrongLengthIsLeftOut)),
             (nameof(ANewerFormatIsNeitherReadNorWritten), Sync(ANewerFormatIsNeitherReadNorWritten)),
             (nameof(UnreadableNamesAreNeitherReadNorWritten), Sync(UnreadableNamesAreNeitherReadNorWritten)),
+            (nameof(AnInterruptedAddLeavesNoFaceData), Sync(AnInterruptedAddLeavesNoFaceData)),
+            (nameof(AnInterruptedDeleteLeavesNoFaceData), Sync(AnInterruptedDeleteLeavesNoFaceData)),
+            (nameof(AnInterruptedMergeLeavesNoFaceData), Sync(AnInterruptedMergeLeavesNoFaceData)),
         };
         var failures = new List<string>();
         var log = PyInterop.Log;
@@ -756,6 +759,108 @@ static class PeopleTests
         Check(refused == "The people list cannot be read; delete it in Stored data to start again.", "the refusal: " + refused);
         Check(Contents(data) == before, "nothing was written");
         Console.WriteLine("PASS people: names that cannot be read give an empty list, and changes are refused");
+    }
+
+    // ---- What an interrupted add, delete or merge leaves, and the next list finishes ----
+
+    /// <summary>
+    /// What an add, delete or merge notes in <c>unfinished/&lt;id&gt;</c> while it runs: when it began, and whether it removes
+    /// the person.
+    /// </summary>
+    static void Unfinished(SharpData data, string id, DateTimeOffset at, bool removing) => data.Set($"unfinished/{id}", new { at, removing });
+
+    /// <summary>A sample's keys and a person's record, as an add writes them before it writes the name.</summary>
+    static void Written(SharpData data, string id, int seed)
+    {
+        data.SetBytes($"samples/{id}/sample{seed}/embedding", new byte[512]);
+        data.SetBytes($"samples/{id}/sample{seed}/crop", Crop(seed));
+        data.Set($"people/{id}", new { added = T0, samples = new[] { new { id = $"sample{seed}", at = T0, camera = Camera, learned = false, fit = 1.5f } } });
+    }
+
+    /// <summary>Every key of a person's: their record and their samples'.</summary>
+    static string[] KeysOf(SharpData data, string id) => [.. data.Keys($"people/{id}").Where(key => key == $"people/{id}"), .. data.Keys($"samples/{id}/")];
+
+    static void AnInterruptedAddLeavesNoFaceData()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        list.Add(Named("Ana"), Samples(Seeded(6000)));
+        // An add interrupted after its samples and record, before its name: begun an hour ago, so no add is still writing it.
+        Unfinished(data, "interrupted0", DateTimeOffset.UtcNow.AddHours(-1), false);
+        Written(data, "interrupted0", 6001);
+        // An add another detector is writing at this moment.
+        Unfinished(data, "inprogress00", DateTimeOffset.UtcNow, false);
+        Written(data, "inprogress00", 6002);
+
+        var after = List(home.Restarted());
+        var stored = home.Restarted("check");
+        Check(KeysOf(stored, "interrupted0").Length == 0 && stored.Keys("unfinished/interrupted0").Count == 0,
+            "nothing of the interrupted add is left: " + string.Join(", ", stored.Keys()));
+        Check(KeysOf(stored, "inprogress00").Length == 3 && stored.Keys("unfinished/inprogress00").Count == 1,
+            "the add in progress keeps its keys and its note: " + string.Join(", ", stored.Keys()));
+        Check(((object[])Items(after.People)).Length == 1 && after.Named("Ana") != null, "Ana is still listed, and only she");
+        Check(stored.Keys("unfinished/").Count == 1, "Ana's own add left no note: " + string.Join(", ", stored.Keys("unfinished/")));
+
+        // A delete finishes what is old by then, too. One DataStores of its own, which has read what the last list removed.
+        var deleting = new DataStores(home.Root).OpenShared(StoreName, new DataUser("def-b", "front_door", action => Task.Run(action)));
+        Unfinished(deleting, "inprogress00", DateTimeOffset.UtcNow.AddHours(-1), false);
+        var other = List(deleting);
+        Unfinished(deleting, "interrupted1", DateTimeOffset.UtcNow.AddHours(-1), false);
+        Written(deleting, "interrupted1", 6003);
+        other.Delete((string)other.Named("Ana").Id);
+        Check(deleting.Keys().SequenceEqual(["format", "names"]), "a delete finished the interrupted add: " + string.Join(", ", deleting.Keys()));
+        Console.WriteLine("PASS people: an interrupted add leaves no face data once a list is made on the store, and an add in progress is left alone");
+    }
+
+    static void AnInterruptedDeleteLeavesNoFaceData()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Seeded(6100), Seeded(6101)));
+        list.AddSamples((string)ana.Id, Samples(Seeded(6102)), true);
+        var ivan = list.Add(Named("Ivan"), Samples(Seeded(6103)));
+        string id = ana.Id;
+        // A delete interrupted after it removed the name, before the record and the samples: just now, so it is young.
+        Unfinished(data, id, DateTimeOffset.UtcNow, true);
+        data.Update<Dictionary<string, string>>("names", names => { names!.Remove(id); return names; });
+        Check(KeysOf(data, id).Length == 7, "the interruption left Ana's record and three samples: " + string.Join(", ", KeysOf(data, id)));
+
+        var after = List(home.Restarted());
+        var stored = home.Restarted("check");
+        Check(KeysOf(stored, id).Length == 0 && stored.Keys("unfinished/").Count == 0, "nothing of Ana is left: " + string.Join(", ", stored.Keys()));
+        Check(after.Named("Ana") == null && after.Named("Ivan").Id == ivan.Id && KeysOf(stored, (string)ivan.Id).Length == 3, "Ivan is untouched");
+
+        // A delete interrupted before it removed the name leaves the person, and its note goes once it is old.
+        Unfinished(stored, (string)ivan.Id, DateTimeOffset.UtcNow.AddHours(-1), true);
+        var again = List(home.Restarted());
+        Check(again.Named("Ivan") != null && home.Restarted("check").Keys("unfinished/").Count == 0, "Ivan is still listed, and the note is gone");
+        Console.WriteLine("PASS people: an interrupted delete leaves no face data once a list is made on the store");
+    }
+
+    static void AnInterruptedMergeLeavesNoFaceData()
+    {
+        using var home = new Home();
+        var data = home.Open("def-a");
+        var list = List(data);
+        var ana = list.Add(Named("Ana"), Samples(Seeded(6200)));
+        var ivan = list.Add(Named("Ivan"), Samples(Seeded(6201), Seeded(6202)));
+        string anaId = ana.Id, ivanId = ivan.Id;
+        // A merge interrupted after it copied the samples and removed the source's name, before the source's keys went.
+        var moved = ((object)list).GetType().GetMethod("MoveSamples", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new Exception("PeopleList has no MoveSamples step");
+        Invoke(moved, list, ivanId, anaId);
+        Unfinished(data, ivanId, DateTimeOffset.UtcNow, true);
+        data.Update<Dictionary<string, string>>("names", names => { names!.Remove(ivanId); return names; });
+
+        var after = List(home.Restarted());
+        var stored = home.Restarted("check");
+        Check(KeysOf(stored, ivanId).Length == 0 && stored.Keys("unfinished/").Count == 0, "nothing of Ivan is left: " + string.Join(", ", stored.Keys()));
+        var samples = ((object[])Items(Only(after, "Ana").Samples)).Select(s => (string)((dynamic)s).Id).ToArray();
+        Check(samples.Length == 3 && samples.All(sample => after.Crop(sample) != null), "Ana has her sample and Ivan's two, with their crops: " + samples.Length);
+        Check(KeysOf(stored, anaId).Length == 7, "Ana's record and three samples are stored");
+        Console.WriteLine("PASS people: an interrupted merge leaves none of the source's face data once a list is made on the store");
     }
 
     // ---- Privacy ----
