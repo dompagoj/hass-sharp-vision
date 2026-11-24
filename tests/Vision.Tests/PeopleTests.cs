@@ -266,7 +266,10 @@ static class PeopleTests
             (nameof(AnInterruptedMergeLeavesNoFaceData), Sync(AnInterruptedMergeLeavesNoFaceData)),
             (nameof(AFaceStartsAGroupAndACloseOneJoinsIt), Sync(AFaceStartsAGroupAndACloseOneJoinsIt)),
             (nameof(TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder), Sync(TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder)),
-            (nameof(TheShownGroupsKeepTheOrderTheyWereFirstSeenIn), Sync(TheShownGroupsKeepTheOrderTheyWereFirstSeenIn)),
+            (nameof(TheShownGroupsKeepTheOrderTheyWereFirstShownIn), Sync(TheShownGroupsKeepTheOrderTheyWereFirstShownIn)),
+            (nameof(AGroupShownLateIsLast), Sync(AGroupShownLateIsLast)),
+            (nameof(AHiddenGroupJoinedWithAShownOneTakesItsPlace), Sync(AHiddenGroupJoinedWithAShownOneTakesItsPlace)),
+            (nameof(GroupsStoredWithoutWhenTheyWereShownAreInTheOrderTheyWereFirstSeen), Sync(GroupsStoredWithoutWhenTheyWereShownAreInTheOrderTheyWereFirstSeen)),
             (nameof(AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce), Sync(AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce)),
             (nameof(TwoFacesOfOneCheckAreTwoGroups), Sync(TwoFacesOfOneCheckAreTwoGroups)),
             (nameof(GroupsOfOneCheckAreNeverJoined), Sync(GroupsOfOneCheckAreNeverJoined)),
@@ -1158,7 +1161,7 @@ static class PeopleTests
         Check(shown.Length == 2, "two groups are shown");
         var older = shown.Single(group => group.First == T0);
         var younger = shown.Single(group => group.First == T0.AddSeconds(3));
-        Check(shown[0].Id == older.Id, "the group first seen first");
+        Check(shown[0].Id == older.Id, "the group first shown first");
 
         groups.See(d, T0.AddSeconds(6), seed: 7012);
         var joined = groups.All;
@@ -1175,7 +1178,7 @@ static class PeopleTests
 
     // The page draws a card for each shown group in this order and re-reads it every 2 seconds: a card must not move under
     // a pointer because a group was seen again, or a new one was seen.
-    static void TheShownGroupsKeepTheOrderTheyWereFirstSeenIn()
+    static void TheShownGroupsKeepTheOrderTheyWereFirstShownIn()
     {
         using var home = new Home();
         var groups = Groups(home.Device());
@@ -1191,7 +1194,7 @@ static class PeopleTests
         string IdOf(float[] face) => groups.All.Single(group => Holds(groups.Samples((string)group.Id), face)).Id;
         var (aId, bId, cId) = (IdOf(a), IdOf(b), IdOf(c));
         string Order() => string.Join(",", groups.Shown.Select(group => (string)group.Id));
-        Check(Order() == $"{aId},{bId},{cId}", "the group first seen first: " + string.Join(", ", groups.Shown));
+        Check(Order() == $"{aId},{bId},{cId}", "the group first shown first: " + string.Join(", ", groups.Shown));
 
         // Seen again, the older groups stay where they are.
         groups.See(a, T0.AddSeconds(10), seed: 7060);
@@ -1203,7 +1206,7 @@ static class PeopleTests
         var dId = IdOf(d);
         Check(Order() == $"{aId},{bId},{cId},{dId}", "a new group is last: " + string.Join(", ", groups.Shown));
 
-        // Two groups first seen in one check: by id.
+        // Two groups first seen, and shown, in one check: by id.
         for (var i = 15; i < 18; i++)
         {
             groups.See(e, T0.AddSeconds(i), seed: 7064);
@@ -1211,14 +1214,100 @@ static class PeopleTests
         }
         var (eId, fId) = (IdOf(e), IdOf(f));
         var tied = string.Join(",", new[] { eId, fId }.Order(StringComparer.Ordinal));
-        Check(Order() == $"{aId},{bId},{cId},{dId},{tied}", "two groups first seen in one check, by id: " + string.Join(", ", groups.Shown));
+        Check(Order() == $"{aId},{bId},{cId},{dId},{tied}", "two groups first seen and shown in one check, by id: " + string.Join(", ", groups.Shown));
 
-        // A face close to b and d joins them into b, the one first seen, which keeps its place; d's goes.
+        // A face close to b and d joins them into b, the one first seen and shown, which keeps its place; d's goes.
         groups.See(bd, T0.AddSeconds(20), seed: 7066);
         Check(groups.Find(dId) == null && groups.Find(bId).Sightings == 8 && groups.Find(bId).First == T0.AddSeconds(3) && groups.Find(bId).Last == T0.AddSeconds(20),
             "d is joined into b: " + string.Join(", ", groups.All));
-        Check(Order() == $"{aId},{bId},{cId},{tied}", "the group joined into keeps the place of the one first seen: " + string.Join(", ", groups.Shown));
-        Console.WriteLine("PASS people: the shown groups are in the order they were first seen, which neither a sighting nor a join changes, and a new one is last");
+        Check(Order() == $"{aId},{bId},{cId},{tied}", "the group joined into keeps the place of the one first shown: " + string.Join(", ", groups.Shown));
+        Console.WriteLine("PASS people: the shown groups are in the order they were first shown, which neither a sighting nor a join changes, and a new one is last");
+    }
+
+    // The case a first-seen order gets wrong: a group seen once, then shown after another was, would be drawn before it.
+    static void AGroupShownLateIsLast()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (x, y) = (Unit(7070), Unit(7071));
+        Check(Cosine(x, y) < 0.3, "x and y are strangers");
+        groups.See(x, T0, seed: 7070);
+        for (var i = 1; i < 4; i++) groups.See(y, T0.AddSeconds(i), seed: 7071);
+        string IdOf(float[] face) => groups.All.Single(group => Holds(groups.Samples((string)group.Id), face)).Id;
+        var (xId, yId) = (IdOf(x), IdOf(y));
+        static string Order(Faces of) => string.Join(",", of.Shown.Select(group => (string)group.Id));
+        Check(Order(groups) == yId, "y is shown, x not yet: " + string.Join(", ", groups.Shown));
+        Check(data.Get<JsonObject>($"groups/{xId}")!["shown"] == null, "a hidden group's record has no shown time: " + data.Get<JsonObject>($"groups/{xId}")!.ToJsonString());
+        groups.See(x, T0.AddSeconds(10), seed: 7070);
+        groups.See(x, T0.AddSeconds(11), seed: 7070);
+        Check(Order(groups) == $"{yId},{xId}", "x, first seen before y but shown after it, is last, and y keeps its place: " + string.Join(", ", groups.Shown));
+        Check(data.Get<JsonObject>($"groups/{xId}")!["shown"]?.GetValue<DateTimeOffset>() == T0.AddSeconds(11)
+            && data.Get<JsonObject>($"groups/{yId}")!["shown"]?.GetValue<DateTimeOffset>() == T0.AddSeconds(3),
+            "each shown group's record has the time of its third sighting: " + data.Get<JsonObject>($"groups/{xId}")!.ToJsonString());
+        groups.See(x, T0.AddSeconds(12), seed: 7070);
+        groups.See(y, T0.AddSeconds(13), seed: 7071);
+        Check(Order(groups) == $"{yId},{xId}", "later sightings move neither: " + string.Join(", ", groups.Shown));
+        var next = Groups(home.RestartedDevice());
+        Check(Order(next) == $"{yId},{xId}", "the next revision reads the same order: " + string.Join(", ", next.Shown));
+        Console.WriteLine("PASS people: a group shown after another is drawn after it, though first seen before it, and its next revision keeps that order");
+    }
+
+    static void AHiddenGroupJoinedWithAShownOneTakesItsPlace()
+    {
+        using var home = new Home();
+        var groups = Groups(home.Device());
+        var (x, w, y, z) = (Unit(7080), Unit(7081), Unit(7082), Unit(7083));
+        var xy = Normalised(x.Zip(y).Select(pair => (double)pair.First + pair.Second).ToArray());
+        var strangers = new[] { x, w, y, z };
+        var closest = strangers.SelectMany((face, i) => strangers.Skip(i + 1).Select(other => Cosine(face, other))).Max();
+        Check(closest < 0.3 && Cosine(xy, x) >= 0.5 && Cosine(xy, y) >= 0.5 && Cosine(xy, w) < 0.5 && Cosine(xy, z) < 0.5, $"the four are strangers, and xy is close to x and y only: {closest}");
+        groups.See(x, T0, seed: 7080);
+        for (var i = 1; i < 4; i++) groups.See(w, T0.AddSeconds(i), seed: 7081);
+        for (var i = 4; i < 7; i++) groups.See(y, T0.AddSeconds(i), seed: 7082);
+        for (var i = 7; i < 10; i++) groups.See(z, T0.AddSeconds(i), seed: 7083);
+        string IdOf(float[] face) => groups.All.Single(group => Holds(groups.Samples((string)group.Id), face)).Id;
+        var (xId, wId, yId, zId) = (IdOf(x), IdOf(w), IdOf(y), IdOf(z));
+        string Order() => string.Join(",", groups.Shown.Select(group => (string)group.Id));
+        Check(Order() == $"{wId},{yId},{zId}", "w, y and z are shown, x is not: " + string.Join(", ", groups.Shown));
+
+        // A face close to x and y joins y into x, the group first seen, which takes y's card's place under its own id.
+        groups.See(xy, T0.AddSeconds(10), seed: 7084);
+        Check(groups.Find(yId) == null && groups.Find(xId).Sightings == 5 && groups.Find(xId).First == T0, "y is joined into x: " + string.Join(", ", groups.All));
+        Check(Order() == $"{wId},{xId},{zId}", "x's card is where y's was, the others where they were: " + string.Join(", ", groups.Shown));
+        Console.WriteLine("PASS people: a hidden group a shown one is joined into takes the shown one's place");
+    }
+
+    // A record of before the shown time: as the code of ac2d639 writes one, which has no shown, or one whose shown is
+    // before its first sighting.
+    static void GroupsStoredWithoutWhenTheyWereShownAreInTheOrderTheyWereFirstSeen()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (x, y) = (Unit(7090), Unit(7091));
+        groups.See(x, T0, seed: 7090);
+        for (var i = 1; i < 4; i++) groups.See(y, T0.AddSeconds(i), seed: 7091);
+        groups.See(x, T0.AddSeconds(10), seed: 7090);
+        groups.See(x, T0.AddSeconds(11), seed: 7090);
+        string IdOf(float[] face) => groups.All.Single(group => Holds(groups.Samples((string)group.Id), face)).Id;
+        var (xId, yId) = (IdOf(x), IdOf(y));
+        static string Order(Faces of) => string.Join(",", of.Shown.Select(group => (string)group.Id));
+        Check(Order(groups) == $"{yId},{xId}", "by when they were shown: " + string.Join(", ", groups.Shown));
+        data.Update<JsonObject>($"groups/{xId}", record =>
+        {
+            record!.Remove("shown");
+            return record;
+        });
+        data.Update<JsonObject>($"groups/{yId}", record =>
+        {
+            record!["shown"] = T0.AddHours(-1);
+            return record;
+        });
+        var next = Groups(home.RestartedDevice());
+        Check(Order(next) == $"{xId},{yId}", "without a shown time, or with one before the first sighting, by the first sighting: " + string.Join(", ", next.Shown));
+        Check(next.Shown.All(group => group.Sightings == 3) && next.Samples(xId).Length == 1 && next.Samples(yId).Length == 1, "the groups are read whole: " + string.Join(", ", next.Shown));
+        Console.WriteLine("PASS people: groups stored without the time they were shown, or with one before their first sighting, are in the order they were first seen");
     }
 
     static void AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce()

@@ -1056,9 +1056,12 @@ public sealed class FaceGroups
     }
 
     /// <summary>
-    /// The groups seen at least <see cref="ShownAt"/> times, the group first seen first (by id when two were first seen at
-    /// once): a snapshot, replaced by each change. A later sighting moves no group, and a new one is last, so that the
-    /// page's cards keep their order while someone works on one.
+    /// The groups seen at least <see cref="ShownAt"/> times, in the order they were first shown, at the sighting that took
+    /// each to <see cref="ShownAt"/> (then by first sighting, then by id): a snapshot, replaced by each change. A group
+    /// newly shown is last, and a sighting moves none; a join puts the group it makes at the place of the one shown first
+    /// of those joined, under the id of the one first seen, and the others go. So a card on the page keeps its place among
+    /// the others for as long as it is there, and a new card is always last. A group stored before this order was kept is
+    /// read as shown from its first sighting.
     /// </summary>
     public IReadOnlyList<FaceGroup> Shown => Volatile.Read(ref shown);
 
@@ -1347,6 +1350,8 @@ public sealed class FaceGroups
         var dropped = group.Samples.Where(sample => !samples.Contains(sample)).ToList();
         var firstShown = !IsShown(group) && sightings >= ShownAt;
         var suggestedBefore = group.Suggested;
+        // The card of the group shown first of those joined keeps its place; with none shown, the card is new, and last.
+        group.ShownFrom = close.Where(IsShown).Select(g => g.ShownFrom).Min() ?? (sightings >= ShownAt ? now : null);
         group.Sightings = sightings;
         var latest = close.Max(g => g.Last);
         group.Last = latest > now ? latest : now;
@@ -1457,7 +1462,8 @@ public sealed class FaceGroups
     /// <summary>Replaces <see cref="Shown"/> with the groups shown now.</summary>
     void Publish()
     {
-        var list = groups.Values.Where(IsShown).OrderBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal).Select(group => group.View()).ToList();
+        var list = groups.Values.Where(IsShown).OrderBy(group => group.ShownFrom).ThenBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal)
+            .Select(group => group.View()).ToList();
         Volatile.Write(ref shown, list.AsReadOnly());
     }
 
@@ -1565,6 +1571,8 @@ public sealed class FaceGroups
             Suggested = PeopleList.IsId(record.Suggested) ? record.Suggested : null,
             Written = record.Last,
         };
+        // A record of before the shown time, or with one before its first sighting, is shown from its first sighting.
+        if (IsShown(group)) group.ShownFrom = record.Shown is { } shown && shown >= record.First ? shown : record.First;
         foreach (var sample in record.Samples ?? [])
         {
             if (sample == null || !PeopleList.IsId(sample.Id) || group.Samples.Count >= MostSamples || group.Samples.Any(s => s.Id == sample.Id)) continue;
@@ -1639,7 +1647,7 @@ public sealed class FaceGroups
     void WriteRecord(Group group)
     {
         var record = new StoredGroup(group.First, group.Last, group.Sightings, group.Suggested,
-            group.Samples.Select(sample => new StoredGroupSample(sample.Id, sample.At, sample.Eyes, sample.Embedding.Fit)).ToList());
+            group.Samples.Select(sample => new StoredGroupSample(sample.Id, sample.At, sample.Eyes, sample.Embedding.Fit)).ToList(), group.ShownFrom);
         Try(() => data.Set(RecordKey(group.Id), record));
         group.Written = group.Last;
     }
@@ -1676,6 +1684,8 @@ public sealed class FaceGroups
         public int Sightings { get; set; }
         public DateTimeOffset First { get; set; }
         public DateTimeOffset Last { get; set; }
+        /// <summary>When the group was first shown, which orders <see cref="Shown"/>; null while it is not.</summary>
+        public DateTimeOffset? ShownFrom { get; set; }
         public string? Suggested { get; set; }
         public List<GroupSample> Samples { get; set; } = [];
         /// <summary>The ids of the groups this one is apart from: each took a face of a check this one took a face of.</summary>
@@ -1694,8 +1704,12 @@ public sealed class FaceGroups
     /// <summary>A group's entry in the index: its id, the groups it is apart from, and the people it is known not to be.</summary>
     internal sealed record IndexEntry(string Id, List<string>? Apart, List<string>? NotPeople);
 
-    /// <summary>A group as <c>groups/&lt;id&gt;</c> keeps it: without its embeddings and crops.</summary>
-    internal sealed record StoredGroup(DateTimeOffset First, DateTimeOffset Last, int Sightings, string? Suggested, List<StoredGroupSample>? Samples);
+    /// <summary>
+    /// A group as <c>groups/&lt;id&gt;</c> keeps it: without its embeddings and crops. <c>shown</c>, when it was first
+    /// shown, is there for a shown group only; a record written before it was kept has none.
+    /// </summary>
+    internal sealed record StoredGroup(DateTimeOffset First, DateTimeOffset Last, int Sightings, string? Suggested, List<StoredGroupSample>? Samples,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? Shown = null);
 
     /// <summary>A sample as its group's record lists it.</summary>
     internal sealed record StoredGroupSample(string Id, DateTimeOffset At, double Eyes, float Fit);

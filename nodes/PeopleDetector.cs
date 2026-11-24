@@ -788,10 +788,11 @@ public class PeopleDetector : SharpDevice
         return IsJpeg(view.Face) ? option.Image(view.Face!) : option;
     }
 
-    // A card for each shown group, the group first seen first, so that no sighting moves a card while someone works on it
-    // and a new one is added at the end: its largest face, how often and when it was seen, the person it might be, a
-    // Person to choose for it from the people (the suggestion's chosen) or a new person to make of it, Save and Dismiss.
-    // The groups keep at most MostGroups, so the Take bounds the page and leaves no shown group without its card.
+    // A card for each shown group, in the order the groups were first shown (FaceGroups.Shown), so that a card keeps its
+    // place among the others for as long as it is there and a new one is always last: its largest face, how often and
+    // when it was seen, the person it might be, a Person to choose for it from the people (the suggestion's chosen) or a
+    // new person to make of it, Save and Dismiss. The groups keep at most MostGroups, so the Take bounds the page and
+    // leaves no shown group without its card.
     List<UiCard> UnknownCards(IReadOnlyList<FaceGroup> shown, IReadOnlyList<Person> everyone, DateTimeOffset now)
     {
         // The pick field takes what it needs of the form when it is added, so one form serves every card.

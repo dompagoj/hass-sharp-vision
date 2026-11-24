@@ -1003,7 +1003,7 @@ static class PeopleDetectorTests
         return type?.GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(device) ?? throw new Exception($"PeopleDetector has no {name}");
     }
 
-    /// <summary>The unknown groups the running detector of <paramref name="definition"/> shows, the group first seen first.</summary>
+    /// <summary>The unknown groups the running detector of <paramref name="definition"/> shows, in the order they were first shown.</summary>
     static dynamic[] Shown(Rig rig, string definition = "porch") => [.. VisionTests.Items((object)Member(rig.Detector(definition), "Unknown").Shown).Select(group => (dynamic)group)];
 
     static bool IsScore(string text) => System.Text.RegularExpressions.Regex.IsMatch(text, @"^\d\.\d\d$");
@@ -1721,7 +1721,7 @@ static class PeopleDetectorTests
         Check((string)unknown["title"]! == "Unknown faces" && unknown["attention"]!.GetValue<bool>() && (string)unknown["empty"]! == "No unknown faces.", "the unknown list: " + unknown.ToJsonString());
         var groups = Shown(rig);
         var cards = CardsOf(page, "unknown");
-        Check(cards.Select(c => (string)c["id"]!).SequenceEqual(groups.Select(g => (string)g.Id)), "a card for each shown group, in the order shown (the group first seen first): " + string.Join(",", cards.Select(c => (string)c["id"]!)));
+        Check(cards.Select(c => (string)c["id"]!).SequenceEqual(groups.Select(g => (string)g.Id)), "a card for each shown group, in the order shown (the order the groups were first shown in): " + string.Join(",", cards.Select(c => (string)c["id"]!)));
         Check(page["attention"]!.GetValue<int>() == 3 && await Waiting(rig) == 3, $"the three wait: {page["attention"]}, {await Waiting(rig)}");
         var unknownFaces = Member(rig.Detector(), "Unknown");
         foreach (var card in cards)
