@@ -3,7 +3,7 @@
 How well SFace (`face_recognition_sface_2021dec.onnx`, run by `hs_vision`'s recogniser) tells the same person from
 different people, by the size of the face in pixels between the eyes, measured on the public benchmark LFW. The
 numbers set the People detector's recognition rules: when a face is usable, the match, suggest and learn scores,
-their margins, and the fit limit. **Defaults**, after the results, has them.
+their margins, the fit limit, and how far a face may be turned. **Defaults**, after the results, has them.
 
 **These numbers are an upper bound.** LFW's faces are posed press photos: well lit, sharp, mostly from the front and
 at eye level. The tool shrinks them to door-camera sizes with an area-averaging filter, which looks like a small face
@@ -54,6 +54,12 @@ cargo run --release --example calibrate -- <lfw dir> model/face_recognition_sfac
   is not, whether it is an enrolled person's or not.
 - **Fit.** The alignment's fit (how far the landmarks are from the reference once aligned, in crop pixels) over all
   faces, and over the faces whose best same-person score at the usable size does or does not reach the match score.
+- **Turned faces.** How far each face is turned (`Vision.Turn`: how far its nose tip lies from the midpoint of its eyes,
+  along the line between them, in eye distances), from the landmarks of its detection in the picture as it is; and
+  whether the frontal rule (`Vision.Frontal`) takes it. At 24 and 16 px, every face that fits within the fit limit is
+  paired with every frontal picture (turned less than 0.2, fitting) of the same person among their drawn ones, and of
+  everyone else, all of them, not drawn at random; and with the other faces of its bucket. The turned faces are every
+  picture's, not only the drawn ones', as there are few. The lines are the People detector's defaults, 0.40 and 0.50.
 
 ### Reproducing it
 
@@ -65,6 +71,8 @@ so the statistics run again from it without embedding again. On 24 November 2026
   and the last two printed the same output as each other byte for byte.
 - `--check 500` computed 500 pictures drawn with a fixed seed again, detection and embeddings, and compared them with
   the cache: all 500 match bit for bit.
+- Later that day the tool gained the turned faces, which need nothing the cache lacks (the landmarks are in it). Two
+  runs from the cache printed the same output byte for byte, and every line before the turned faces as before.
 
 The tables below are the output of a run from the cache, with its headings one level down.
 
@@ -246,6 +254,118 @@ Over 7: 0.6 % of the matched faces, 0.0 % of those not matched.
 | Learn margin | none |
 | Verdict | PASS |
 
+### Turned faces
+
+How far a face is turned is how far its nose tip lies from the midpoint of its eyes, along the line between them, in eye distances: 0 looking straight at the camera, 0.5 with the nose in line with one eye. A frontal face, the other face of each pair below, is one turned less than 0.2. Only a face that fits within 7 is compared, as the People detector compares them.
+
+Of the 13233 faces found, the frontal rule (eyes a fifth of the box apart, the nose between them across the picture) turns away 112 (0.8 %), 50 of which fit within 7; 1 of all faces have their eyes closer than a fifth of the box. Turn of the faces it turns away, by quantile (1 %, 10 %, 50 %, 90 %, 99 %, highest): 0.33, 0.40, 0.50, 0.76, 1.07, 1.38. Turn of all faces, by quantile (50 %, 90 %, 99 %, 99.9 %, highest): 0.09, 0.24, 0.48, 0.76, 1.38.
+
+Of the faces it turns away, 55 are turned less than 0.5: a tilted head moves the nose across the picture without turning. Of the faces it takes, 42 are turned 0.5 or more, 20 of which fit within 7.
+
+Of the 112 faces it turns away, a limit on the turn takes, at 0.40, 12 (12 fitting within 7); at 0.45, 31 (28 fitting within 7); at 0.50, 55 (47 fitting within 7); at 0.55, 65 (50 fitting within 7); at 0.60, 74 (50 fitting within 7); at 0.70, 92 (50 fitting within 7).
+
+#### Turned faces at 24 px
+
+Each face of the bucket against every frontal picture of the same person (of their 10 drawn) and of everyone else (of theirs). Same ≥ and Different ≥ are the shares of those pairs at or above the score; Crossing are the faces of the bucket that score at or above 0.50 with at least one frontal picture of someone else, of 8732 pictures of 5044 people.
+
+| Turn | Faces | Fit within 7 | People | Same-person pairs | Same ≥ 0.40 | Same ≥ 0.50 | Different-person pairs | Different ≥ 0.40 | Different ≥ 0.50 | Crossing |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.00 to 0.10 | 6949 | 6949 | 3646 | 24442 | 98.8 % | 94.8 % | 60648674 | 0.0247 % | 0.0005 % | 236 (3.4 %) |
+| 0.10 to 0.20 | 4039 | 4039 | 2332 | 14835 | 99.2 % | 96.0 % | 35250533 | 0.0312 % | 0.0006 % | 148 (3.7 %) |
+| 0.20 to 0.30 | 1537 | 1537 | 1066 | 5513 | 99.2 % | 96.3 % | 13415571 | 0.0330 % | 0.0006 % | 68 (4.4 %) |
+| 0.30 to 0.40 | 461 | 461 | 366 | 1602 | 98.9 % | 96.4 % | 4023850 | 0.0335 % | 0.0006 % | 13 (2.8 %) |
+| 0.40 to 0.45 | 80 | 78 | 72 | 224 | 100.0 % | 97.8 % | 680872 | 0.0251 % | 0.0007 % | 4 (5.1 %) |
+| 0.45 to 0.50 | 63 | 59 | 54 | 178 | 100.0 % | 96.6 % | 515010 | 0.0309 % | 0.0004 % | 1 (1.7 %) |
+| 0.50 to 0.55 | 29 | 19 | 18 | 83 | 100.0 % | 97.6 % | 165825 | 0.0470 % | 0.0006 % | 1 (5.3 %) |
+| 0.55 to 0.60 | 20 | 4 | 4 | 22 | 68.2 % | 68.2 % | 34906 | 0.0430 % | 0.0258 % | 1 (25.0 %) |
+| 0.60 to 0.70 | 15 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+| 0.70 to 0.80 | 10 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+| 0.80 to 1.00 | 2 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+| 1.00 and over | 0 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+
+Two faces of the same bucket, both fitting within 7:
+
+| Turn | Same-person pairs | Same ≥ 0.50 | Different-person pairs | Different ≥ 0.40 | Different ≥ 0.50 |
+|---|---|---|---|---|---|
+| 0.00 to 0.10 | 56221 | 98.3 % | 24084605 | 0.0269 % | 0.0006 % |
+| 0.10 to 0.20 | 25692 | 98.7 % | 8129049 | 0.0412 % | 0.0013 % |
+| 0.20 to 0.30 | 4394 | 98.9 % | 1176022 | 0.0625 % | 0.0006 % |
+| 0.30 to 0.40 | 340 | 99.7 % | 105690 | 0.1202 % | 0.0170 % |
+| 0.40 to 0.45 | 7 | 100.0 % | 2996 | 0.1335 % | 0.0000 % |
+| 0.45 to 0.50 | 5 | 100.0 % | 1706 | 0.0586 % | 0.0000 % |
+| 0.50 to 0.55 | 1 | 100.0 % | 170 | 0.0000 % | 0.0000 % |
+| 0.55 to 0.60 | 0 | – | 6 | 0.0000 % | 0.0000 % |
+| 0.60 to 0.70 | 0 | – | 0 | – | – |
+| 0.70 to 0.80 | 0 | – | 0 | – | – |
+| 0.80 to 1.00 | 0 | – | 0 | – | – |
+| 1.00 and over | 0 | – | 0 | – | – |
+
+The faces the frontal rule turns away that a limit on the turn would take, beside those the rule takes; the faces taken that do not fit within 7 are still not compared:
+
+| Faces | Count | Fit within 7 | People | Same-person pairs | Same ≥ 0.50 | Different-person pairs | Different ≥ 0.40 | Different ≥ 0.50 | Crossing |
+|---|---|---|---|---|---|---|---|---|---|
+| Taken by the frontal rule | 13119 | 13098 | 5705 | 46762 | 95.4 % | 114316242 | 0.0280 % | 0.0005 % | 471 (3.6 %) |
+| Turned away by it, turned at most 0.40 | 12 | 12 | 11 | 62 | 100.0 % | 104722 | 0.0449 % | 0.0000 % | 0 (0.0 %) |
+| Turned away by it, turned at most 0.45 | 28 | 26 | 24 | 83 | 100.0 % | 226949 | 0.0353 % | 0.0004 % | 1 (3.8 %) |
+| Turned away by it, turned at most 0.50 | 51 | 45 | 42 | 121 | 97.5 % | 392819 | 0.0290 % | 0.0003 % | 1 (2.2 %) |
+| Turned away by it, turned at most 0.55 | 60 | 48 | 43 | 137 | 97.8 % | 418999 | 0.0310 % | 0.0002 % | 1 (2.1 %) |
+| Turned away by it, turned at most 0.60 | 67 | 48 | 43 | 137 | 97.8 % | 418999 | 0.0310 % | 0.0002 % | 1 (2.1 %) |
+| Turned away by it, turned at most 0.70 | 76 | 48 | 43 | 137 | 97.8 % | 418999 | 0.0310 % | 0.0002 % | 1 (2.1 %) |
+| Turned away by it, all | 86 | 48 | 43 | 137 | 97.8 % | 418999 | 0.0310 % | 0.0002 % | 1 (2.1 %) |
+
+Over the 8813 faces with a frontal picture of the same person, the rank correlation (Spearman's) of each measure with the face's mean score against those pictures: the turn -0.012, the ratio of the eyes' distances to the nose 0.014.
+
+#### Turned faces at 16 px
+
+Each face of the bucket against every frontal picture of the same person (of their 10 drawn) and of everyone else (of theirs). Same ≥ and Different ≥ are the shares of those pairs at or above the score; Crossing are the faces of the bucket that score at or above 0.50 with at least one frontal picture of someone else, of 8732 pictures of 5044 people.
+
+| Turn | Faces | Fit within 7 | People | Same-person pairs | Same ≥ 0.40 | Same ≥ 0.50 | Different-person pairs | Different ≥ 0.40 | Different ≥ 0.50 | Crossing |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.00 to 0.10 | 6949 | 6949 | 3646 | 24442 | 98.4 % | 92.9 % | 60648674 | 0.0254 % | 0.0005 % | 272 (3.9 %) |
+| 0.10 to 0.20 | 4039 | 4039 | 2332 | 14835 | 98.8 % | 94.4 % | 35250533 | 0.0296 % | 0.0005 % | 144 (3.6 %) |
+| 0.20 to 0.30 | 1537 | 1537 | 1066 | 5513 | 98.9 % | 94.9 % | 13415571 | 0.0309 % | 0.0005 % | 59 (3.8 %) |
+| 0.30 to 0.40 | 461 | 461 | 366 | 1602 | 98.7 % | 94.2 % | 4023850 | 0.0322 % | 0.0006 % | 14 (3.0 %) |
+| 0.40 to 0.45 | 83 | 80 | 74 | 224 | 100.0 % | 96.0 % | 698336 | 0.0255 % | 0.0007 % | 3 (3.8 %) |
+| 0.45 to 0.50 | 65 | 60 | 55 | 185 | 99.5 % | 94.6 % | 523735 | 0.0271 % | 0.0004 % | 1 (1.7 %) |
+| 0.50 to 0.55 | 30 | 19 | 18 | 83 | 100.0 % | 94.0 % | 165825 | 0.0386 % | 0.0000 % | 0 (0.0 %) |
+| 0.55 to 0.60 | 22 | 4 | 4 | 22 | 68.2 % | 68.2 % | 34906 | 0.0372 % | 0.0258 % | 1 (25.0 %) |
+| 0.60 to 0.70 | 24 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+| 0.70 to 0.80 | 15 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+| 0.80 to 1.00 | 4 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+| 1.00 and over | 1 | 0 | 0 | 0 | – | – | 0 | – | – | – |
+
+Two faces of the same bucket, both fitting within 7:
+
+| Turn | Same-person pairs | Same ≥ 0.50 | Different-person pairs | Different ≥ 0.40 | Different ≥ 0.50 |
+|---|---|---|---|---|---|
+| 0.00 to 0.10 | 56221 | 97.3 % | 24084605 | 0.0276 % | 0.0007 % |
+| 0.10 to 0.20 | 25692 | 97.9 % | 8129049 | 0.0379 % | 0.0013 % |
+| 0.20 to 0.30 | 4394 | 98.2 % | 1176022 | 0.0520 % | 0.0005 % |
+| 0.30 to 0.40 | 340 | 99.7 % | 105690 | 0.1372 % | 0.0132 % |
+| 0.40 to 0.45 | 7 | 100.0 % | 3153 | 0.0634 % | 0.0000 % |
+| 0.45 to 0.50 | 5 | 100.0 % | 1765 | 0.0000 % | 0.0000 % |
+| 0.50 to 0.55 | 1 | 100.0 % | 170 | 0.0000 % | 0.0000 % |
+| 0.55 to 0.60 | 0 | – | 6 | 0.0000 % | 0.0000 % |
+| 0.60 to 0.70 | 0 | – | 0 | – | – |
+| 0.70 to 0.80 | 0 | – | 0 | – | – |
+| 0.80 to 1.00 | 0 | – | 0 | – | – |
+| 1.00 and over | 0 | – | 0 | – | – |
+
+The faces the frontal rule turns away that a limit on the turn would take, beside those the rule takes; the faces taken that do not fit within 7 are still not compared:
+
+| Faces | Count | Fit within 7 | People | Same-person pairs | Same ≥ 0.50 | Different-person pairs | Different ≥ 0.40 | Different ≥ 0.50 | Crossing |
+|---|---|---|---|---|---|---|---|---|---|
+| Taken by the frontal rule | 13121 | 13099 | 5705 | 46769 | 93.6 % | 114324967 | 0.0276 % | 0.0005 % | 493 (3.8 %) |
+| Turned away by it, turned at most 0.40 | 12 | 12 | 11 | 62 | 96.8 % | 104722 | 0.0420 % | 0.0010 % | 1 (8.3 %) |
+| Turned away by it, turned at most 0.45 | 31 | 28 | 26 | 83 | 97.6 % | 244413 | 0.0303 % | 0.0004 % | 1 (3.6 %) |
+| Turned away by it, turned at most 0.50 | 55 | 47 | 44 | 121 | 95.0 % | 410283 | 0.0253 % | 0.0002 % | 1 (2.1 %) |
+| Turned away by it, turned at most 0.55 | 65 | 50 | 45 | 137 | 95.6 % | 436463 | 0.0268 % | 0.0002 % | 1 (2.0 %) |
+| Turned away by it, turned at most 0.60 | 74 | 50 | 45 | 137 | 95.6 % | 436463 | 0.0268 % | 0.0002 % | 1 (2.0 %) |
+| Turned away by it, turned at most 0.70 | 92 | 50 | 45 | 137 | 95.6 % | 436463 | 0.0268 % | 0.0002 % | 1 (2.0 %) |
+| Turned away by it, all | 109 | 50 | 45 | 137 | 95.6 % | 436463 | 0.0268 % | 0.0002 % | 1 (2.0 %) |
+
+Over the 8814 faces with a frontal picture of the same person, the rank correlation (Spearman's) of each measure with the face's mean score against those pictures: the turn -0.009, the ratio of the eyes' distances to the nose 0.011.
+
 ## What the results say
 
 - **Different people score the same at every size.** The line for 1 in 1,000 different-person pairs is 0.365 to
@@ -266,8 +386,26 @@ Over 7: 0.6 % of the matched faces, 0.0 % of those not matched.
   less: with a margin of 0.10, 0.47 keeps wrong recognitions to 1 in 1,000 and recognises 96.8 % of genuine faces.
 - **The fit does not predict a failed match on LFW:** the faces whose best same-person score misses the match score
   fit no worse than those that match. LFW has few profiles, so the fit limit here only removes the worst 0.6 % of
-  frontal faces; it is a guard against turned faces, which this data cannot measure. Faces found again in the small
-  pictures fit about as well as on the originals.
+  frontal faces; it is also a guard against turned faces, and the turned faces show that it is the one that stops them
+  (next). Faces found again in the small pictures fit about as well as on the originals.
+- **Turned faces match as well as frontal ones as far as they fit, and the fit runs out first.** Up to a turn of 0.55,
+  a face's pairs with frontal pictures of the same person reach the match score as often as frontal faces' do (96.6 %
+  to 97.8 % at 24 px from 0.40 to 0.55, against 94.8 % to 96.4 % below), and strangers' pairs reach it no more often
+  (0.0004 % to 0.0007 %, against 0.0005 % to 0.0006 %). Between 0.50 and 0.55 a third of the faces fit worse than the
+  limit, from 0.55 to 0.60 four in five, and from 0.60 on every one: LFW has no face turned more than 0.60 that the
+  People detector would compare, whatever the rule on turning.
+- **The frontal rule turns away few faces, and half of them are not turned.** It turns away 112 of the 13,233 faces
+  (0.8 %); 55 of those are turned less than 0.5 along their eyes (a tilted head puts the nose beside an eye across the
+  picture), and 50 of the 112 fit within the limit. Every one of those 50 is turned at most 0.55.
+- **Neither measure predicts the score over LFW.** The rank correlation of the face's mean same-person score with the
+  turn is −0.01, and with the ratio of the eyes' distances to the nose 0.01: almost every face is near frontal, and
+  what lowers a score there is not the turn. The turn is the measure used because it does not change with a tilt of the
+  head, and because for an upright face 0.5 is where the frontal rule's line is.
+- **Two strangers turned alike are a little more alike.** Two faces of different people both turned 0.30 to 0.40
+  reach the suggest score 4 to 5 times as often as two frontal faces (0.12 % of pairs against 0.03 %), and the match
+  score 0.017 % of the time against 0.0006 %, on 105,690 pairs. A person named from a turned card, compared with a
+  stranger turned the same way, is that much likelier to be suggested or mistaken. Further out the buckets have too
+  few pairs to say.
 
 ## Defaults
 
@@ -278,6 +416,7 @@ reasons under them:
 UsableEyes = 16
 LearnEyes = 24
 FitLimit = 7
+TurnLimit = 0.55
 MatchScore = 0.50
 MatchMargin = 0.10
 SuggestScore = 0.40
@@ -321,6 +460,36 @@ Unlike = 0.40
     clean photos, up to about one in five of a known person's cards is asked about when it is named for them; the rest
     are suggested as them at the default *Match score*, where this line is the suggest line. Sunglasses, a turned head,
     night infrared and a door camera's blur lower the same person's scores, by an amount this data cannot measure.
+- `TurnLimit` 0.55, from **How far a face may be turned** below. It is not one of the plan's rules, which came before
+  it, and so is not in the next section.
+
+## How far a face may be turned
+
+The rule: the widest limit at which faces the frontal rule turns away but the limit takes (a) do not reach the match
+score with strangers more often than frontal faces do, and (b) still reach it with the same person about as often as
+frontal faces do; and no wider than LFW has faces to show it.
+
+- **0.55 meets both.** The faces the frontal rule turns away that a limit of 0.55 takes, and that fit, are 48 at 24 px,
+  of 43 people: 97.8 % of their 137 pairs with frontal pictures of the same person reach 0.50 (frontal faces: 95.4 %),
+  and 0.0002 % of their 418,999 pairs with strangers do (frontal: 0.0005 %); one of the 48 crosses 0.50 with a stranger
+  (2.1 %, frontal 3.6 %). At 16 px: 95.6 % and 0.0002 % (frontal 93.6 % and 0.0005 %). By bucket, the faces turned 0.50
+  to 0.55 are as good as frontal ones at the match score, at 24 px and at 16 px; at the suggest score their pairs with
+  strangers reach it more often, 0.047 % and 0.039 % against 0.025 % to 0.033 % for frontal faces, on 165,825 pairs.
+- **The suggest band.** Of the pairs of a face turned 0.40 to 0.55 with frontal pictures of the same person, 2.2 % to
+  3.4 % score from 0.40 to under 0.50 at 24 px; of its pairs with strangers, 0.024 % to 0.046 %. The People detector
+  takes such a turned face, a maybe, for that person seen from further aside than their samples, and neither groups nor
+  counts it (the README's **Which faces are used**); a stranger's turned face that scores there with someone goes
+  uncounted too.
+- **The data ends at 0.55.** Every face the frontal rule turns away that fits is turned at most 0.55, so a wider limit
+  would take no other face of LFW: nothing here says how one turned further does. The four faces turned 0.55 to 0.60 that
+  fit (all of which the frontal rule takes) reach 0.50 in 15 of their 22 pairs with their own person (68 %), and one of
+  them crosses 0.50 with a stranger: four faces are too few to measure, but they do not argue for going further.
+- **How thin it is.** The bucket 0.45 to 0.50 has 59 faces that fit, of 54 people, and 0.50 to 0.55 has 19, of 18
+  people: the rates are counts of one or two faces there, measured on LFW's posed photos, where a face turned 0.5 is
+  rare and is seldom also small, blurred or seen from above as at a door.
+- **What a door gets from it.** The fit limit, which stays at 7, still turns away most faces turned more than about
+  0.5: a third of those turned 0.50 to 0.55, and every one of LFW's turned more than 0.60. The limit lets in the
+  three-quarter views that fit, and tilted heads looking at the camera, which the frontal rule turned away.
 
 ## What the plan's rules give
 
@@ -367,8 +536,8 @@ which is why **Defaults** above departs from them:
 3. **With a 1080p camera the detector, not recognition, decides.** It finds only 19 % of faces at 16 px between the
    eyes and 1 % at 12 px in such a frame, so few faces under about 24 px are ever offered to recognition there.
 
-What recognition can and cannot be trusted with at a door camera: it can put a likely name on a clear, frontal face
-of someone in the people list, as something to look at rather than proof. It cannot be trusted to keep strangers out:
+What recognition can and cannot be trusted with at a door camera: it can put a likely name on a clear face, frontal or
+turned as far as its points still fit, of someone in the people list, as something to look at rather than proof. It cannot be trusted to keep strangers out:
 at the defaults up to about one of every thousand faces of strangers gets an enrolled person's name even on LFW's clean
 photos with a small list, and more at a real door or with a long list, so nothing that unlocks, disarms or opens should depend on it. Small, turned, blurred
 or night faces will often go unrecognised, and with a 1080p camera the detector misses most faces under about 24 px
