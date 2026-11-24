@@ -1,5 +1,6 @@
 // hass-sharp-vision 1.1.0, from https://github.com/dompagoj/hass-sharp-vision
 using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
 
 /// <summary>The camera of a <see cref="PeopleDetector"/>: each frame it checks, with the faces and people found drawn on it.</summary>
@@ -19,9 +20,10 @@ public class PeopleDetectorCamera : SharpCamera
 /// (held on for <see cref="StayOnFor"/> after the last), how many are in the newest frame checked, and when one was last
 /// seen; and it has a camera that shows each frame checked with what was found drawn on it, its entities in the order
 /// its constructor gives. With <see cref="RecogniseFaces"/> on, it recognises the clear faces of each frame against the
-/// people list every People detector shares (<see cref="PeopleList"/>), groups the ones it does not know
-/// (<see cref="FaceGroups"/>), and learns new looks of the people it is sure of; its page lists the unknown faces to
-/// name or dismiss, the people to rename, merge and delete, and a person's samples to remove.
+/// people list every People detector shares (<see cref="PeopleList"/>), says who is in frame (Recognised, held as seen
+/// is), groups the faces it does not know (<see cref="FaceGroups"/>), and learns new looks of the people it is sure of;
+/// its page lists the unknown faces to name or dismiss, the people to rename, merge and delete, and a person's samples
+/// to remove.
 /// </para>
 /// <para>
 /// Drop it in an entity definition as a node of its own and give it a camera; or derive a C# device node's class from
@@ -57,9 +59,13 @@ public class PeopleDetector : SharpDevice
         NoPerson = "Person is required.", NoOneToMergeInto = "Choose a person in Merge into first.";
     // The id of the page's set of options of the people, which the pick fields choose from.
     const string PeopleSet = "people";
+    // The key of the detector's own data that keeps the last visit, for Recognised's last_recognised after a restart.
+    const string VisitKey = "recognised";
 
     readonly PeopleDetectorCamera camera;
     readonly Watch faces, people;
+    // Recognised: who is in frame.
+    readonly SharpSensor who;
     VisionDetector? detector;
     SharpVideo? video;
     RecognitionRules rules = RecognitionRules.Default;
@@ -81,7 +87,8 @@ public class PeopleDetector : SharpDevice
     // of the list. So a check never matches or notes a face against a list older than the one the groups were last
     // matched against, nor in the middle of a press. Guards matchedAgainst. It is never held across an await, nor while
     // waiting for a frame, embedding a face or logging (a log line goes to Python), and the page is drawn outside it
-    // (Closed takes page inside it; nothing takes it inside page).
+    // (Closed takes page inside it; nothing takes it inside page). Guards visits too, which Recognised shows: who is in
+    // frame is worked out with the matching, against the same list, and set on the sensor after the lock is let go (Show).
     // Two detectors on one store cannot wait on each other's: a write to a store holds only the store's own lock, and the
     // other users' Changed actions are queued (Task.Run) after that lock is let go, so a detector writing the shared store
     // under this lock never runs, or waits for, another detector's code; nor does the people list hold its lock across a
@@ -90,6 +97,13 @@ public class PeopleDetector : SharpDevice
     // The people list the groups were last matched against: a check that finds another (a change whose ListsChanged has
     // not run yet, or a write of its own) matches them again first.
     IReadOnlyList<Person>? matchedAgainst;
+    readonly Visits visits = new();
+
+    // Guards shownTicket and shown: Show() sets Recognised under it, never under lists.
+    readonly Lock showing = new();
+    // The ticket of the last Shown handed to Show(), and the last one set on the sensor.
+    long shownTicket;
+    Shown? shown;
 
     // Guards the page: each draw hands its lists to Ui under it; and samplesOf, drawnGroups and drawnTicket. Drawing runs
     // from the checks, the minute's timer, the handlers and the people list's Changed, which can run at the same time.
@@ -101,7 +115,7 @@ public class PeopleDetector : SharpDevice
     // Each draw's ticket, in the order they began: a draw hands its lists over only when no later one has.
     long ticketsBegun, drawnTicket;
 
-    /// <summary>The device with its camera and its six sensors, in this order: face seen, person seen, faces, people, last face seen, last person seen.</summary>
+    /// <summary>The device with its camera and its seven sensors, in this order: face seen, person seen, faces, people, last face seen, last person seen, recognised.</summary>
     public PeopleDetector()
     {
         Manufacturer = "HassSharp";
@@ -113,6 +127,7 @@ public class PeopleDetector : SharpDevice
         var personCount = Add(new SharpSensor("people", "People") { StateClass = "measurement", Icon = "mdi:account-multiple", RestoreState = false });
         var lastFace = Add(new SharpSensor("last_face_seen", "Last face seen") { DeviceClass = "timestamp", RestoreState = true });
         var lastPerson = Add(new SharpSensor("last_person_seen", "Last person seen") { DeviceClass = "timestamp", RestoreState = true });
+        who = Add(new SharpSensor("recognised", "Recognised") { Icon = "mdi:account-eye", RestoreState = false });
         faces = new Watch(faceSeen, faceCount, lastFace);
         people = new Watch(personSeen, personCount, lastPerson);
     }
@@ -174,6 +189,13 @@ public class PeopleDetector : SharpDevice
     protected virtual async Task<IFaceRecognizer> OpenRecognizer() =>
         await Vision.OpenRecognizerAsync(Files, RuntimeInformation.RuntimeIdentifier, Stopping);
 
+    /// <summary>
+    /// The time now, as the checks and the opening of the recogniser go by it: when a face, a person or a recognised
+    /// person was seen, and how long ago that was. The system clock's, <see cref="DateTimeOffset.UtcNow"/>; a derived class
+    /// may give another, as the tests do to end a hold when they choose.
+    /// </summary>
+    protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
+
     /// <summary>Downloads the vision library for this platform, once, and opens its detector.</summary>
     protected sealed override async Task Setup()
     {
@@ -185,12 +207,14 @@ public class PeopleDetector : SharpDevice
     /// <summary>
     /// Opens the camera's live feed and checks its newest frame every <see cref="CheckEvery"/> seconds. With
     /// <see cref="RecogniseFaces"/> on, it opens the people list and the unknown groups first, and begins opening the
-    /// recogniser.
+    /// recogniser; Recognised is Nobody, with the last visit this detector kept, and unavailable until the recogniser
+    /// opens. With it off, Recognised is unavailable.
     /// </summary>
     protected sealed override Task Start()
     {
         video = SharpVideo.Open(Camera, new VideoOptions { MaxWidth = 1280 });
         if (!DetectPeople) people.Off();
+        if (!RecogniseFaces) who.Available = false;
         if (RecogniseFaces)
         {
             rules = RecognitionRules.Default.WithMatchScore(MatchScore);
@@ -198,11 +222,18 @@ public class PeopleDetector : SharpDevice
             // The groups first: the people list's callback uses them, and may run as soon as the list is made.
             Unknown = new FaceGroups(Data, cameraId, rules);
             People = new PeopleList(Shared(PeopleList.StoreName), ListsChanged);
-            // The list may have changed while this detector was off, and the match score with the settings.
-            lock (lists) Rematch(People.People);
+            var kept = KeptVisit();
+            Shown start;
+            lock (lists)
+            {
+                // The list may have changed while this detector was off, and the match score with the settings.
+                Rematch(People.People);
+                start = visits.Restored(kept, People.People);
+            }
+            Show(start);
             Draw();
             Every(RedrawEvery, Refresh, immediately: false);
-            BeginOpening(DateTimeOffset.UtcNow);
+            BeginOpening(Now);
         }
         Every(TimeSpan.FromSeconds(CheckEvery), Check);
         return Task.CompletedTask;
@@ -231,7 +262,14 @@ public class PeopleDetector : SharpDevice
         // Another detector wrote while Start() was still making the list, before People was set: Start() matches and
         // draws right after.
         if (People == null) return Task.CompletedTask;
-        lock (lists) Rematch(People.People);
+        Shown listed;
+        lock (lists)
+        {
+            Rematch(People.People);
+            listed = visits.Listed(People.People);
+        }
+        // A rename, a merge or a delete there shows on Recognised at once, not at the next face.
+        Show(listed);
         Draw();
         return Task.CompletedTask;
     }
@@ -317,9 +355,9 @@ public class PeopleDetector : SharpDevice
             using var frame = next;
             var foundFaces = detector!.Faces(frame, FaceInput, FaceScore);
             IReadOnlyList<DetectedPerson> foundPeople = DetectPeople ? detector.People(frame, PersonInput, PersonScore) : [];
-            var now = DateTimeOffset.UtcNow;
+            var now = Now;
             if (RecogniseFaces) before = People.People;
-            var names = RecogniseFaces ? Recognise(frame, foundFaces, now) : null;
+            var names = RecogniseFaces ? Recognise(frame, foundFaces, now, hold) : null;
             var drawing = Vision.DrawPeople(frame.Copy(), foundPeople);
             using (var drawn = names != null && NamesOnTheCamera ? Vision.DrawFaces(drawing, foundFaces, names) : Vision.DrawFaces(drawing, foundFaces)) camera.Show(drawn);
             faces.Checked(foundFaces.Count, now, hold);
@@ -328,9 +366,10 @@ public class PeopleDetector : SharpDevice
         catch (Exception) when (!Stopping.IsCancellationRequested)
         {
             // The counts are unknown now; each seen goes off once its hold has passed, so none is left on.
-            var now = DateTimeOffset.UtcNow;
+            var now = Now;
             faces.Failed(now, hold);
             if (DetectPeople) people.Failed(now, hold);
+            if (RecogniseFaces) CheckFailed(now, hold);
             throw;
         }
         // After the entities, so that drawing the page cannot fail them.
@@ -346,10 +385,14 @@ public class PeopleDetector : SharpDevice
     // so a person is given to one face of the check, the best match; another face matched to them goes to the unknown
     // faces, as any face not recognised does, without suggesting them. The group of each face not recognised is known not
     // to be the people the check recognised.
-    string?[] Recognise(SharpImage frame, IReadOnlyList<DetectedFace> found, DateTimeOffset now)
+    // Who is in frame for Recognised is worked out under lists with the matching, also in a check without a face to
+    // compare or with the recogniser not open (Recognised is unavailable then), and set after the lock is let go.
+    string?[] Recognise(SharpImage frame, IReadOnlyList<DetectedFace> found, DateTimeOffset now, TimeSpan hold)
     {
         var names = new string?[found.Count];
-        if (Recognizer(now) is { } recognizer && found.Count > 0)
+        var recognizer = Recognizer(now);
+        List<(int Index, FaceEmbedding Embedding)>? embedded = null;
+        if (recognizer != null && found.Count > 0)
         {
             var chosen = Enumerable.Range(0, found.Count)
                 .Where(index => Usable(found[index]))
@@ -357,7 +400,7 @@ public class PeopleDetector : SharpDevice
                 .Take(MostEmbedded)
                 .ToList();
             // Every face embedded first, then matched, then each noted, the largest first.
-            var embedded = new List<(int Index, FaceEmbedding Embedding)>();
+            embedded = [];
             foreach (var index in chosen)
             {
                 try
@@ -366,11 +409,18 @@ public class PeopleDetector : SharpDevice
                 }
                 catch (Exception e) when (!Stopping.IsCancellationRequested) { Failed(e, now); }
             }
-            List<Exception> failures;
-            lock (lists) failures = MatchAndNote(frame, found, embedded, names, now);
-            // Logged outside the lock: a log line goes to Python.
-            foreach (var failure in failures) Failed(failure, now);
         }
+        Matching? matching = null;
+        Shown seen;
+        lock (lists)
+        {
+            if (embedded != null) matching = MatchAndNote(frame, found, embedded, names, now);
+            seen = visits.Checked(recognizer != null, matching?.Given ?? [], matching?.Unknown ?? 0, now, hold, People.People);
+        }
+        // Outside the lock: setting an entity publishes, a log line goes to Python, and the visit is written to the store.
+        Show(seen);
+        if (seen.Began is { } visit) Keep(visit);
+        foreach (var failure in matching?.Failures ?? []) Failed(failure, now);
         if (now >= expireNext)
         {
             expireNext = now + ExpireEvery;
@@ -381,8 +431,10 @@ public class PeopleDetector : SharpDevice
 
     // Under lists: matches a check's embedded faces against the people list as it is now, with the groups brought in line
     // with it first when it changed since they were last matched, and notes each, setting the names of those recognised.
-    // Gives the failures of the faces that could not be noted, for the caller to log.
-    List<Exception> MatchAndNote(SharpImage frame, IReadOnlyList<DetectedFace> found, List<(int Index, FaceEmbedding Embedding)> embedded, string?[] names, DateTimeOffset now)
+    // Gives the failures of the faces that could not be noted, for the caller to log; the ids of the people given a face,
+    // the largest face's first; and how many faces were compared and given to no one (no match, a maybe, or a second face
+    // of a person, or one of a group known not to be them), for Recognised.
+    Matching MatchAndNote(SharpImage frame, IReadOnlyList<DetectedFace> found, List<(int Index, FaceEmbedding Embedding)> embedded, string?[] names, DateTimeOffset now)
     {
         var failures = new List<Exception>();
         var everyone = People.People;
@@ -412,8 +464,12 @@ public class PeopleDetector : SharpDevice
             }
             catch (Exception e) when (!Stopping.IsCancellationRequested) { failures.Add(e); }
         }
-        return failures;
+        return new(failures, recognised, matched.Count - given.Count);
     }
+
+    // What MatchAndNote gives back beside the names: the failures to log, the ids of the people given a face, and the
+    // number of faces compared and given to no one.
+    sealed record Matching(List<Exception> Failures, IReadOnlyList<string> Given, int Unknown);
 
     // A face clear enough to embed: large enough, and looking towards the camera.
     bool Usable(DetectedFace face) => Vision.EyeDistance(face) >= rules.UsableEyes && Vision.Frontal(face);
@@ -471,6 +527,174 @@ public class PeopleDetector : SharpDevice
         if (failure is PeopleRefusal || now - failureLogged < FailureLogEvery) return;
         failureLogged = now;
         Log($"A face could not be recognised: {failure.GetType().Name}: {failure.Message}", PyLogLevel.Warn);
+    }
+
+    // ---- Recognised ----
+
+    // The longest state Home Assistant keeps, and what ends a state cut short at a whole name.
+    const int LongestState = 255;
+    const string More = ", …";
+
+    // A check failed: Recognised loses only whom the hold has passed for, as seen does.
+    void CheckFailed(DateTimeOffset now, TimeSpan hold)
+    {
+        Shown after;
+        lock (lists) after = visits.Failed(now, hold, People.People);
+        Show(after);
+    }
+
+    // Sets Recognised to what was worked out under lists, after the lock is let go: setting an entity publishes. The
+    // checks, the presses and another detector's changes work one out each on their own thread, so one worked out earlier
+    // can come here after a later one: each has the ticket of its making under lists, and one older than the last handed
+    // here is dropped, so the sensor never goes back to an older state. The sensor is set only when what it shows changes,
+    // so that an arrival or a leaving is one publish, not one each check.
+    void Show(Shown next)
+    {
+        lock (showing)
+        {
+            if (next.Ticket <= shownTicket) return;
+            shownTicket = next.Ticket;
+            if (shown != null && shown.Same(next)) return;
+            shown = next;
+            // New lists each time: the attributes are read by a publish on another thread.
+            who.Attributes["people"] = next.Names;
+            who.Attributes["first_names"] = next.FirstNames;
+            who.Attributes["unknown_faces"] = next.UnknownFaces;
+            who.Attributes["last_recognised"] = next.LastRecognised;
+            who.Attributes["last_recognised_at"] = next.LastRecognisedAt;
+            // The value publishes, with the attributes; set while unavailable, it is sent with the availability after it.
+            who.Value = next.State;
+            if (who.Available != next.Available) who.Available = next.Available;
+        }
+    }
+
+    // A visit that began, kept in the detector's own data so that last_recognised comes back after a restart: written once
+    // for each visit, by the check that began it, outside lists (the checks run one at a time). A store that refuses it,
+    // full, loses only last_recognised at the next start.
+    void Keep(Visit visit)
+    {
+        try { Data.Set(VisitKey, visit); }
+        catch (InvalidDataException) { }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
+    }
+
+    // The visit kept; none when there is none, or it cannot be read.
+    Visit? KeptVisit()
+    {
+        try { return Data.Get<Visit>(VisitKey) is { PersonId: not null } visit ? visit : null; }
+        catch (InvalidDataException) { return null; }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return null; }
+    }
+
+    // A visit: the person, by id, and when they were given a face while not in frame.
+    sealed record Visit(string PersonId, DateTimeOffset At);
+
+    // What Recognised shows: whether it is available, its state, and its attributes; with the visit the check began, to
+    // keep, and the ticket that orders them as they were worked out under lists.
+    sealed record Shown(long Ticket, bool Available, string State, string[] Names, string[] FirstNames, int UnknownFaces, string? LastRecognised, DateTimeOffset? LastRecognisedAt, Visit? Began)
+    {
+        // Whether the sensor shows the same: all but the ticket and the visit begun.
+        public bool Same(Shown other) =>
+            Available == other.Available && State == other.State && Names.SequenceEqual(other.Names) && FirstNames.SequenceEqual(other.FirstNames)
+            && UnknownFaces == other.UnknownFaces && LastRecognised == other.LastRecognised && LastRecognisedAt == other.LastRecognisedAt;
+    }
+
+    // Who Recognised says is in frame, by person id: each person a check gave a face within Stay on for, held as seen is,
+    // and the faces of those checks given to no one; and the last visit. Used under lists only, so it is always of the
+    // people list the faces were matched against; the names are written from the list as it is when Recognised is worked
+    // out, so a rename shows at once, and a person who is no longer in it goes.
+    sealed class Visits
+    {
+        // Each person in frame, by id: when their visit began, and the last check that gave them a face.
+        readonly Dictionary<string, (DateTimeOffset Began, DateTimeOffset Last)> inFrame = new(StringComparer.Ordinal);
+        // The checks within the hold that had faces given to no one, the oldest first, each with more of them than every
+        // later one: so the first has the most, and there are at most MostEmbedded.
+        readonly List<(DateTimeOffset At, int Count)> unknown = [];
+        // The visit that began last, kept after the person leaves; the one kept in the store at the start.
+        Visit? last;
+        // Whether the recogniser was open at the last check.
+        bool open;
+        // The tickets handed out.
+        long tickets;
+
+        // At the start: nobody in frame, the visit kept, and not available until a check finds the recogniser open.
+        public Shown Restored(Visit? kept, IReadOnlyList<Person> everyone)
+        {
+            last = kept;
+            return Showing(everyone, null);
+        }
+
+        // A check: the people it gave a face, the largest face's first, and how many faces it gave to no one; with the
+        // recogniser not open, none of either. A person not in frame begins a visit, and of several in one check the one
+        // of the largest face is the last recognised.
+        public Shown Checked(bool open, IReadOnlyList<string> given, int unknownFaces, DateTimeOffset now, TimeSpan hold, IReadOnlyList<Person> everyone)
+        {
+            this.open = open;
+            Visit? began = null;
+            foreach (var id in given)
+            {
+                if (inFrame.TryGetValue(id, out var visit)) inFrame[id] = (visit.Began, now);
+                else
+                {
+                    inFrame[id] = (now, now);
+                    began ??= new Visit(id, now);
+                }
+            }
+            if (unknownFaces > 0)
+            {
+                while (unknown.Count > 0 && unknown[^1].Count <= unknownFaces) unknown.RemoveAt(unknown.Count - 1);
+                unknown.Add((now, unknownFaces));
+            }
+            Expire(now, hold);
+            if (began != null) last = began;
+            return Showing(everyone, began);
+        }
+
+        // A check that failed: whom the hold has passed for goes, and nothing before.
+        public Shown Failed(DateTimeOffset now, TimeSpan hold, IReadOnlyList<Person> everyone)
+        {
+            Expire(now, hold);
+            return Showing(everyone, null);
+        }
+
+        // The people list changed: the names as it has them now.
+        public Shown Listed(IReadOnlyList<Person> everyone) => Showing(everyone, null);
+
+        // Whom no check gave a face within the hold goes, and so do the faces given to no one of the checks before it; what
+        // the check at now gave stays, also with no hold, as seen stays on.
+        void Expire(DateTimeOffset now, TimeSpan hold)
+        {
+            foreach (var (id, visit) in inFrame.ToList())
+                if (visit.Last != now && now - visit.Last >= hold) inFrame.Remove(id);
+            unknown.RemoveAll(check => check.At != now && now - check.At >= hold);
+        }
+
+        // What Recognised shows now: the people in frame by full name, without those no longer in the list, which go from
+        // the frame too; and the last visit's person when they are in it.
+        Shown Showing(IReadOnlyList<Person> everyone, Visit? began)
+        {
+            var byId = everyone.ToDictionary(person => person.Id, StringComparer.Ordinal);
+            foreach (var id in inFrame.Keys.Where(id => !byId.ContainsKey(id)).ToList()) inFrame.Remove(id);
+            var here = inFrame.Keys.Select(id => byId[id])
+                .OrderBy(person => person.FullName, StringComparer.OrdinalIgnoreCase).ThenBy(person => person.FullName, StringComparer.Ordinal)
+                .ToList();
+            string[] names = [.. here.Select(person => person.FullName)];
+            var faces = unknown.Count > 0 ? unknown[0].Count : 0;
+            var state = names.Length > 0 ? Joined(names) : faces > 0 ? "Unknown" : "Nobody";
+            var lastPerson = last != null && byId.TryGetValue(last.PersonId, out var person) ? person : null;
+            return new(++tickets, open, state, names, [.. here.Select(person => person.FirstName)], faces, lastPerson?.FullName, lastPerson != null ? last!.At : null, began);
+        }
+
+        // The names joined by ", ", or as many whole names as fit in LongestState with More after them.
+        static string Joined(string[] names)
+        {
+            var all = string.Join(", ", names);
+            if (all.Length <= LongestState) return all;
+            // A full name is at most 129 characters, so the first always fits.
+            var kept = names[0];
+            for (var i = 1; i < names.Length && kept.Length + 2 + names[i].Length + More.Length <= LongestState; i++) kept += ", " + names[i];
+            return kept + More;
+        }
     }
 
     // ---- The page ----
@@ -677,13 +901,18 @@ public class PeopleDetector : SharpDevice
 
     // ---- The page's actions ----
 
-    // Runs a press's change and draws the page after it, also when it is refused. A PeopleRefusal's sentence, which may
+    // Runs a press's change and draws the page after it, and Recognised, also when it is refused. A PeopleRefusal's sentence, which may
     // hold a name, is the card's and is not logged; nothing else here throws with a name.
     Task Pressed(Action change)
     {
         try { change(); }
         catch (PeopleRefusal refusal) { throw new UiRefusal(refusal.Message); }
-        finally { Draw(); }
+        finally
+        {
+            // A rename, a merge or a delete shows on Recognised at once, not at the next face.
+            Relisted();
+            Draw();
+        }
         return Task.CompletedTask;
     }
 
@@ -775,6 +1004,14 @@ public class PeopleDetector : SharpDevice
 
     // The person, as the people list has them now.
     Person Known(string personId) => People.People.FirstOrDefault(person => person.Id == personId) ?? throw new UiRefusal(PersonGone);
+
+    // Recognised with the names of the people list as it is now.
+    void Relisted()
+    {
+        Shown listed;
+        lock (lists) listed = visits.Listed(People.People);
+        Show(listed);
+    }
 
     // A person merged away or deleted: their samples are not shown any more.
     void Closed(string personId)

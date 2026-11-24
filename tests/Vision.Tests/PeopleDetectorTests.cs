@@ -104,6 +104,12 @@ static class PeopleDetectorTests
                 (nameof(ThePageListsAPersonsSamplesToRemove), ThePageListsAPersonsSamplesToRemove),
                 (nameof(APressForWhatIsGoneOrFullIsRefused), APressForWhatIsGoneOrFullIsRefused),
                 (nameof(AChangeOnAnotherDetectorRedrawsThePage), AChangeOnAnotherDetectorRedrawsThePage),
+                (nameof(TheRecognisedSensorSaysWhoIsInFrame), TheRecognisedSensorSaysWhoIsInFrame),
+                (nameof(TheRecognisedSensorIsUnavailableUntilTheModelOpens), TheRecognisedSensorIsUnavailableUntilTheModelOpens),
+                (nameof(AFailedCheckClearsNothingEarly), AFailedCheckClearsNothingEarly),
+                (nameof(TheRecognisedSensorFollowsRenamesMergesAndDeletes), TheRecognisedSensorFollowsRenamesMergesAndDeletes),
+                (nameof(TheLastRecognisedOutlivesARestart), TheLastRecognisedOutlivesARestart),
+                (nameof(TheRecognisedStateIsCutAtAWholeName), TheRecognisedStateIsCutAtAWholeName),
                 (nameof(TheClassNodeDetectsAndRecognises), TheClassNodeDetectsAndRecognises),
             ]);
         else if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
@@ -176,6 +182,10 @@ static class PeopleDetectorTests
         public double? Number => Snapshot["values"]!["value"] is JsonValue value && value.GetValueKind() == JsonValueKind.Number ? value.GetValue<double>() : null;
         public DateTimeOffset? Time => Snapshot["values"]!["value"] is JsonValue value && value.GetValueKind() == JsonValueKind.String
             ? DateTimeOffset.Parse(value.GetValue<string>(), CultureInfo.InvariantCulture) : null;
+        /// <summary>The state as text; null when it is none, or not text.</summary>
+        public string? Text => Snapshot["values"]!["value"] is JsonValue value && value.GetValueKind() == JsonValueKind.String ? value.GetValue<string>() : null;
+        /// <summary>The attributes sent with the state.</summary>
+        public JsonObject Attributes => Snapshot["attributes"]!.AsObject();
         public override string ToString() => $"{At.TotalSeconds:0.000} s {Snapshot.ToJsonString()}";
     }
 
@@ -317,6 +327,26 @@ static class PeopleDetectorTests
         public string Shown(string key, int from = 0, string definition = "porch") => string.Join(" | ", Of(key, from, definition).Select(p => p.ToString()));
 
         public string Lines() => string.Join(" | ", Home.Logs());
+
+        /// <summary>
+        /// Makes the manager's pump send every snapshot posted for <c>{definition}:door:{key}</c>, also one equal to the
+        /// last it sent, which it otherwise leaves out: so the snapshots recorded of it are its publishes (those within the
+        /// pump's 25 ms of each other still come as one). Call it before the definition runs. It gives the pump's private
+        /// field <c>sent</c> a comparer under which that id is never found.
+        /// </summary>
+        public void SendsEveryPublishOf(string key, string definition = "porch")
+        {
+            var field = typeof(EntityStatePump).GetField("sent", BindingFlags.Instance | BindingFlags.NonPublic) ?? throw new Exception("EntityStatePump has no field sent");
+            var sent = (Dictionary<string, string>)field.GetValue(Scripts.Pump)!;
+            field.SetValue(Scripts.Pump, new Dictionary<string, string>(sent, new NeverFound($"{definition}:door:{key}")));
+        }
+
+        /// <summary>Ordinal, but the id given is equal to nothing, not even itself.</summary>
+        sealed class NeverFound(string id) : IEqualityComparer<string>
+        {
+            public bool Equals(string? x, string? y) => x != id && y != id && string.Equals(x, y, StringComparison.Ordinal);
+            public int GetHashCode(string text) => StringComparer.Ordinal.GetHashCode(text);
+        }
 
         public UserScriptManager Scripts => (UserScriptManager)typeof(HassSharpManager).GetField("_userScriptManager", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(Api)!;
 
@@ -466,9 +496,10 @@ static class PeopleDetectorTests
             "people|People|SharpSensor||mdi:account-multiple|False|measurement",
             "last_face_seen|Last face seen|SharpSensor|timestamp||True|",
             "last_person_seen|Last person seen|SharpSensor|timestamp||True|",
+            "recognised|Recognised|SharpSensor||mdi:account-eye|False|",
         ];
         Check(seen.Split('\n').SequenceEqual(entities), "the defaults, the metadata and the entities in order:\n" + seen);
-        Console.WriteLine("PASS people detector: the libraries preview valid, the device's eleven inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its seven entities in order");
+        Console.WriteLine("PASS people detector: the libraries preview valid, the device's eleven inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its eight entities in order");
     }
 
     static async Task UnsupportedPlatformFailsTheStart()
@@ -509,6 +540,7 @@ static class PeopleDetectorTests
             "porch:door:face_seen binary_sensor occupancy -", "porch:door:person_seen binary_sensor occupancy -",
             "porch:door:faces sensor - measurement", "porch:door:people sensor - measurement",
             "porch:door:last_face_seen sensor timestamp -", "porch:door:last_person_seen sensor timestamp -",
+            "porch:door:recognised sensor - -",
         ];
         Check(described.Select(Described).SequenceEqual(entities), "the device's entities: " + string.Join(" | ", described.Select(Described)));
         int Info(string line) => rig.Home.Logs(PyLogLevel.Info).Count(l => l == line);
@@ -732,6 +764,9 @@ static class PeopleDetectorTests
         {
             static object Hook(string name) => AppContext.GetData("HassSharp.PeopleDetectorTests." + name) ?? throw new InvalidOperationException("The test set no hook " + name);
 
+            // The test's clock while it has one (Clock), else the system's.
+            protected override DateTimeOffset Now => AppContext.GetData("HassSharp.PeopleDetectorTests.Now") is Func<string, DateTimeOffset> clock ? clock("{{type}}") : DateTimeOffset.UtcNow;
+
             protected override Task<IFaceRecognizer> OpenRecognizer()
             {
                 ((Action<string>)Hook("Open"))("{{type}}");
@@ -867,6 +902,52 @@ static class PeopleDetectorTests
         }
     }
 
+    /// <summary>
+    /// The clock of the detectors of <see cref="Faking"/> while it exists, through a hook in the <see cref="AppContext"/>
+    /// naming the class. It starts at the time it was made and moves on a millisecond at each reading (a check reads it
+    /// once), so that each check has its own time, as the unknown groups need; it moves further only when the test moves
+    /// it, so a hold ends when the test says. It counts the readings of each class.
+    /// </summary>
+    sealed class Clock : IDisposable
+    {
+        const string Hook = "HassSharp.PeopleDetectorTests.Now";
+        // Guards everything below, which the hook reads and changes from the devices' threads.
+        readonly Lock gate = new();
+        readonly Dictionary<string, int> reads = [];
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        public Clock() => AppContext.SetData(Hook, (Func<string, DateTimeOffset>)Read);
+
+        /// <summary>The time the next reading gives.</summary>
+        public DateTimeOffset Now { get { lock (gate) return now; } }
+
+        /// <summary>Moves the clock on by <paramref name="by"/>.</summary>
+        public void Advance(TimeSpan by) { lock (gate) now += by; }
+
+        /// <summary>How often the class <paramref name="type"/> has read the clock.</summary>
+        public int Reads(string type) { lock (gate) return reads.GetValueOrDefault(type); }
+
+        DateTimeOffset Read(string type)
+        {
+            lock (gate)
+            {
+                reads[type] = reads.GetValueOrDefault(type) + 1;
+                var read = now;
+                now += TimeSpan.FromMilliseconds(1);
+                return read;
+            }
+        }
+
+        public void Dispose() => AppContext.SetData(Hook, null);
+    }
+
+    /// <summary>Waits for <paramref name="count"/> more checks of the class <paramref name="type"/>, as its readings of <paramref name="clock"/> count them.</summary>
+    static Task Checks(Clock clock, int count, string type = "Porch")
+    {
+        var from = clock.Reads(type);
+        return Until(() => clock.Reads(type) >= from + count, $"{count} more checks of {type}", 10);
+    }
+
     // Names no log line may hold; distinctive, so that no other line holds them by chance.
     const string Ana = "Ana Horvat", Ivan = "Ivan Babic";
 
@@ -940,9 +1021,10 @@ static class PeopleDetectorTests
         var labels = rig.Labels();
         Check(labels.Length == 15 && labels.All(IsScore), "the camera draws each face's and person's score, no name: " + string.Join(", ", labels));
         Check(Page(rig) == null, "the detector has no page: " + Page(rig)?.ToJsonString());
+        Check(rig.Of("recognised").Length > 0 && rig.Of("recognised").All(p => !p.Available && p.Value == null), "Recognised is unavailable and never has a value: " + rig.Shown("recognised"));
         var counts = await rig.Ok(rig.Api.DeviceUiRequest, new { operation = "counts" });
         Check(counts["attention"]!["porch"] == null, "and nothing waits: " + counts.ToJsonString());
-        Console.WriteLine("PASS people detector: with Recognise faces off, nothing is opened or stored, the detector has no page, and the faces and people are counted and drawn as before");
+        Console.WriteLine("PASS people detector: with Recognise faces off, nothing is opened or stored, the detector has no page, Recognised is unavailable, and the faces and people are counted and drawn as before");
     }
 
     static async Task DetectPeopleOffLeavesThePersonEntitiesUnavailable()
@@ -1955,6 +2037,311 @@ static class PeopleDetectorTests
         await Until(() => Offered("porch").SequenceEqual([Mia]) && Offered("hall").SequenceEqual([Mia]), "both pages' sets lose Ivan: " + Page(rig)?.ToJsonString(), 2);
         NoNameIsLogged(rig);
         Console.WriteLine("PASS people detector: a change another detector makes to the people list is on this one's page and in its set of people within two seconds");
+    }
+
+    // ---- The Recognised sensor, with the fake recogniser and the test's clock ----
+
+    /// <summary>The faces of the group photo a check embeds: the four largest usable ones, the largest first.</summary>
+    static int[] Embeddable(Spot[] spots) => [.. Enumerable.Range(0, spots.Length).Where(i => spots[i].Usable).Take(4)];
+
+    /// <summary>The face at <paramref name="spot"/> fits too badly to be compared: it is embedded, and neither matched nor noted.</summary>
+    static void Uncompared(Fake fake, int spot) => fake.Embeds(spot, PeopleTests.Unit(1000 + spot), fit: 9);
+
+    // The faces of the people of these tests: each recognised beyond doubt as the person of its seed (Named).
+    static float[] FaceOf(int seed) => PeopleTests.At(PeopleTests.Unit(seed), 0.8, 100 + seed);
+
+    /// <summary>
+    /// The Recognised sensor as a snapshot shows it, in a line: its state, then its attributes people, first_names,
+    /// unknown_faces and last_recognised, each after " | ", a list in brackets and none as "-"; "unavailable: " first while
+    /// it is unavailable. last_recognised_at is read on its own (<see cref="VisitBegan"/>).
+    /// </summary>
+    static string Sensor(Pushed? pushed)
+    {
+        if (pushed == null) return "none";
+        var attributes = pushed.Attributes;
+        string Listed(string key) => attributes[key] is JsonArray items ? "[" + string.Join(", ", items.Select(item => (string)item!)) + "]" : "-";
+        return $"{(pushed.Available ? "" : "unavailable: ")}{pushed.Text ?? "-"} | {Listed("people")} | {Listed("first_names")} | {attributes["unknown_faces"]?.ToJsonString() ?? "-"} | {(string?)attributes["last_recognised"] ?? "-"}";
+    }
+
+    /// <summary>The Recognised sensor of <paramref name="definition"/> as last published (<see cref="Sensor(Pushed?)"/>).</summary>
+    static string Sensor(Rig rig, string definition = "porch") => Sensor(rig.Latest("recognised", definition));
+
+    /// <summary>A Recognised snapshot's last_recognised_at; null when it has none.</summary>
+    static DateTimeOffset? VisitBegan(Pushed? pushed) => pushed?.Attributes["last_recognised_at"] is JsonValue value && value.GetValueKind() == JsonValueKind.String
+        ? DateTimeOffset.Parse(value.GetValue<string>(), CultureInfo.InvariantCulture) : null;
+
+    // Who is in frame, as Recognised says it: Nobody with faces that are not compared; a person's full name from the check
+    // that gives them a face, and two in alphabetical order; how many faces went to no one; Unknown with only those; and
+    // a hold of Stay on for seconds on the test's clock. An arrival is one publish, and one write of the visit.
+    static async Task TheRecognisedSensorSaysWhoIsInFrame()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        Check(four.Length == 4 && spots.Count(spot => spot.Usable) > 4 && spots.Any(spot => !spot.Usable),
+            "the group photo has more than four usable faces, and some that are not: " + string.Join(" | ", spots.Select(s => s.ToString())));
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four) Uncompared(fake, spot);
+        Show();
+        await using var rig = await Rig.Start("recognised-sensor");
+        rig.SendsEveryPublishOf("recognised");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        Named(list, Ivan, 2);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 10)]), Faking("Porch")));
+
+        // Eight faces and none compared: the four embedded fit too badly, the others are too small, turned away or beyond the four.
+        await Until(() => rig.Latest("faces")?.Number == 8 && Sensor(rig) == "Nobody | [] | [] | 0 | -", "eight faces, and nobody: " + rig.Shown("recognised"), 10);
+        await Checks(clock, 5);
+        Check(rig.Of("recognised").All(p => p.Text == "Nobody") && Sensor(rig) == "Nobody | [] | [] | 0 | -", "Recognised is Nobody throughout: " + rig.Shown("recognised"));
+
+        // Ana arrives, on the second face: one publish in 20 checks, and one write of her visit.
+        var writes = 0;
+        using var written = rig.DeviceData().Changed(() => { Interlocked.Increment(ref writes); return Task.CompletedTask; });
+        var from = rig.Mark;
+        var anaArrives = clock.Now;
+        fake.Embeds(four[1], FaceOf(1));
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", "Recognised names Ana: " + rig.Shown("recognised", from));
+        var anaBegan = VisitBegan(rig.Latest("recognised"));
+        Check(anaBegan >= anaArrives && anaBegan < clock.Now, $"her visit began at the check that gave her a face: {anaBegan:O}, from {anaArrives:O}");
+        await Checks(clock, 20);
+        Check(rig.Of("recognised", from).Length == 1, "Ana in frame for 20 checks is one publish: " + rig.Shown("recognised", from));
+
+        // Ivan arrives a second later, on the largest face: the two in alphabetical order, and he is the last recognised.
+        clock.Advance(TimeSpan.FromSeconds(1));
+        from = rig.Mark;
+        var ivanArrives = clock.Now;
+        fake.Embeds(four[0], FaceOf(2));
+        var both = $"{Ana}, {Ivan} | [{Ana}, {Ivan}] | [{First(Ana)}, {First(Ivan)}]";
+        await Until(() => Sensor(rig) == $"{both} | 0 | {Ivan}", "Recognised names both: " + rig.Shown("recognised", from));
+        var ivanBegan = VisitBegan(rig.Latest("recognised"));
+        Check(ivanBegan >= ivanArrives && ivanBegan < clock.Now, $"his visit began at the check that gave him a face: {ivanBegan:O}, from {ivanArrives:O}");
+        await Checks(clock, 10);
+        Check(rig.Of("recognised", from).Length == 1, "his arrival is one publish: " + rig.Shown("recognised", from));
+        await Until(() => Volatile.Read(ref writes) >= 2, "the two visits are written");
+        await Checks(clock, 10);
+        Check(Volatile.Read(ref writes) == 2, $"each visit is written once, and nothing else is: {Volatile.Read(ref writes)} writes");
+
+        // A second face of Ana and a maybe of Ivan go to no one: two unknown faces. Without the maybe, the count holds at
+        // the most one check had within the hold.
+        fake.Embeds(four[2], PeopleTests.At(PeopleTests.Unit(1), 0.7, 13));
+        fake.Embeds(four[3], PeopleTests.At(PeopleTests.Unit(2), 0.45, 14));
+        await Until(() => Sensor(rig) == $"{both} | 2 | {Ivan}", "a second face of Ana and a maybe of Ivan are two unknown faces: " + rig.Shown("recognised", from));
+        Uncompared(fake, four[3]);
+        await Checks(clock, 10);
+        Check(Sensor(rig) == $"{both} | 2 | {Ivan}", "with one unknown face, unknown_faces holds at 2: " + Sensor(rig));
+
+        // Everyone goes: the names and the count hold through the checks for Stay on for, 10 s on the clock, and go after it.
+        from = rig.Mark;
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        await Checks(clock, 20);
+        Check(rig.Of("recognised", from).Length == 0, "Recognised holds through 20 checks without them: " + rig.Shown("recognised", from));
+        clock.Advance(TimeSpan.FromSeconds(9.9));
+        await Checks(clock, 5);
+        Check(rig.Of("recognised", from).Length == 0, "and 9.9 s on: " + rig.Shown("recognised", from));
+        clock.Advance(TimeSpan.FromSeconds(0.2));
+        await Until(() => Sensor(rig) == $"Nobody | [] | [] | 0 | {Ivan}", "Recognised is Nobody 10 s on, and keeps Ivan as the last recognised: " + rig.Shown("recognised", from));
+        Check(rig.Of("recognised", from).Length == 1 && VisitBegan(rig.Latest("recognised")) == ivanBegan, "in one publish, with the time his visit began: " + rig.Shown("recognised", from));
+
+        // Only a face that goes to no one: Unknown.
+        foreach (var spot in four.Take(3)) Uncompared(fake, spot);
+        fake.Embeds(four[3], PeopleTests.Unit(1000 + four[3]));
+        Show();
+        await Until(() => Sensor(rig) == $"Unknown | [] | [] | 1 | {Ivan}", "a stranger alone is Unknown: " + rig.Shown("recognised", from));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: Recognised is Nobody with faces not compared, names the people given a face in alphabetical order, counts the faces given to no one, is Unknown with those alone, holds for Stay on for, and publishes and writes once an arrival");
+    }
+
+    // The face model not open (its first open failed, and the next is due ten minutes on the clock): Recognised is
+    // unavailable, and never Unknown, while the faces are counted; it is available once the model opens.
+    static async Task TheRecognisedSensorIsUnavailableUntilTheModelOpens()
+    {
+        using var fake = new Fake(await Spots());
+        using var clock = new Clock();
+        fake.FailsToOpen(1);
+        Show();
+        await using var rig = await Rig.Start("recognised-closed");
+        rig.SendsEveryPublishOf("recognised");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => rig.Latest("faces")?.Number == 8 && fake.Attempts("Porch") == 1, "the faces are counted, and the open failed: " + rig.Lines(), 10);
+        await Checks(clock, 20);
+        Check(fake.Opened("Porch") == 0 && fake.Embedded().Length == 0, "the model is not open, and no face was compared");
+        Check(rig.Of("recognised") is { Length: > 0 } closed && closed.All(p => !p.Available && p.Text != "Unknown"), "Recognised is unavailable, never Unknown: " + rig.Shown("recognised"));
+
+        var from = rig.Mark;
+        clock.Advance(TimeSpan.FromMinutes(10));
+        await Until(() => fake.Opened("Porch") == 1, "the model opens at the next try: " + rig.Lines());
+        await Until(() => Sensor(rig) == "Unknown | [] | [] | 4 | -", "then Recognised is available, and the four strangers unknown: " + rig.Shown("recognised", from));
+        Check(rig.Of("recognised", from).All(p => p.Available && p.Text == "Unknown"), "it is never Unknown before it is available: " + rig.Shown("recognised", from));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: Recognised is unavailable while the face model is not open, never Unknown, and available once it opens");
+    }
+
+    // A camera that stalls after Ana was recognised: the checks fail, each after a second without a frame, and Recognised
+    // keeps her through them until Stay on for has passed on the clock.
+    static async Task AFailedCheckClearsNothingEarly()
+    {
+        const string declared = "static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(10);";
+        var source = Committed();
+        Check(source.Split(declared).Length == 2, "PeopleDetector.cs declares FrameTimeout once as 10 s");
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four.Skip(1)) Uncompared(fake, spot);
+        fake.Embeds(four[0], FaceOf(1));
+        // The fake hangs at its 60th frame, three seconds in.
+        CameraFeeds.StallLimit = TimeSpan.FromSeconds(60);
+        Source("camera.porch", Porch("stall=60,"));
+        Show();
+        await using var rig = await Rig.Start("recognised-stalled", people: source.Replace(declared, "static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(1);"));
+        rig.SendsEveryPublishOf("recognised");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 10)]), Faking("Porch")));
+        var named = $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}";
+        await Until(() => Sensor(rig) == named, "Recognised names Ana before the camera stalls: " + rig.Shown("recognised"), 10);
+
+        const string failed = "Porch people: the timer callback every 100 ms failed: ";
+        await Until(() => rig.Home.Logs(PyLogLevel.Error).Any(l => l.StartsWith(failed, StringComparison.Ordinal)), "the checks fail: " + rig.Lines(), 10);
+        var from = rig.Mark;
+        await Checks(clock, 3);
+        Check(rig.Of("recognised", from).Length == 0 && Sensor(rig) == named, "three failed checks leave Ana: " + rig.Shown("recognised", from));
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await Until(() => Sensor(rig) == $"Nobody | [] | [] | 0 | {Ana}", "a failed check 10 s on lets her go: " + rig.Shown("recognised", from));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: failed checks keep whom Recognised names until Stay on for has passed");
+    }
+
+    // A rename shows in the state, here and on another detector, with no face in frame; a person deleted or merged away,
+    // here or on another detector, goes from the state and from last_recognised, and a merged one's visit does not become
+    // the one they were merged into's.
+    static async Task TheRecognisedSensorFollowsRenamesMergesAndDeletes()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four) Uncompared(fake, spot);
+        Show();
+        await using var rig = await Rig.Start("recognised-changes");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        var ivan = Named(list, Ivan, 2);
+        var eva = Named(list, Eva, 3);
+        var mia = Named(list, Mia, 4);
+        // Stay on for is a minute, and the clock moves only a millisecond a check: who arrives stays in frame here.
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("LearnNewLooks", false), ("StayOnFor", 60)]), Faking("Porch")));
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", "Recognised is Nobody: " + rig.Shown("recognised"), 10);
+        string[] arrivals = [Ana, Ivan, Eva];
+        for (var i = 0; i < arrivals.Length; i++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            fake.Embeds(four[i], FaceOf(i + 1));
+            var name = arrivals[i];
+            await Until(() => rig.Latest("recognised")?.Attributes["last_recognised"]?.GetValue<string>() == name, $"{name} arrives: " + Sensor(rig));
+        }
+        Check(Sensor(rig) == $"{Ana}, {Eva}, {Ivan} | [{Ana}, {Eva}, {Ivan}] | [{First(Ana)}, {First(Eva)}, {First(Ivan)}] | 0 | {Eva}", "the three in frame, Eva last: " + Sensor(rig));
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+
+        // Renamed on another detector, and here: the state follows, in alphabetical order again.
+        list.Rename((string)ivan.Id, First(Ivo), Names(Ivo).Last);
+        await Until(() => Sensor(rig) == $"{Ana}, {Eva}, {Ivo} | [{Ana}, {Eva}, {Ivo}] | [{First(Ana)}, {First(Eva)}, {First(Ivo)}] | 0 | {Eva}", "Ivan renamed Ivo on another detector: " + Sensor(rig), 2);
+        const string Zora = "Zora Horvat";
+        Check(await Press(rig, "people", (string)ana.Id, "save", new { first_name = First(Zora), last_name = Names(Zora).Last }) == "done", "a rename of Ana here");
+        await Until(() => Sensor(rig) == $"{Eva}, {Ivo}, {Zora} | [{Eva}, {Ivo}, {Zora}] | [{First(Eva)}, {First(Ivo)}, {First(Zora)}] | 0 | {Eva}", "Ana renamed Zora here: " + Sensor(rig), 2);
+
+        // Eva, the last recognised, merged here into Mia, who is not in frame: Eva goes, and her visit is not Mia's.
+        Check(await Press(rig, "people", (string)eva.Id, "merge", new { into = Picked((string)mia.Id) }) == "done", "Eva merged into Mia here");
+        await Until(() => Sensor(rig) == $"{Ivo}, {Zora} | [{Ivo}, {Zora}] | [{First(Ivo)}, {First(Zora)}] | 0 | -", "Eva goes, and no one is the last recognised: " + Sensor(rig), 2);
+        Check(VisitBegan(rig.Latest("recognised")) == null, "nor has a time: " + rig.Latest("recognised"));
+
+        // Eva's face is Mia's now: Mia arrives, and is the last recognised; deleted on another detector, she goes.
+        Show();
+        await Until(() => Sensor(rig) == $"{Ivo}, {Mia}, {Zora} | [{Ivo}, {Mia}, {Zora}] | [{First(Ivo)}, {First(Mia)}, {First(Zora)}] | 0 | {Mia}", "Mia arrives with Eva's face: " + Sensor(rig));
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+        list.Delete((string)mia.Id);
+        await Until(() => Sensor(rig) == $"{Ivo}, {Zora} | [{Ivo}, {Zora}] | [{First(Ivo)}, {First(Zora)}] | 0 | -", "Mia deleted on another detector goes: " + Sensor(rig), 2);
+
+        // Ivo merged into Zora on another detector, then Zora deleted here.
+        list.Merge((string)ivan.Id, (string)ana.Id);
+        await Until(() => Sensor(rig) == $"{Zora} | [{Zora}] | [{First(Zora)}] | 0 | -", "Ivo merged away on another detector goes: " + Sensor(rig), 2);
+        Check(await Press(rig, "people", (string)ana.Id, "delete", new { }) == "done", "Zora deleted here");
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -", "Zora goes, and Recognised is Nobody: " + Sensor(rig), 2);
+        NoNameIsLogged(rig);
+        Check(!rig.Home.Logs().Any(l => l.Contains(Zora, StringComparison.OrdinalIgnoreCase)), "no line names Zora: " + rig.Lines());
+        Console.WriteLine("PASS people detector: Recognised follows a rename here and on another detector, and drops a person deleted or merged away here or on another detector from its state and its last recognised");
+    }
+
+    // last_recognised and its time come back after the definition restarts, from the detector's own data; a stored person
+    // who is no one's any more comes back as none.
+    static async Task TheLastRecognisedOutlivesARestart()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        foreach (var spot in four.Skip(1)) Uncompared(fake, spot);
+        fake.Embeds(four[0], FaceOf(1));
+        Show();
+        await using var rig = await Rig.Start("recognised-restart");
+        var list = PeopleOf(rig);
+        var ana = Named(list, Ana, 1);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => Sensor(rig) == $"{Ana} | [{Ana}] | [{First(Ana)}] | 0 | {Ana}", "Recognised names Ana: " + rig.Shown("recognised"), 10);
+        var began = VisitBegan(rig.Latest("recognised"));
+        Check(began != null, "with the time her visit began");
+        Hide();
+        await Until(() => rig.Latest("faces")?.Number == 0, "the checks see nobody");
+
+        await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = false });
+        var from = rig.Mark;
+        await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = true });
+        await Until(() => Sensor(rig) == $"Nobody | [] | [] | 0 | {Ana}" && rig.Of("recognised", from).Length > 0, "restarted, Recognised is Nobody, and Ana the last recognised: " + rig.Shown("recognised", from), 10);
+        Check(VisitBegan(rig.Latest("recognised")) == began, $"at the time her visit began: {VisitBegan(rig.Latest("recognised")):O}, not {began:O}");
+        // The turning off sends it unavailable with nothing, maybe after the mark.
+        Check(rig.Of("recognised", from).Where(p => p.Value != null).All(p => (string?)p.Attributes["last_recognised"] == Ana), "from the start: " + rig.Shown("recognised", from));
+
+        await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = false });
+        list.Delete((string)ana.Id);
+        from = rig.Mark;
+        await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = true });
+        await Until(() => Sensor(rig) == "Nobody | [] | [] | 0 | -" && rig.Of("recognised", from).Any(p => p.Available), "restarted after she was deleted, no one is the last recognised: " + rig.Shown("recognised", from), 10);
+        Check(VisitBegan(rig.Latest("recognised")) == null, "nor has a time: " + rig.Latest("recognised"));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: last_recognised and the time the visit began come back after a restart, and a person deleted meanwhile comes back as none");
+    }
+
+    // Three people of 100-character full names in frame: the state is cut at a whole name, at most 255 characters with
+    // ", …"; the people attribute has all three.
+    static async Task TheRecognisedStateIsCutAtAWholeName()
+    {
+        var spots = await Spots();
+        var four = Embeddable(spots);
+        using var fake = new Fake(spots);
+        using var clock = new Clock();
+        Uncompared(fake, four[3]);
+        Show();
+        await using var rig = await Rig.Start("recognised-long");
+        var list = PeopleOf(rig);
+        string[] firsts = [.. "ACE".Select(letter => letter + new string('a', 49))];
+        string[] lasts = [.. "BDF".Select(letter => letter + new string('b', 48))];
+        for (var i = 0; i < 3; i++)
+        {
+            list.Add(firsts[i], lasts[i], PeopleTests.Samples(PeopleTests.NewSample(PeopleTests.Unit(i + 1), PeopleTests.Crop(i + 1), DateTimeOffset.UtcNow, "camera.elsewhere")));
+            fake.Embeds(four[i], FaceOf(i + 1));
+        }
+        string[] full = [.. firsts.Zip(lasts, (first, last) => $"{first} {last}")];
+        Check(full.All(name => name.Length == 100), "each full name has 100 characters");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => rig.Latest("recognised")?.Attributes["people"] is JsonArray { Count: 3 }, "the three are in frame: " + Sensor(rig), 10);
+        var state = rig.Latest("recognised")!.Text!;
+        Check(state == $"{full[0]}, {full[1]}, …" && state.Length <= 255, $"the state is the first two and \", …\", {state.Length} characters: {state}");
+        Check(Sensor(rig) == $"{state} | [{string.Join(", ", full)}] | [{string.Join(", ", firsts)}] | 0 | {full[0]}", "the attributes name all three: " + Sensor(rig));
+        Console.WriteLine($"PASS people detector: with three people of 100-character names in frame, Recognised is cut at a whole name to {state.Length} characters, and its people name all three");
     }
 
     // ---- The class's own node ----

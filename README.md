@@ -80,17 +80,17 @@ It has eleven settings:
 | --- | --- | --- |
 | Camera | none (required) | The Home Assistant camera to watch. |
 | Check every | 0.5 | Seconds between checks of the camera's newest frame, from 0.1 to 60. |
-| Stay on for | 10 | Seconds that Face seen and Person seen stay on after the last frame with one, from 0 to 3600. |
+| Stay on for | 10 | Seconds that Face seen and Person seen stay on after the last frame with one, from 0 to 3600; Recognised holds a name as long. |
 | Face score | 0.7 | The lowest score a face counts with, from 0.1 to 1. Lower finds more, and more that are not faces. |
 | Person score | 0.45 | The lowest score a person counts with, from 0.1 to 1. Lower finds more, and more that are not people. |
 | Detect people | on | Whether people are looked for. Off, the person model is not run (it is still loaded, with the face model), and Person seen, People and Last person seen are unavailable. |
-| Recognise faces | on | Whether the faces seen are recognised. Off, the face recognition model is not downloaded, nothing is matched or stored, and the device has no page. |
+| Recognise faces | on | Whether the faces seen are recognised. Off, the face recognition model is not downloaded, nothing is matched or stored, the device has no page, and Recognised is unavailable. |
 | Match score | 0.50 | The lowest score a face is recognised at, from 0.3 to 0.9. Higher recognises fewer faces, and fewer wrongly. The lines for suggesting and learning move with it. |
 | Learn new looks | on | Whether a face recognised beyond doubt is kept as a further sample of its person. |
 | Keep unknown faces for | 7 | Whole days a face nobody has named is kept after it was last seen, from 1 to 365. |
 | Names on the camera | on | Whether the camera picture shows a recognised face's name above its box. Off, every face shows its score. |
 
-The device (manufacturer HassSharp, model People detector) has seven entities, in this order:
+The device (manufacturer HassSharp, model People detector) has eight entities, in this order:
 
 | Entity | Key | What it shows |
 | --- | --- | --- |
@@ -101,13 +101,14 @@ The device (manufacturer HassSharp, model People detector) has seven entities, i
 | People | `people` | Sensor (measurement): how many people the newest frame checked has. |
 | Last face seen | `last_face_seen` | Timestamp: when a face was last seen. |
 | Last person seen | `last_person_seen` | Timestamp: when a person was last seen. |
+| Recognised | `recognised` | Sensor: who is in frame, by full name, or `Unknown`, or `Nobody` (see [Recognised](#recognised)). |
 
 **Stay on for** is a hold. Face seen turns on at the first check that finds a face, and turns off only once
 **Stay on for** seconds have passed since the last check that found one. A check that finds none within that time
 leaves it on, so a frame without a face between two checks that find one does not turn it off. Person seen works the
 same way. While one stays on, its last seen is written at most once a minute; when it turns off, last seen is the
-time of the last check that found one. The last seen sensors keep their state across restarts; the others start
-unknown.
+time of the last check that found one. The last seen sensors keep their state across restarts; Recognised starts as
+`Nobody`, and the others start unknown.
 
 The device opens the camera's live feed, at most 1280 pixels wide, when the definition starts, and checks it on its
 interval whether or not anyone watches the camera. Each check takes the newest frame, finds the faces at an input size
@@ -141,10 +142,10 @@ has the same first name, the first letter of the last name too: "Ivan K.". A peo
 of 1.1.0, which had one name a person, keeps each name whole as the person's first name; give them a last name with
 **Save** on their card if you like.
 
-It does not tell automations who is there: it has no "who" sensor, event or trigger yet. It does not follow a face from
-frame to frame or hold a name while a face is briefly lost, and it does not recognise anyone by their body, clothes or
-gait. People cannot be imported, exported or named from uploaded photos. It is not a lock (see
-[Trust and privacy](#trust-and-privacy)).
+It tells automations who is there with its **Recognised** sensor ([below](#recognised)). It does not follow a face from
+frame to frame: the camera picture names only the faces of the frame it shows, while Recognised holds a name for **Stay
+on for**. It does not recognise anyone by their body, clothes or gait. People cannot be imported, exported or named from
+uploaded photos. It is not a lock (see [Trust and privacy](#trust-and-privacy)).
 
 ### Which faces are used
 
@@ -191,6 +192,75 @@ keeps up to 5 samples, the larger faces and the ones unlike those it has, and co
   one seen longest ago goes first.
 - When the people list changes, the groups are matched again: one that now matches a person is removed, unless it
   shared a frame with them.
+
+### Recognised
+
+**Recognised** says who is in frame:
+
+- its state is the full names of the people in frame, in alphabetical order, joined by ", ": `Ivan Horvat`, or
+  `Ana Horvat, Ivan Horvat`; `Unknown` when no one is recognised but a face that is not anyone's is in frame; and
+  `Nobody` otherwise. Home Assistant keeps a state of at most 255 characters, so a longer one is cut at a whole name,
+  with ", …" after it.
+- A person is in frame from the check that recognises their face until **Stay on for** seconds (10 by default) after
+  the last check that did, as Face seen is on: a name stays while the person looks away, and goes that long after they
+  were last recognised. A check that fails does not end it sooner.
+- A face counts as not anyone's when it was compared with the people list and given to no one: no one matched, it was
+  only suggested, or it was a second face of someone recognised in the same frame. A face that was not compared (too
+  small, turned away, fitting badly, or beyond the four largest) does not count, so a face in a crowd or a profile does
+  not make Recognised `Unknown`.
+
+Its attributes:
+
+| Attribute | What it is |
+| --- | --- |
+| `people` | The full names in frame, as a list, in the state's order, never cut. |
+| `first_names` | Their first names, in the same order. |
+| `unknown_faces` | The most faces that were not anyone's in one check within the last **Stay on for** seconds, so that it holds as the state does. |
+| `last_recognised` | The full name of the person whose visit began last, kept after they leave. A visit begins when someone who was not in frame is recognised. |
+| `last_recognised_at` | When that visit began. |
+
+Recognised changes, and is written to Home Assistant's history, when someone arrives or leaves, or a count or a name
+changes: not at every check. A rename on the page, on this detector or another, shows at once, and a person deleted or
+merged away goes from the state and from `last_recognised`. It is unavailable with **Recognise faces** off, and while
+the face recognition model has not opened (it is still downloading, or failed to open and is tried again): a face no
+one could compare is never `Unknown`, so an automation for strangers does not fire for the family then. After a restart
+it is `Nobody` until a check says otherwise, and `last_recognised` and its time come back, from the detector's own
+stored data.
+
+Two automations, for a detector whose Recognised is `sensor.front_door_recognised` (Home Assistant names it after the
+device, so **Front door people**'s is that). The first sends a notification when someone comes to the door; the second
+turns on the hall light whenever Recognised changes while Ana Horvat is at the door:
+
+```yaml
+- alias: Someone at the door
+  triggers:
+    - trigger: state
+      entity_id: sensor.front_door_recognised
+      from: Nobody
+  conditions:
+    - condition: template
+      value_template: "{{ trigger.to_state.state not in ['unavailable', 'unknown'] }}"
+  actions:
+    - action: notify.notify
+      data:
+        message: "At the door: {{ trigger.to_state.state }}"
+
+- alias: Hall light for Ana
+  triggers:
+    - trigger: state
+      entity_id: sensor.front_door_recognised
+  conditions:
+    - condition: template
+      value_template: "{{ 'Ana Horvat' in (state_attr('sensor.front_door_recognised', 'people') or []) }}"
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.hall
+```
+
+A state trigger without `to` fires at each change of the state or an attribute, so the second also fires when someone
+else arrives or leaves while Ana is there; turning on a light that is on does nothing. Do not let Recognised unlock,
+disarm or open anything (see [Trust and privacy](#trust-and-privacy)).
 
 ### The page
 
@@ -276,6 +346,9 @@ Faces, their crops, their embeddings and the names you give them are biometric a
   kept off the machine carries it with it.
 - A name drawn on the camera picture is seen by every Home Assistant user who can see that camera, and by whatever the
   camera is shown on or shared with. **Names on the camera** turns the names off.
+- Recognised's state and attributes hold the names of the people at the camera: every Home Assistant user sees them,
+  and the recorder keeps them in its history, and the logbook shows them, for as long as it keeps history. To keep them
+  out of the history, exclude the sensor in the recorder's settings.
 - Tell the people who live in or visit the home that their faces are recognised and kept.
 
 To delete them:
@@ -300,9 +373,9 @@ The model is 38.7 MB (38,696,353 bytes) and is used unmodified. It is not embedd
 here: each release carries it beside the libraries, with its licence. A People detector with **Recognise faces** on
 downloads it once, in the background after the definition has started, checks it by its SHA-256
 (`0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`) and keeps it with the definition's files. Until it
-has opened, faces are counted and drawn but not recognised; if it cannot be downloaded or opened, the log says why,
-once for each reason, and it is tried again on a check at most every 10 minutes. With **Recognise faces** off, and
-for Detect faces, it is never downloaded.
+has opened, faces are counted and drawn but not recognised, and Recognised is unavailable; if it cannot be downloaded
+or opened, the log says why, once for each reason, and it is tried again on a check at most every 10 minutes. With
+**Recognise faces** off, and for Detect faces, it is never downloaded.
 
 ## Detect faces
 
