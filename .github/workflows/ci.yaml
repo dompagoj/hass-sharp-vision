@@ -15,12 +15,13 @@ permissions:
 
 env:
   # The hass-sharp commit the C# tests build against: a 40-hex sha, never a branch, so that a hass-sharp change cannot
-  # break this repository's CI without a commit here (Ruling 25). It pins a commit with the APIs these files need
+  # break this repository's CI without a commit here (Ruling 25). It pins a commit with what these files need: library
+  # classes as nodes, the import that takes a class's new settings into the C# nodes deriving from it, the APIs
   # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix and the fake ffmpeg's still picture) and what
-  # Add external imports hass_sharp.toml with (the node library import operation and external.py), now on hass-sharp's
-  # branch face-detection-and-external-import; once HassSharp releases them it moves to the commit of that release's
-  # tag. none turns the C# tests off, and the csharp job then only says so; any other value fails the job.
-  HASS_SHARP_REF: d43fe35db845d7502b5ae669e9554a05ccc1af95
+  # Add external imports hass_sharp.toml with (the node library import operation and external.py). It is the commit of
+  # hass-sharp's main that has them; once HassSharp releases them it moves to the commit of that release's tag. none
+  # turns the C# tests off, and the csharp job then only says so; any other value fails the job.
+  HASS_SHARP_REF: d3656eacaf1e60ba8bf1bb2616af9af4759be7db
 
 jobs:
   native:
