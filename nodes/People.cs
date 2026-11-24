@@ -20,8 +20,14 @@ using System.Text.Json.Serialization;
 /// <param name="FitLimit">The worst alignment fit (<see cref="FaceEmbedding.Fit"/>) a face is used with.</param>
 public sealed record RecognitionRules(double MatchScore, double MatchMargin, double SuggestScore, double LearnScore, double LearnMargin, double UsableEyes, double LearnEyes, double FitLimit)
 {
+    /// <summary>
+    /// <see cref="Default"/>'s match score: a constant, so that the People detector's <i>Match score</i> setting starts
+    /// at it and the editor shows it as that setting's default.
+    /// </summary>
+    public const double DefaultMatchScore = 0.50;
+
     /// <summary>The rules the People detector ships with: <c>docs/calibration.md</c>'s Defaults.</summary>
-    public static RecognitionRules Default { get; } = new(0.50, 0.10, 0.40, 0.60, 0.15, 16, 24, 7);
+    public static RecognitionRules Default { get; } = new(DefaultMatchScore, 0.10, 0.40, 0.60, 0.15, 16, 24, 7);
 
     /// <summary>
     /// These rules with another match score, and the suggest and learn scores a tenth under and over it, as the People

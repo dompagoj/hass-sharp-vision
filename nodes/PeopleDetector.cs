@@ -163,7 +163,7 @@ public class PeopleDetector : SharpDevice
 
     /// <summary>The lowest score a face is recognised at, from 0.3 to 0.9: higher recognises fewer faces, and fewer wrongly.</summary>
     [Setting("Match score", Minimum = 0.3, Maximum = 0.9)]
-    public double MatchScore { get; set; } = RecognitionRules.Default.MatchScore;
+    public double MatchScore { get; set; } = RecognitionRules.DefaultMatchScore;
 
     /// <summary>Whether a face recognised beyond doubt is kept as a further sample of its person, so that new looks are learned.</summary>
     [Setting("Learn new looks")]

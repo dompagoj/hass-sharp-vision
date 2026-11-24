@@ -458,6 +458,10 @@ static class PeopleDetectorTests
         ];
         Check(settings.Select(Shape).SequenceEqual(expected), "the device's inputs and their bounds: " + string.Join(" | ", settings.Select(Shape)));
         Check(settings.All(s => s["description"]?.GetValue<string>() is { Length: > 0 } && s["secret"]?.GetValue<bool>() == false), "each input has its summary as its description: " + signature.ToJsonString());
+        // Match score's default, which the editor shows beside it, is the rules' default match score.
+        var matchScore = settings.Single(s => s["key"]!.GetValue<string>() == "MatchScore");
+        double rulesMatchScore = PeopleTests.DefaultRules.MatchScore;
+        Check(matchScore["default"]?.GetValue<double>() == rulesMatchScore, string.Create(CultureInfo.InvariantCulture, $"Match score's default is the rules' {rulesMatchScore}: ") + matchScore.ToJsonString());
 
         // Without a camera, the save is refused, naming it; so is a check more often than every 0.1 s.
         static string Problems(JsonObject answer) => answer["error"]?["detail"]?["diagnostics"]?.ToJsonString() ?? answer.ToJsonString();

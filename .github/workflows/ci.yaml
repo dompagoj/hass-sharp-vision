@@ -19,9 +19,10 @@ env:
   # classes as nodes, the import that takes a class's new settings into the C# nodes deriving from it, the APIs
   # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix, the fake ffmpeg's still picture and a device
   # page's pick field) and what Add external imports hass_sharp.toml with (the node library import operation and
-  # external.py). It is the commit of hass-sharp's 0.0.50-beta, the release that has them. none turns the C# tests
-  # off, and the csharp job then only says so; any other value fails the job.
-  HASS_SHARP_REF: 8f83ce22d200d7c0fc75262f2b05c85e8ed7b9cd
+  # external.py). hass-sharp's 0.0.50-beta is the release that has them; this commit is two later on its main, for the
+  # tests alone: they also check the default a class's setting has in its signature (Match score's). none turns the C#
+  # tests off, and the csharp job then only says so; any other value fails the job.
+  HASS_SHARP_REF: b88472e7f2ee833589ad8107595f3a41689f3ae8
 
 jobs:
   native:
