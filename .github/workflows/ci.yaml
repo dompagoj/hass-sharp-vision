@@ -17,11 +17,11 @@ env:
   # The hass-sharp commit the C# tests build against: a 40-hex sha, never a branch, so that a hass-sharp change cannot
   # break this repository's CI without a commit here (Ruling 25). It pins a commit with what these files need: library
   # classes as nodes, the import that takes a class's new settings into the C# nodes deriving from it, the APIs
-  # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix and the fake ffmpeg's still picture) and what
+  # ([NodeSetup], NodeSetupContext, DrawCircle, the timestamp sensor fix, the fake ffmpeg's still picture and a device page's pick field) and what
   # Add external imports hass_sharp.toml with (the node library import operation and external.py). It is the commit of
   # hass-sharp's main that has them; once HassSharp releases them it moves to the commit of that release's tag. none
   # turns the C# tests off, and the csharp job then only says so; any other value fails the job.
-  HASS_SHARP_REF: d3656eacaf1e60ba8bf1bb2616af9af4759be7db
+  HASS_SHARP_REF: 8f83ce22d200d7c0fc75262f2b05c85e8ed7b9cd
 
 jobs:
   native:
