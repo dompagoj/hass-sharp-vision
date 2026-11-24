@@ -3,7 +3,7 @@
 How well SFace (`face_recognition_sface_2021dec.onnx`, run by `hs_vision`'s recogniser) tells the same person from
 different people, by the size of the face in pixels between the eyes, measured on the public benchmark LFW. The
 numbers set the People detector's recognition rules: when a face is usable, the match, suggest and learn scores,
-their margins, and the fit limit. **Defaults** at the end has them.
+their margins, and the fit limit. **Defaults**, after the results, has them.
 
 **These numbers are an upper bound.** LFW's faces are posed press photos: well lit, sharp, mostly from the front and
 at eye level. The tool shrinks them to door-camera sizes with an area-averaging filter, which looks like a small face
@@ -271,6 +271,37 @@ Over 7: 0.6 % of the matched faces, 0.0 % of those not matched.
 
 ## Defaults
 
+The values the People detector ships with. They are stricter than the plan's rules give (next section), for the
+reasons under them:
+
+```
+UsableEyes = 16
+LearnEyes = 24
+FitLimit = 7
+MatchScore = 0.50
+MatchMargin = 0.10
+SuggestScore = 0.40
+LearnScore = 0.60
+LearnMargin = 0.15
+```
+
+- `MatchScore` 0.50. The plan's rule looks at one pair of faces, but a face at the door is compared with every sample
+  of everyone in the list, so a stranger has many chances to cross the line: in the galleries, 0.47 is where wrong
+  recognitions fall to 1 in 1,000 (96.8 % of genuine faces still recognised). 0.50 leaves room above that for a list
+  with more samples a person than the galleries' three (up to 40), and for a door camera's worse pictures.
+- `SuggestScore` 0.40 and `LearnScore` 0.60: a tenth under and a tenth over the match score. The suggest line fills
+  in a name the user may save without looking, so it sits at the plan's own match line (1 in 1,000 a pair), not at 1 in
+  100. The learn line is above the galleries' 1 in 10,000 (0.54): a face learned wrongly stays and is compared with
+  every later face. When the user moves *Match score*, the two lines move with it, a tenth either side.
+- `MatchMargin` 0.10 and `LearnMargin` 0.15, the design's values. The galleries show a margin does little against
+  strangers, which the higher lines now handle; it is kept for what LFW cannot measure, two people in one list who
+  look alike, as relatives do.
+- `UsableEyes` 16 and `LearnEyes` 24, the design's values. On LFW recognition holds down to 10 px, but those are clean
+  photos, and in a 1080p frame the detector finds few faces under 16 px anyway.
+- `FitLimit` 7, as measured.
+
+## What the plan's rules give
+
 ```
 UsableEyes = 10
 LearnEyes = 18
@@ -302,7 +333,8 @@ How each follows from the tables, by the rules of the plan:
 
 ## Verdict
 
-PASS: 10 px between the eyes already reaches 8 in 10 (96.3 %). Three of the defaults need the owner's eye:
+PASS: 10 px between the eyes already reaches 8 in 10 (96.3 %). Three things about the values the plan's rules give,
+which is why **Defaults** above departs from them:
 
 1. **`MatchMargin` and `LearnMargin` do not meet their rule.** With 20 people in the list, no margin up to 0.20 keeps
    wrong recognitions to 1 in 1,000 at 0.40, or to 1 in 10,000 at 0.45; 0.20 is the nearest value measured, at 1.36
@@ -315,7 +347,7 @@ PASS: 10 px between the eyes already reaches 8 in 10 (96.3 %). Three of the defa
 
 What recognition can and cannot be trusted with at a door camera: it can put a likely name on a clear, frontal face
 of someone in the people list, as something to look at rather than proof. It cannot be trusted to keep strangers out:
-at these defaults one or two of every thousand faces of strangers get an enrolled person's name even on LFW's clean
-photos, and more at a real door, so nothing that unlocks, disarms or opens should depend on it. Small, turned, blurred
+at the defaults up to about one of every thousand faces of strangers gets an enrolled person's name even on LFW's clean
+photos with a small list, and more at a real door or with a long list, so nothing that unlocks, disarms or opens should depend on it. Small, turned, blurred
 or night faces will often go unrecognised, and with a 1080p camera the detector misses most faces under about 24 px
 between the eyes before recognition is tried.
