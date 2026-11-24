@@ -2,7 +2,8 @@
 
 Face and person detection, and face recognition, for [HassSharp](https://github.com/dompagoj/hass-sharp).
 
-These files need HassSharp 0.0.50-beta or later.
+These files need HassSharp 0.0.52-beta or later: the People detector keeps its recognition pictures through
+HassSharp's media files (`Media`), which come with that release.
 
 ## What it is
 
@@ -74,7 +75,7 @@ The People detector is a node of its own: in an entity definition's step list it
 `PeopleDetector`, as in `public class FrontDoor : PeopleDetector { }`, works the same way, and may add entities of its
 own in its constructor.
 
-It has thirteen settings:
+It has fourteen settings:
 
 | Setting | Default | What it is |
 | --- | --- | --- |
@@ -88,6 +89,7 @@ It has thirteen settings:
 | Match score | 0.50 | The lowest score a face is recognised at, from 0.3 to 0.9. Higher recognises fewer faces, and fewer wrongly. The lines for suggesting and learning move with it. |
 | Learn new looks | on | Whether a face recognised beyond doubt is kept as a further sample of its person. |
 | Keep unknown faces for | 7 | Whole days a face nobody has named is kept after it was last seen, from 1 to 365. |
+| Keep recognition pictures | off | Whether the face of each arrival on Recognised is kept for a day in Home Assistant's media folder, and named on Recognised (see [Recognition pictures](#recognition-pictures)). Every Home Assistant user can open the media folder, so it is off unless you turn it on. Off, no picture is kept, and those kept before are deleted at the next start. |
 | Boxes on the camera | on | Whether the camera picture shows a box around each face, and around each person when people are detected, with its score above it. Off, neither boxes nor scores are drawn. |
 | Face points on the camera | on | Whether the camera picture shows the five points of each face: its eyes, its nose and its mouth corners. |
 | Names on the camera | on | Whether the camera picture shows a recognised face's name above its box, or where its box would be with **Boxes on the camera** off. Off, every face with a box shows its score. |
@@ -233,17 +235,20 @@ Its attributes:
 | `unknown_faces` | The most faces that were not anyone's in one check within the last **Stay on for** seconds, so that it holds as the state does. |
 | `last_recognised` | The full name of the person whose visit began last, kept after they leave. A visit begins when someone who was not in frame is recognised. |
 | `last_recognised_at` | When that visit began. |
+| `pictures` | With **Keep recognition pictures** on, the picture of each person in `people`, in its order: the path of their arrival's picture, or null for one without (its save failed, or it was pruned). An empty list with the setting off, or with nobody in frame. |
+| `last_recognised_picture` | The path of the picture of `last_recognised`'s arrival, kept after they leave and across a restart while its file is there; null when there is none. |
+| `unknown_picture` | The path of the picture of the unknown arrival, while `unknown_faces` is above 0; null otherwise. |
 
-Recognised changes, and is written to Home Assistant's history, when someone arrives or leaves, or a count or a name
-changes: not at every check. A rename on the page, on this detector or another, shows at once, and a person deleted or
-merged away goes from the state and from `last_recognised`. It is unavailable with **Recognise faces** off, and while
-the face recognition model has not opened (it is still downloading, or failed to open and is tried again): a face no
-one could compare is never `Unknown`, so an automation for strangers does not fire for the family then. After a restart
-it is unavailable until the model has opened and a check has looked with it, and then says what that check found:
-`Nobody`, unless someone is in frame. A camera that gives no frame after the start leaves it unavailable, as no check
-looks until one comes. `last_recognised` and its time come back, from the detector's own stored data. A change from
-unavailable is not a change from `Nobody`, so an automation that triggers on a change from `Nobody` does not fire for a
-restart.
+Recognised changes, and is written to Home Assistant's history, when someone arrives or leaves, or a count, a name or a
+picture changes: not at every check. A rename on the page, on this detector or another, shows at once, and a person
+deleted or merged away goes from the state, from `last_recognised` and from the pictures. It is unavailable with
+**Recognise faces** off, and while the face recognition model has not opened (it is still downloading, or failed to
+open and is tried again): a face no one could compare is never `Unknown`, so an automation for strangers does not fire
+for the family then. After a restart it is unavailable until the model has opened and a check has looked with it, and
+then says what that check found: `Nobody`, unless someone is in frame. A camera that gives no frame after the start
+leaves it unavailable, as no check looks until one comes. `last_recognised` and its time come back, from the detector's
+own stored data, with `last_recognised_picture` while its file is there. A change from unavailable is not a change from
+`Nobody`, so an automation that triggers on a change from `Nobody` does not fire for a restart.
 
 Two automations, for a detector whose Recognised is `sensor.front_door_recognised` (Home Assistant names it after the
 device, so **Front door people**'s is that). The first sends a notification when someone comes to the door; the second
@@ -280,6 +285,94 @@ A state trigger with neither `from` nor `to` fires at each change of the state o
 when someone else arrives or leaves while Ana is there; turning on a light that is on does nothing. It fires too when
 Recognised becomes available after a restart, and its condition turns the light on then only if Ana is at the door. Do
 not let Recognised unlock, disarm or open anything (see [Trust and privacy](#trust-and-privacy)).
+
+### Recognition pictures
+
+With **Keep recognition pictures** on, the detector keeps the face of each arrival as a picture, and Recognised says
+where it is, so that a phone notification can show who came. It needs HassSharp 0.0.52-beta or later.
+
+- **An arrival** is a person entering Recognised: the check that begins their visit and sets `last_recognised_at`. Its
+  picture is the crop of the face that check gave them, as the page shows a face (the face's box grown by a quarter on
+  each side, 160 pixels on its long side, a JPEG). A person has one picture a visit: the checks after keep none, and
+  **Stay on for** holds their picture with them in `pictures`.
+- **An unknown arrival** is `unknown_faces` rising from 0. Its picture is the crop of the largest face that check
+  compared and gave to no one, named in `unknown_picture` while unknown faces are in frame. Once they have gone, the
+  next unknown face is an arrival of its own, with a new picture.
+- The file is on disk before the state that names it is sent to Home Assistant, and the path never changes: a picture
+  is never written over, so the path of an arrival always shows that arrival's face.
+- The pictures are in Home Assistant's media folder (its `media_dirs` entry `local`, else the first by name), under
+  `hass_sharp/<definition id>/<node key>/`, each named by the time of its check in UTC and 16 random hex digits, such
+  as `20261124T081502-3f9a0c1d2e4b5a69.jpg`: never by anything of the person. Home Assistant serves each at the path
+  the attributes give, such as
+  `/media/local/hass_sharp/front_door_people/front_door/20261124T081502-3f9a0c1d2e4b5a69.jpg`, to anyone logged in.
+- A detector keeps at most 20 pictures, and none older than a day: at each check and at each start, the older ones and
+  those beyond the 20 newest are deleted, and an attribute that named one becomes null before its file goes. A person
+  deleted or merged away, on this detector or another, loses their pictures on every detector; the person they were
+  merged into keeps their own. With the setting off, or **Recognise faces** off, every picture is deleted at the next
+  start, and deleting the definition deletes them too.
+- A picture that cannot be saved (Home Assistant has no media folder, or it cannot be written) leaves recognition as it
+  was: the arrival is announced with a null picture, and the failure is logged once as a warning, without a name,
+  until a picture is saved again.
+
+**Who can see them.** Every user who can log in to Home Assistant can open the media folder in the **Media** browser
+and see every picture there, and so can anything that has a user's login, such as a phone with the companion app. That
+is why the setting is off unless you turn it on. A backup that includes the media folder holds the pictures kept then.
+
+Two automations that send a phone notification with the face, for a detector whose Recognised is
+`sensor.front_door_recognised` and a phone whose notify action is `notify.mobile_app_my_phone`. The first is for a
+person recognised, the second for an unknown face; each has a button that opens a dashboard of your own:
+
+```yaml
+- alias: Who is at the door
+  triggers:
+    - trigger: state
+      entity_id: sensor.front_door_recognised
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.from_state.state not in ['unavailable', 'unknown']
+           and trigger.to_state.attributes.last_recognised_picture is not none
+           and trigger.to_state.attributes.last_recognised_at != trigger.from_state.attributes.last_recognised_at }}
+  actions:
+    - action: notify.mobile_app_my_phone
+      data:
+        message: "{{ trigger.to_state.attributes.last_recognised }} is at the door"
+        data:
+          image: "{{ trigger.to_state.attributes.last_recognised_picture }}"
+          actions:
+            - action: URI
+              title: Open the door camera
+              uri: /lovelace/door
+
+- alias: A stranger at the door
+  triggers:
+    - trigger: state
+      entity_id: sensor.front_door_recognised
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.from_state.state not in ['unavailable', 'unknown']
+           and trigger.to_state.attributes.unknown_picture is not none
+           and trigger.to_state.attributes.unknown_picture != trigger.from_state.attributes.unknown_picture }}
+  actions:
+    - action: notify.mobile_app_my_phone
+      data:
+        message: Someone the door camera does not know is at the door
+        data:
+          image: "{{ trigger.to_state.attributes.unknown_picture }}"
+          actions:
+            - action: URI
+              title: Open the door camera
+              uri: /lovelace/door
+```
+
+Each fires once an arrival: `last_recognised_at` changes only when a visit begins, and `unknown_picture` only when
+unknown faces arrive; the first condition keeps a restart from firing them. Read the picture from the trigger
+(`trigger.to_state`), not with `state_attr`: the trigger's state is the one of that arrival and never changes, while
+the sensor's may already name the next person by the time the action runs, as when two people arrive one after the
+other. The picture at that path is that arrival's face for as long as it is kept; the phone loads it when it shows the
+notification, with its own login, so a notification opened more than a day later, or after 20 more arrivals, may show
+no face.
 
 ### The page
 
@@ -394,8 +487,10 @@ stranger turned the same way.
 
 Faces, their crops, their embeddings and the names you give them are biometric and personal data:
 
-- They are kept only in Home Assistant's storage, under `.storage/hass_sharp/data/`, and never sent anywhere. No log
-  line holds a name, a face or an embedding.
+- They are kept only in Home Assistant's storage, under `.storage/hass_sharp/data/`, and, with **Keep recognition
+  pictures** on, the faces of the last arrivals in its media folder ([Recognition pictures](#recognition-pictures)),
+  which every Home Assistant user can open. They are never sent anywhere. No log line holds a name, a face or an
+  embedding.
 - Stored data is part of Home Assistant's backups, so every backup holds the people list as it was then, and a backup
   kept off the machine carries it with it.
 - A name drawn on the camera picture is seen by every Home Assistant user who can see that camera, and by whatever the
@@ -414,7 +509,9 @@ To delete them:
   store `hass-sharp-vision.people`. It refuses while a running definition has the store open, so turn off every
   definition with a People detector first;
 - a detector's unknown faces: they are its node's own data, deleted with its definition, or when the definition is
-  saved without a node of that key.
+  saved without a node of that key;
+- a detector's recognition pictures: turn **Keep recognition pictures** off and save the definition, which deletes them
+  as it starts; a person's go when they are deleted. An administrator can also delete one in the **Media** browser.
 
 ## The face recognition model
 
@@ -536,7 +633,7 @@ setting that has none. A change to the library or the model is released as a new
 
 1. **HassSharp first.** The C# job of `ci.yaml` builds against the hass-sharp commit `HASS_SHARP_REF` names, by its full
    sha: the commit of the HassSharp release these files need, which the top of this README names ("HassSharp
-   0.0.50-beta or later"), or a later commit of hass-sharp's `main` when only the tests need something newer, as they
+   0.0.52-beta or later"), or a later commit of hass-sharp's `main` when only the tests need something newer, as they
    do now (the default a class's setting has in its signature). When the files come to need something of a later
    HassSharp, release that first, then set `HASS_SHARP_REF` to its tag's commit and name its version at the top.
 2. Set the new version in `native/Cargo.toml`, and in `Cargo.lock` with `cargo update -p hs_vision --offline` in
