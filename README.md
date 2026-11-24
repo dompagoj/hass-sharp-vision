@@ -159,7 +159,7 @@ A face is recognised only when it is clear enough:
 - its five points (eyes, nose tip, mouth corners) line up with a face's: one that fits badly is not used.
 
 At most four faces are recognised in a check, the largest first. Every other face still counts for Face seen and Faces,
-and is drawn with its score.
+and is drawn with its score (with **Boxes on the camera** on).
 
 ### Matching
 
@@ -177,7 +177,7 @@ score** at its default, 0.50:
 learning (below) a tenth over it. At 0.60, a name is suggested from 0.50 and learned from 0.70.
 
 A name is given to one face of a frame, the best match: another face of that frame that matches the same person goes
-to the unknown faces, and is drawn with its score.
+to the unknown faces, and is drawn with its score, not the name.
 
 ### Unknown faces
 
