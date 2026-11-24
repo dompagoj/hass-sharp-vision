@@ -633,11 +633,9 @@ setting that has none. A change to the library or the model is released as a new
 
 1. **HassSharp first.** The C# job of `ci.yaml` builds against the hass-sharp commit `HASS_SHARP_REF` names, by its full
    sha: the commit of the HassSharp release these files need, which the top of this README names ("HassSharp
-   0.0.52-beta or later"), or a later commit of hass-sharp's `main` when only the tests need something newer. Until
-   that release is out it is the commit of hass-sharp's `main` that has what the files need, as now: 0.0.52-beta, which
-   brings `Media`, is not released yet, so `HASS_SHARP_REF` names the commit that adds it. When the files come to need
-   something of a later HassSharp, release that first, then set `HASS_SHARP_REF` to its tag's commit and name its
-   version at the top.
+   0.0.52-beta or later"), by its tag's commit, or a later commit of hass-sharp's `main` when only the tests need
+   something newer. When the files come to need something of a later HassSharp, release that first, then set
+   `HASS_SHARP_REF` to its tag's commit and name its version at the top.
 2. Set the new version in `native/Cargo.toml`, and in `Cargo.lock` with `cargo update -p hs_vision --offline` in
    `native/`. If a dependency changed, run `native/build.sh --licenses` too.
 3. Run `native/build.sh` for all four RIDs and copy `native/dist/SHA256SUMS` into `native/SHA256SUMS`. In `Vision.cs`,

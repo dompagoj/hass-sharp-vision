@@ -21,9 +21,8 @@ env:
   # page's pick field), what Add external imports hass_sharp.toml with (the node library import operation and
   # external.py), the default a class's setting has in its signature, which the tests check (Match score's), and a C#
   # node's media files (SharpComponent.Media, with Home Assistant's media folders handed to .NET), which the People
-  # detector keeps its recognition pictures with. hass-sharp's 0.0.52-beta will be the release that has them; until it
-  # is out, this is the commit of its main that adds the media folders. none turns the C# tests off, and the csharp job
-  # then only says so; any other value fails the job.
+  # detector keeps its recognition pictures with. hass-sharp's 0.0.52-beta is the release that has them, and this is
+  # its tag's commit. none turns the C# tests off, and the csharp job then only says so; any other value fails the job.
   HASS_SHARP_REF: 25a95ca528001e4878977b445eeaf1fd101de07f
 
 jobs:
