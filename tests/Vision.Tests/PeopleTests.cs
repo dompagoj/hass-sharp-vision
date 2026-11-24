@@ -254,6 +254,9 @@ static class PeopleTests
             (nameof(AFaceStartsAGroupAndACloseOneJoinsIt), Sync(AFaceStartsAGroupAndACloseOneJoinsIt)),
             (nameof(TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder), Sync(TwoGroupsAFaceIsCloseToAreJoinedIntoTheOlder)),
             (nameof(AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce), Sync(AGroupIsShownAtItsThirdSightingAndAFrameCountsOnce)),
+            (nameof(TwoFacesOfOneCheckAreTwoGroups), Sync(TwoFacesOfOneCheckAreTwoGroups)),
+            (nameof(GroupsOfOneCheckAreNeverJoined), Sync(GroupsOfOneCheckAreNeverJoined)),
+            (nameof(ARemovedGroupLeavesNoneApart), Sync(ARemovedGroupLeavesNoneApart)),
             (nameof(GroupsExpire), Sync(GroupsExpire)),
             (nameof(The51stGroupDropsTheOneSeenLongestAgo), Sync(The51stGroupDropsTheOneSeenLongestAgo)),
             (nameof(AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces), Sync(AGroupKeepsFiveSamplesPreferringLargerAndUnlikeFaces)),
@@ -1009,16 +1012,122 @@ static class PeopleTests
         using var home = new Home();
         var groups = Groups(home.Device());
         var a = Unit(7020);
-        // Two faces of one group in one frame: one check, one sighting.
+        // Two faces in one frame, however alike, are two people: two groups of one sighting each.
         groups.See(a, T0);
         groups.See(At(a, 0.95, 7021), T0);
-        Check(groups.All.Single().Sightings == 1, "two faces in one check are one sighting");
+        Check(groups.All.Length == 2 && groups.All.All(group => group.Sightings == 1), "two faces in one check are two groups of one sighting: " + string.Join(", ", groups.All));
+        groups.Remove((string)groups.All.Single(group => !Holds(groups.Samples((string)group.Id), a)).Id);
         groups.See(a, T0.AddSeconds(1));
         Check(groups.All.Single().Sightings == 2 && groups.Shown.Length == 0, "two sightings are not shown");
         groups.See(a, T0.AddSeconds(2));
         var shown = groups.Shown;
         Check(shown.Length == 1 && shown[0].Sightings == 3 && shown[0].Last == T0.AddSeconds(2), "the third sighting shows the group: " + string.Join(", ", shown));
-        Console.WriteLine("PASS people: a group is shown at its third sighting, and the faces of one check are one sighting");
+        Console.WriteLine("PASS people: a group is shown at its third sighting, and two faces of one check are two groups");
+    }
+
+    // The mechanism seen live on group.jpg: its faces of 32.3 and 17.9 pixels between the eyes are 0.52 to 0.56 alike as
+    // SFace embeds them, over the match score, so the smaller face, seen second in the check, joined the group the larger
+    // had just started.
+    static void TwoFacesOfOneCheckAreTwoGroups()
+    {
+        using var home = new Home();
+        var groups = Groups(home.Device());
+        var a = Unit(7040);
+        var b = At(a, 0.55, 7041);
+        for (var i = 0; i < 10; i++)
+        {
+            groups.See(a, T0.AddSeconds(i), eyes: 32, seed: 7040);
+            groups.See(b, T0.AddSeconds(i), eyes: 18, seed: 7041);
+        }
+        var all = groups.All;
+        Check(all.Length == 2 && all.All(group => group.Sightings == 10), "two faces of each check stay two groups, each seen in every check: " + string.Join(", ", all));
+        var ofA = all.Single(group => Holds(groups.Samples((string)group.Id), a));
+        var ofB = all.Single(group => Holds(groups.Samples((string)group.Id), b));
+        Check(groups.Samples((string)ofA.Id).Length == 1 && groups.Samples((string)ofB.Id).Length == 1, "each holds its own face only");
+        Console.WriteLine("PASS people: two faces of one check, alike over the match score, are two groups, and stay two over many checks");
+    }
+
+    /// <summary>A face Match score alike to both of two strangers, <paramref name="a"/> and <paramref name="c"/>, and more alike to <paramref name="a"/>.</summary>
+    static float[] Between(float[] a, float[] c) => Normalised(a.Zip(c).Select(pair => 1.2 * pair.First + pair.Second).ToArray());
+
+    /// <summary>The relation of groups apart, as the store has it; empty when it has none.</summary>
+    static string Apart(SharpData data) => data.Keys("apart").Count == 0 ? "" : System.Text.Json.JsonSerializer.Serialize(data.Get<System.Text.Json.JsonElement>("apart"));
+
+    static void GroupsOfOneCheckAreNeverJoined()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (a, c) = (Unit(7050), Unit(7051));
+        var d = Between(a, c);
+        Check(Cosine(a, c) < 0.3 && Cosine(d, a) >= 0.5 && Cosine(d, c) >= 0.5 && Cosine(d, a) > Cosine(d, c) && Cosine(d, a) < 0.9, "d is close to both, closer to a");
+        groups.See(a, T0, seed: 7050);
+        groups.See(c, T0, seed: 7051);
+        string aId = groups.All.Single(group => Holds(groups.Samples((string)group.Id), a)).Id;
+        string cId = groups.All.Single(group => group.Id != aId).Id;
+
+        // A face alike to both joins the one it is more alike to, and joins nothing together.
+        groups.See(d, T0.AddSeconds(1), seed: 7052);
+        Check(groups.All.Length == 2 && Holds(groups.Samples(aId), d) && !Holds(groups.Samples(cId), d), "d joins a's group alone: " + string.Join(", ", groups.All));
+        groups.Rematch((object)People());
+        Check(groups.All.Length == 2, "matching again joins nothing");
+
+        // Across a reload of the store.
+        var next = Groups(home.RestartedDevice());
+        next.See(Between(a, c), T0.AddSeconds(2), seed: 7053);
+        Check(next.All.Length == 2 && next.Find(aId) != null && next.Find(cId) != null, "the next revision keeps them apart: " + string.Join(", ", next.All));
+
+        // A group never in one check with another still joins it as before, and a join carries the relation over.
+        var e = At(c, 0.6, 7054);
+        next.See(e, T0.AddMinutes(1), seed: 7054);
+        Check(next.All.Length == 2 && Holds(next.Samples(cId), e), "e, seen alone and alike to c's group, joins it");
+        var f = Unit(7055);
+        next.See(f, T0.AddMinutes(2), seed: 7055);
+        Check(next.All.Length == 3, "f, seen alone, starts a group of its own");
+        string fId = next.All.Single(group => group.Id != aId && group.Id != cId).Id;
+        next.See(Normalised(c.Zip(f).Select(pair => (double)pair.First + pair.Second).ToArray()), T0.AddMinutes(3), seed: 7056);
+        Check(next.All.Length == 2 && next.Find(cId) != null && next.Find(fId) == null, "a face alike to c's and f's groups, never in one check, joins them into the older: " + string.Join(", ", next.All));
+        next.See(Between(a, c), T0.AddMinutes(4), seed: 7057);
+        Check(next.All.Length == 2 && Groups(home.RestartedDevice()).All.Length == 2, "the joined group is still apart from a's, in the store too");
+        Console.WriteLine("PASS people: groups that took faces in one check are never joined, by a face alike to both, by matching again, or after a reload; others still join");
+    }
+
+    static void ARemovedGroupLeavesNoneApart()
+    {
+        using var home = new Home();
+        var data = home.Device();
+        var groups = Groups(data);
+        var (a, c) = (Unit(7060), Unit(7061));
+        groups.See(a, T0, seed: 7060);
+        groups.See(c, T0, seed: 7061);
+        string aId = groups.All.Single(group => Holds(groups.Samples((string)group.Id), a)).Id;
+        string cId = groups.All.Single(group => group.Id != aId).Id;
+        Check(Apart(data).Contains(aId) && Apart(data).Contains(cId), "the two are stored apart: " + Apart(data));
+        groups.Remove(cId);
+        Check(!Apart(data).Contains(cId), "the removed group is not in the relation: " + Apart(data));
+
+        // c's face, seen alone later, starts a group that is not apart from a's: a face alike to both joins them.
+        groups.See(c, T0.AddMinutes(1), seed: 7062);
+        groups.See(Between(a, c), T0.AddMinutes(2), seed: 7063);
+        Check(groups.All.Single().Id == aId, "the two are joined: " + string.Join(", ", groups.All));
+
+        // An expired group leaves the relation too.
+        groups.See(Unit(7064), T0.AddMinutes(2).AddSeconds(1), seed: 7064);
+        groups.See(Unit(7065), T0.AddMinutes(2).AddSeconds(1), seed: 7065);
+        Check(groups.All.Length == 3 && Apart(data).Length > 0, "two strangers of one check are apart: " + Apart(data));
+        groups.Expire(T0.AddHours(2), TimeSpan.FromHours(1));
+        Check(groups.All.Length == 0 && Apart(data) is "" or "[]", "expired, they leave nothing apart: " + Apart(data));
+
+        // A store with groups and no relation, as 1.1.0's development builds wrote it, has none apart.
+        groups.See(a, T0.AddHours(3), seed: 7066);
+        groups.See(c, T0.AddHours(3), seed: 7067);
+        Check(groups.All.Length == 2 && Apart(data).Length > 2, "a's and c's groups are apart");
+        data.Remove("apart");
+        var old = Groups(home.RestartedDevice());
+        Check(old.All.Length == 2, "the groups load without the relation");
+        old.See(Between(a, c), T0.AddHours(3).AddSeconds(1), seed: 7068);
+        Check(old.All.Length == 1, "and none is apart: a face alike to both joins them: " + string.Join(", ", old.All));
+        Console.WriteLine("PASS people: a group removed or expired leaves no other apart from it, and a store without the relation has none apart");
     }
 
     static void GroupsExpire()

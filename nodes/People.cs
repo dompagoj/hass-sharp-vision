@@ -841,7 +841,7 @@ public sealed class PeopleList
 
 /// <summary>A group of faces of someone the people list does not have, as one detector saw them.</summary>
 /// <param name="Id">The group's id: short, URL-safe and meaningless.</param>
-/// <param name="Sightings">How many checks saw the group; the faces of one check count once.</param>
+/// <param name="Sightings">How many checks saw the group, which takes at most one face of a check.</param>
 /// <param name="First">When the group was first seen.</param>
 /// <param name="Last">When the group was last seen.</param>
 /// <param name="SuggestedPersonId">The id of the person the group might be; null when there is none.</param>
@@ -851,19 +851,23 @@ public sealed record FaceGroup(string Id, int Sightings, DateTimeOffset First, D
 /// The faces one People detector sees that the people list does not know, grouped by likeness so that the user can name
 /// them, and kept in the detector's own store. A face joins every group it is at least
 /// <see cref="RecognitionRules.MatchScore"/> from a sample of, and the groups it joins become one, the oldest; a face
-/// close to none starts a group. A group is shown (<see cref="Shown"/>) from its <see cref="ShownAt"/>th sighting.
+/// close to none starts a group. Two faces of one check are two people: a group takes at most one face of a check, and
+/// groups that took faces of one check are apart, and are never joined. A group is shown (<see cref="Shown"/>) from its
+/// <see cref="ShownAt"/>th sighting.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The store's keys: <c>format</c>, 1; <c>groups</c>, a JSON array of the groups' ids; <c>groups/&lt;id&gt;</c>, a group
-/// without its embeddings and crops; <c>groups/&lt;id&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats; and
-/// <c>groups/&lt;id&gt;/&lt;sampleId&gt;/crop</c>, the JPEG.
+/// without its embeddings and crops; <c>groups/&lt;id&gt;/&lt;sampleId&gt;/embedding</c>, 128 little-endian floats;
+/// <c>groups/&lt;id&gt;/&lt;sampleId&gt;/crop</c>, the JPEG; and <c>apart</c>, a JSON array of the pairs of groups that are
+/// apart, each pair two ids (a store without it has none apart). The pairs are of the groups kept, at most
+/// <see cref="MostGroups"/>, and a group removed leaves them.
 /// </para>
 /// <para>
 /// Memory is the truth while the detector runs, and the store follows: a group is written when it starts, gains or loses
 /// a sample, is joined with another, is first shown or has its suggestion changed by <see cref="Rematch"/>, and its last
 /// seen and count otherwise at most once a minute (<see cref="WrittenEvery"/>). A restart can lose up to a minute of a
-/// group's sightings.
+/// group's sightings. The pairs apart are written when they change, after the index.
 /// </para>
 /// <para>
 /// A new group's samples are written before its record, and its record before the index lists it; a group removed leaves
@@ -871,7 +875,8 @@ public sealed record FaceGroup(string Id, int Sightings, DateTimeOffset First, D
 /// store only after the one before has stopped, so loading removes every key under <c>groups/</c> that the index and the
 /// groups' records do not list: what an interruption left, which nothing is still writing. A group whose record cannot
 /// be read, or has no sample left, is dropped with its keys; an index that cannot be read drops every group, as this is
-/// a cache of faces the user has not named. A store of another format is neither read nor written, and has no groups.
+/// a cache of faces the user has not named. A pair apart that names a group not kept, or pairs that cannot be read, are
+/// left out. A store of another format is neither read nor written, and has no groups.
 /// A store cleared while the detector runs is noticed at the next change, and the groups in memory are forgotten, so
 /// that none is written back.
 /// </para>
@@ -897,16 +902,19 @@ public sealed class FaceGroups
     public static readonly TimeSpan WrittenEvery = TimeSpan.FromMinutes(1);
 
     const int Format = 1;
-    const string IndexKey = "groups";
+    const string IndexKey = "groups", ApartKey = "apart";
 
     readonly SharpData data;
     readonly string camera;
     readonly RecognitionRules rules;
     // False for a store of another format, which is neither read nor written.
     readonly bool ours;
-    // Guards groups and formatted, and is held across each change's writes to the store.
+    // Guards groups, check, took and formatted, and is held across each change's writes to the store.
     readonly Lock gate = new();
     readonly Dictionary<string, Group> groups = new(StringComparer.Ordinal);
+    // The check the last face was seen in, by its time, and the groups that took a face of it.
+    DateTimeOffset check;
+    readonly HashSet<string> took = new(StringComparer.Ordinal);
     // Whether the store has its format: one found without it afterwards was cleared.
     bool formatted;
     IReadOnlyList<FaceGroup> shown = Array.Empty<FaceGroup>();
@@ -950,10 +958,13 @@ public sealed class FaceGroups
     }
 
     /// <summary>
-    /// Notes a face that the people list does not know, or only suggests a person for, seen in a check. It joins every
-    /// group it is at least <see cref="RecognitionRules.MatchScore"/> from a sample of, which become one, the group first
-    /// seen; it starts a group when there is none. A group counts one sighting a check, so the faces of one check are
-    /// given the same <paramref name="now"/>. A group not shown within <see cref="ShownWithin"/> is dropped first.
+    /// Notes a face that the people list does not know, or only suggests a person for, seen in a check. It joins the
+    /// groups it is at least <see cref="RecognitionRules.MatchScore"/> from a sample of, which become one, the group first
+    /// seen; it starts a group when there is none. Two faces of one check are two people, so the faces of one check are
+    /// given the same <paramref name="now"/>, and each check its own: a face never joins a group that took a face of the
+    /// same check, and the group it joins or starts is apart from those for good. Of groups that are apart, it joins
+    /// only the one it is most alike to, and joins nothing together. A group not shown within <see cref="ShownWithin"/>
+    /// is dropped first.
     /// </summary>
     /// <param name="face">The face's embedding.</param>
     /// <param name="crop">Makes the face's crop, a JPEG of at most 1 MiB; called once when the face is kept as one of the group's samples, and not at all otherwise.</param>
@@ -970,13 +981,28 @@ public sealed class FaceGroups
         lock (gate)
         {
             Cleared();
+            if (now != check)
+            {
+                check = now;
+                took.Clear();
+            }
             Drop(groups.Values.Where(group => !IsShown(group) && now - group.First >= ShownWithin).ToList());
-            var close = groups.Values
-                .Where(group => group.Samples.Any(sample => sample.Embedding.Similarity(face) >= rules.MatchScore))
-                .OrderBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal)
+            // The groups it is alike to, the most alike first, but none that took a face of this check: that was someone else.
+            var alike = groups.Values
+                .Where(group => !took.Contains(group.Id) && group.Samples.Count > 0)
+                .Select(group => (Group: group, Score: group.Samples.Max(sample => (double)sample.Embedding.Similarity(face))))
+                .Where(item => item.Score >= rules.MatchScore)
+                .OrderByDescending(item => item.Score).ThenBy(item => item.Group.Id, StringComparer.Ordinal)
+                .Select(item => item.Group)
                 .ToList();
-            if (close.Count == 0) Start(face, crop, eyes, now, suggested);
-            else Join(close, face, crop, eyes, now, suggested);
+            // The most alike, and each other one that is apart from none of those chosen.
+            var close = new List<Group>();
+            foreach (var group in alike)
+                if (close.All(chosen => !chosen.Apart.Contains(group.Id))) close.Add(group);
+            close = [.. close.OrderBy(group => group.First).ThenBy(group => group.Id, StringComparer.Ordinal)];
+            var target = close.Count == 0 ? Start(face, crop, eyes, now, suggested) : Join(close, face, crop, eyes, now, suggested);
+            Apart(target);
+            took.Add(target.Id);
             Publish();
         }
     }
@@ -1075,7 +1101,7 @@ public sealed class FaceGroups
     // ---- Changes; each under the lock ----
 
     /// <summary>Starts a group of one face, dropping the group seen longest ago when there are <see cref="MostGroups"/>.</summary>
-    void Start(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
+    Group Start(FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
     {
         var bytes = Made(crop);
         if (groups.Count >= MostGroups) Drop([groups.Values.OrderBy(group => group.Last).ThenBy(group => group.Id, StringComparer.Ordinal).First()]);
@@ -1086,17 +1112,18 @@ public sealed class FaceGroups
         WriteSample(group.Id, sample, bytes);
         WriteRecord(group);
         ChangeIndex(index => index.Add(group.Id));
+        return group;
     }
 
     /// <summary>
-    /// A face joins the groups it is close to: they become the first, with every sighting (this check's once), the best
-    /// of their samples, and the face as a sample when it adds to them.
+    /// A face joins the groups it is close to, none of which is apart from another or took a face of this check: they
+    /// become the first, with every sighting and this check's, the best of their samples, the face as a sample when it
+    /// adds to them, and every group any of them is apart from.
     /// </summary>
-    void Join(List<Group> close, FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
+    Group Join(List<Group> close, FaceEmbedding face, Func<byte[]> crop, double eyes, DateTimeOffset now, string? suggested)
     {
         var (group, others) = (close[0], close.Skip(1).ToList());
-        var seenNow = close.Count(g => g.Last == now);
-        var sightings = close.Sum(g => g.Sightings) - Math.Max(0, seenNow - 1) + (seenNow == 0 ? 1 : 0);
+        var sightings = close.Sum(g => g.Sightings) + 1;
         // Each sample once: an interrupted join can leave a sample's copy in both groups, which keeps its id.
         var pooled = new List<(Group Owner, GroupSample Sample)>();
         foreach (var g in close)
@@ -1119,6 +1146,15 @@ public sealed class FaceGroups
         group.Suggested = suggested ?? group.Suggested ?? others.Select(g => g.Suggested).FirstOrDefault(s => s != null);
         group.Samples = samples;
         foreach (var other in others) groups.Remove(other.Id);
+        // The groups the others were apart from are apart from the first now.
+        foreach (var other in others)
+        foreach (var id in other.Apart)
+            if (groups.TryGetValue(id, out var apart))
+            {
+                apart.Apart.Remove(other.Id);
+                apart.Apart.Add(group.Id);
+                group.Apart.Add(id);
+            }
 
         foreach (var (from, sample) in moved) CopySample(from, group.Id, sample);
         if (added != null) WriteSample(group.Id, added, bytes!);
@@ -1128,9 +1164,24 @@ public sealed class FaceGroups
         {
             var gone = others.Select(other => other.Id).ToHashSet(StringComparer.Ordinal);
             ChangeIndex(index => index.RemoveAll(gone.Contains));
+            if (others.Any(other => other.Apart.Count > 0)) WriteApart();
             foreach (var other in others) Forget(other.Id);
         }
         foreach (var sample in dropped) RemoveSampleKeys(group.Id, sample.Id);
+        return group;
+    }
+
+    /// <summary>
+    /// The group a face of this check just went to is apart from every other group that took a face of the check: two
+    /// faces of one frame are two people. The pairs are written when they change.
+    /// </summary>
+    void Apart(Group target)
+    {
+        var changed = false;
+        foreach (var id in took)
+            if (id != target.Id && groups.TryGetValue(id, out var other))
+                changed |= target.Apart.Add(id) | other.Apart.Add(target.Id);
+        if (changed) WriteApart();
     }
 
     /// <summary>At most <see cref="MostSamples"/> of the samples: the largest faces first, those unlike the ones chosen before the rest.</summary>
@@ -1168,6 +1219,9 @@ public sealed class FaceGroups
         foreach (var group in dropped) groups.Remove(group.Id);
         var gone = dropped.Select(group => group.Id).ToHashSet(StringComparer.Ordinal);
         ChangeIndex(index => index.RemoveAll(gone.Contains));
+        var apartChanged = dropped.Any(group => group.Apart.Count > 0);
+        foreach (var group in groups.Values) group.Apart.RemoveWhere(gone.Contains);
+        if (apartChanged) WriteApart();
         foreach (var group in dropped) Forget(group.Id);
     }
 
@@ -1176,6 +1230,7 @@ public sealed class FaceGroups
     {
         if (!formatted || data.Keys("format").Contains("format")) return;
         groups.Clear();
+        took.Clear();
         formatted = false;
     }
 
@@ -1232,6 +1287,30 @@ public sealed class FaceGroups
             catch (Exception e) when (e is not ObjectDisposedException) { }
         }
         if (rewrite) Try(() => data.Set(IndexKey, groups.Keys.Order(StringComparer.Ordinal).ToList()));
+        if (!LoadApart()) WriteApart();
+    }
+
+    /// <summary>
+    /// Reads the pairs of groups apart into the groups, both ways, leaving out a pair that names a group not kept; false
+    /// when one was left out or they cannot be read, so that they are written again as they are now.
+    /// </summary>
+    bool LoadApart()
+    {
+        List<List<string>?>? pairs;
+        try { pairs = data.Get<List<List<string>?>>(ApartKey); }
+        catch (InvalidDataException) { return false; }
+        catch (InvalidOperationException e) when (e is not ObjectDisposedException) { return false; }
+        var whole = true;
+        foreach (var pair in pairs ?? [])
+        {
+            if (pair is [{ } a, { } b] && a != b && groups.TryGetValue(a, out var first) && groups.TryGetValue(b, out var second))
+            {
+                first.Apart.Add(b);
+                second.Apart.Add(a);
+            }
+            else whole = false;
+        }
+        return whole;
     }
 
     /// <summary>A group as its record and samples have it; null when its record cannot be read or no sample of it can.</summary>
@@ -1293,6 +1372,16 @@ public sealed class FaceGroups
         }
         catch (InvalidDataException) { }
         catch (InvalidOperationException e) when (e is not ObjectDisposedException) { }
+    }
+
+    /// <summary>Writes the pairs of groups apart as memory has them: each pair once, the smaller id first, in order.</summary>
+    void WriteApart()
+    {
+        var pairs = groups.Values
+            .SelectMany(group => group.Apart.Where(id => string.CompareOrdinal(group.Id, id) < 0).Select(id => new[] { group.Id, id }))
+            .OrderBy(pair => pair[0], StringComparer.Ordinal).ThenBy(pair => pair[1], StringComparer.Ordinal)
+            .ToList();
+        Try(() => data.Set(ApartKey, pairs));
     }
 
     void ChangeIndex(Action<List<string>> change) => Try(() => data.Update<List<string>>(IndexKey, index =>
@@ -1361,6 +1450,8 @@ public sealed class FaceGroups
         public DateTimeOffset Last { get; set; }
         public string? Suggested { get; set; }
         public List<GroupSample> Samples { get; set; } = [];
+        /// <summary>The ids of the groups this one is apart from: each took a face of a check this one took a face of.</summary>
+        public HashSet<string> Apart { get; } = new(StringComparer.Ordinal);
         /// <summary>The last seen its record was last written with; null when it never was.</summary>
         public DateTimeOffset? Written { get; set; }
 

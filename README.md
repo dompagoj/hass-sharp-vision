@@ -164,11 +164,15 @@ score** at its default, 0.50:
 **Match score** moves the other two lines with it: the line for suggesting a name is a tenth under it, and the line for
 learning (below) a tenth over it. At 0.60, a name is suggested from 0.50 and learned from 0.70.
 
+A name is given to one face of a frame, the best match: another face of that frame that matches the same person is
+drawn with its score.
+
 ### Unknown faces
 
 Each People detector keeps the faces it does not know in its own stored data. A face joins a group of faces that is
-at least **Match score** alike to one of its samples, or starts one; two groups that come that close are joined. A group
-keeps up to 5 samples, the larger faces and the ones unlike those it has, and counts at most one sighting a check.
+at least **Match score** alike to one of its samples, or starts one; two groups that come that close are joined. Two
+faces seen in the same frame are never put on one card, however alike they are. A group keeps up to 5 samples, the
+larger faces and the ones unlike those it has, and counts at most one sighting a check.
 
 - A group is shown on the page from its third sighting. One that is not shown within an hour is dropped, so a passer-by
   seen once never becomes a card.

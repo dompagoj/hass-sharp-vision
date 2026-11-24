@@ -88,6 +88,8 @@ static class PeopleDetectorTests
                 (nameof(TheCameraShowsTheRecognisedName), TheCameraShowsTheRecognisedName),
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
                 (nameof(ARemovedLearnedSampleIsNotLearnedAgainAtOnce), ARemovedLearnedSampleIsNotLearnedAgainAtOnce),
+                (nameof(APersonIsGivenToOneFaceOfACheck), APersonIsGivenToOneFaceOfACheck),
+                (nameof(TwoFacesOfOneFrameStayTwoCards), TwoFacesOfOneFrameStayTwoCards),
                 (nameof(GroupsOlderThanTheKeepTimeAreGoneAfterACheck), GroupsOlderThanTheKeepTimeAreGoneAfterACheck),
                 (nameof(ARecogniserThatThrowsFailsThatFaceOnly), ARecogniserThatThrowsFailsThatFaceOnly),
                 (nameof(ARecogniserThatDoesNotOpenIsTriedAgain), ARecogniserThatDoesNotOpenIsTriedAgain),
@@ -1019,6 +1021,75 @@ static class PeopleDetectorTests
         Console.WriteLine($"PASS people detector: with Learn new looks on, two faces of one person in a check add one learned sample, with its {picture.Width} × {picture.Height} crop; off, none");
     }
 
+    // Two faces of one check recognised as one person: the name goes to the better match alone, which alone is learned
+    // from; the other is drawn with its score and grouped nowhere.
+    static async Task APersonIsGivenToOneFaceOfACheck()
+    {
+        var spots = await Spots();
+        var learnEyes = (double)PeopleTests.DefaultRules.LearnEyes;
+        Check(spots[0].Usable && spots[1].Usable && spots[0].Eyes >= learnEyes && spots[1].Eyes >= learnEyes, "the two largest faces are usable and large enough to learn");
+        using var fake = new Fake(spots);
+        Show();
+        await using var rig = await Rig.Start("one-name");
+        var list = PeopleOf(rig);
+        Named(list, Ana, 1);
+        // Both are Ana beyond doubt and would be learned; the smaller is the better match.
+        var larger = PeopleTests.At(PeopleTests.Unit(1), 0.7, 31);
+        var better = PeopleTests.At(PeopleTests.Unit(1), 0.85, 32);
+        fake.Embeds(0, larger);
+        fake.Embeds(1, better);
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(), Faking("Porch")));
+        await Until(() => LearnedOf(Reread(list, Ana)).Length > 0, "Ana gains a learned sample: " + rig.Lines(), 10);
+        var learned = LearnedOf(Reread(list, Ana));
+        Check(learned.Length == 1 && PeopleTests.Cosine((float[])((dynamic)learned[0]).Embedding.Values, better) > 0.999, "the better match is learned, not the larger face");
+        var from = fake.Embedded("Porch").Length;
+        await Until(() => fake.Embedded("Porch").Length >= from + 6 * 4, "six checks more", 10);
+        var labels = rig.Labels();
+        Check(labels.Count(label => label == Ana) == 1, "one face is named Ana, the others show their scores: " + string.Join(", ", labels));
+        Check(LearnedOf(Reread(list, Ana)).Length == 1, "the other face is never learned from");
+        var unknown = Member(rig.Detector(), "Unknown");
+        var grouped = Shown(rig).SelectMany(group => VisionTests.Items((object)unknown.Samples((string)group.Id))).Select(sample => (float[])((dynamic)sample).Embedding.Values).ToArray();
+        Check(Shown(rig).Length == 2 && !grouped.Any(values => PeopleTests.Cosine(values, larger) > 0.999), "the face not given the name is in no group, and the two strangers are: " + Shown(rig).Length);
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: a person is given to one face of a check, the best match, which alone is learned from; the other is drawn with its score and grouped nowhere");
+    }
+
+    // As seen live on group.jpg: two faces of one frame, 0.55 alike, became one group, so one card named two people.
+    static async Task TwoFacesOfOneFrameStayTwoCards()
+    {
+        var spots = await Spots();
+        int[] chosen = [.. Enumerable.Range(0, spots.Length).Where(i => spots[i].Usable).Take(4)];
+        Check(chosen.Length == 4, "four faces are embedded in each check");
+        var (first, last) = (chosen[0], chosen[3]);
+        using var fake = new Fake(spots);
+        // The largest and the smallest embedded, as SFace has the 32.3 and 17.9 pixel faces of group.jpg.
+        var a = PeopleTests.Unit(41);
+        var b = PeopleTests.At(a, 0.55, 42);
+        fake.Embeds(first, a);
+        fake.Embeds(last, b);
+        Show();
+        await using var rig = await Rig.Start("two-cards");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("LearnNewLooks", false)), Faking("Porch")));
+        await Until(() => fake.Embedded("Porch").Length >= 20 * 4, "twenty checks", 10);
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "four faces, four cards: " + Shown(rig).Length, 2);
+        var unknown = Member(rig.Detector(), "Unknown");
+        bool Holds(dynamic group, float[] face) => VisionTests.Items((object)unknown.Samples((string)group.Id)).Any(sample => PeopleTests.Cosine((float[])((dynamic)sample).Embedding.Values, face) > 0.999);
+        var groups = Shown(rig);
+        var ofA = groups.Single(group => Holds(group, a));
+        Check(!Holds(ofA, b) && groups.Count(group => Holds(group, b)) == 1, "the two faces are on two cards");
+
+        Check(await Press(rig, "unknown", (string)ofA.Id, "save", new { name = Ana }) == "done", "Save of one card as Ana");
+        var list = PeopleOf(rig);
+        var ana = Reread(list, Ana);
+        Check(((object[])PeopleTests.Items(ana.Samples)).Length == 1, "Ana has the one face of her card");
+        var from = fake.Embedded("Porch").Length;
+        await Until(() => fake.Embedded("Porch").Length >= from + 5 * 4, "five checks more", 10);
+        var labels = rig.Labels();
+        Check(labels.Count(label => label == Ana) == 1, "naming one card names one face: " + string.Join(", ", labels));
+        NoNameIsLogged(rig);
+        Console.WriteLine("PASS people detector: two faces of one frame, alike over the match score, stay two cards over many checks, and naming one names one face");
+    }
+
     // As seen live: a learned sample removed on the page, while the same face stays in view, was learned again at the
     // next check. The ten minutes go from the removal; the test moves the person's clock past them by writing the
     // removal's time ten minutes back into the shared store, as another detector's write reaches this one.
@@ -1522,9 +1593,15 @@ static class PeopleDetectorTests
         await Until(() => CardsOf(Page(rig), "unknown").Length > 0, "an unknown face is on the page: " + rig.Lines(), 30);
         Check(rig.Server.Requests().Count(r => r.Path == "/" + VisionTests.ModelName) == 1, "the model is downloaded once: " + string.Join(", ", rig.Server.Requests().Select(r => r.Path)));
 
+        // Four faces are embedded, and the largest and the smallest of them are 0.52 to 0.56 alike as SFace has them: they
+        // are two people still, on two cards.
+        await Until(() => CardsOf(Page(rig), "unknown").Length == 4, "the four faces embedded are four cards: " + CardsOf(Page(rig), "unknown").Length, 10);
+
         var group = CardsOf(Page(rig), "unknown")[0];
         Check(await Press(rig, "unknown", (string)group["id"]!, "save", new { name = Ana }) == "done", "Save of a name for the unknown face");
         await Until(() => rig.Labels().Contains(Ana), "the camera names the face: " + string.Join(", ", rig.Labels()), 10);
+        await Task.Delay(500);
+        Check(rig.Labels().Count(label => label == Ana) == 1, "one face is named: " + string.Join(", ", rig.Labels()));
         var list = PeopleOf(rig);
         await Until(() => Reread(list, Ana).LastSeen != null, "Ana is seen", 10);
         Check(Reread(list, Ana).LastSeenAt == "camera.porch", "at camera.porch");
