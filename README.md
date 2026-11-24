@@ -2,8 +2,7 @@
 
 Face and person detection, and face recognition, for [HassSharp](https://github.com/dompagoj/hass-sharp).
 
-These files need the first HassSharp release after 0.0.49-beta that has library classes as nodes and a device page's
-pick field.
+These files need HassSharp 0.0.50-beta or later.
 
 ## What it is
 
@@ -487,11 +486,9 @@ A change to a node file alone needs no release: users import the files, or copy 
 setting that has none. A change to the library or the model is released as a new version.
 
 1. **HassSharp first.** The C# job of `ci.yaml` builds against the hass-sharp commit `HASS_SHARP_REF` names, by its full
-   sha. These files need library classes as nodes and a device page's pick field, and `HASS_SHARP_REF` now names the
-   commit of hass-sharp's `main` that has them, before any HassSharp release does. Once the HassSharp release that has
-   them is out, set `HASS_SHARP_REF` to its commit, and in this README replace "the first HassSharp release after
-   0.0.49-beta that has library classes as nodes and a device page's pick field" at the top with "HassSharp <its
-   version> or later".
+   sha: the commit of the HassSharp release these files need, which the top of this README names ("HassSharp
+   0.0.50-beta or later"). When the files come to need something of a later HassSharp, release that first, then set
+   `HASS_SHARP_REF` to its tag's commit and name its version at the top.
 2. Set the new version in `native/Cargo.toml`, and in `Cargo.lock` with `cargo update -p hs_vision --offline` in
    `native/`. If a dependency changed, run `native/build.sh --licenses` too.
 3. Run `native/build.sh` for all four RIDs and copy `native/dist/SHA256SUMS` into `native/SHA256SUMS`. In `Vision.cs`,
