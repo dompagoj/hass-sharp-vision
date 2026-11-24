@@ -16,7 +16,7 @@ using Microsoft.CodeAnalysis.CSharp;
 /// definition. Its download URL and checksum table are rewritten to a loopback server that serves a local
 /// <c>hs_vision</c> build (<see cref="LocalLibrary"/>); without one, the tests that need it are skipped, unless
 /// <c>HS_VISION_REQUIRE_LIBRARY=1</c>. The recogniser's tests serve a local SFace model the same way
-/// (<see cref="LocalModel"/>), and are skipped without one.
+/// (<see cref="LocalModel"/>), and are skipped without one, unless <c>HS_VISION_REQUIRE_LIBRARY=1</c> too.
 /// </summary>
 static class VisionTests
 {
@@ -134,6 +134,12 @@ static class VisionTests
         return Rewritten(server.Url("/"), (Rid, Convert.ToHexStringLower(SHA256.HashData(bytes))));
     }
 
+    /// <summary>
+    /// Whether <c>HS_VISION_REQUIRE_LIBRARY=1</c>: a missing library then fails the tests that need it instead of skipping
+    /// them, and so does a missing model.
+    /// </summary>
+    static bool Required => Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1";
+
     [RuntimeSuite("--vision", Order = 41)]
     public static async Task Run()
     {
@@ -166,10 +172,12 @@ static class VisionTests
                     (nameof(EmbedsAFaceOfTheFixture), EmbedsAFaceOfTheFixture),
                     (nameof(EmbedAfterDisposeFails), EmbedAfterDisposeFails),
                 ]);
+            else if (Required)
+                failures.Add("the SFace model is required with the library (HS_VISION_REQUIRE_LIBRARY=1) and there is none: run native/fetch-model.sh, or set HS_VISION_MODEL");
             else
                 Console.WriteLine("SKIP vision: no SFace model (native/fetch-model.sh, or HS_VISION_MODEL), so no recogniser is opened");
         }
-        else if (Environment.GetEnvironmentVariable("HS_VISION_REQUIRE_LIBRARY") == "1")
+        else if (Required)
             failures.Add($"an hs_vision library is required (HS_VISION_REQUIRE_LIBRARY=1) and there is none for {Rid}");
         else
             Console.WriteLine($"SKIP vision: no hs_vision library for {Rid}");

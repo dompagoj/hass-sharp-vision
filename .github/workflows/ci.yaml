@@ -104,8 +104,13 @@ jobs:
           rustup toolchain install
           rustup show
           cargo build --release --locked --lib
+      - name: Face recognition model
+        # SFace, which the recogniser tests serve from native/model/: downloaded and checked by its pinned SHA-256, never
+        # committed.
+        if: env.HASS_SHARP_REF != 'none'
+        run: ./native/fetch-model.sh
       - name: C# tests
-        # With HS_VISION_REQUIRE_LIBRARY=1 a missing library fails the tests that need it instead of skipping them.
+        # With HS_VISION_REQUIRE_LIBRARY=1 a missing library or model fails the tests that need it instead of skipping them.
         if: env.HASS_SHARP_REF != 'none'
         env:
           HS_VISION_REQUIRE_LIBRARY: '1'

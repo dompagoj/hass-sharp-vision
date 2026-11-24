@@ -172,7 +172,9 @@ tag.
 The tests that run the detector load a local build of the library: `HS_VISION_LIBRARY` when it is set (the file must
 exist), else `native/dist/libhs_vision-<rid>.so` from `build.sh`, else `native/target/release/libhs_vision.dylib` or
 `.so` from `cargo build --release --lib` in `native/`. Without one they are skipped, unless
-`HS_VISION_REQUIRE_LIBRARY=1`, which fails them instead.
+`HS_VISION_REQUIRE_LIBRARY=1`, which fails them instead. The recogniser's tests also need the SFace model:
+`HS_VISION_MODEL` when it is set (the file must exist), else `native/model/face_recognition_sface_2021dec.onnx` from
+`native/fetch-model.sh`. Without it they are skipped too, and `HS_VISION_REQUIRE_LIBRARY=1` fails them as well.
 
 The pins, from the repository root:
 
