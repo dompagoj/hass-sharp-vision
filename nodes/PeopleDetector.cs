@@ -4,7 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
-/// <summary>The camera of a <see cref="PeopleDetector"/>: each frame it checks, with the faces and people found drawn on it as its settings say.</summary>
+/// <summary>The camera of a <see cref="PeopleDetector"/>: the camera it watches, with the faces and people its newest check found drawn on each frame as its settings say.</summary>
 public class PeopleDetectorCamera : SharpCamera
 {
     /// <summary>The camera keyed <c>camera</c>, with no name of its own: Home Assistant shows the device's.</summary>
@@ -19,14 +19,15 @@ public class PeopleDetectorCamera : SharpCamera
 /// <para>
 /// The step list shows the summary above, so it names no member. The device reports whether a face or a person is seen
 /// (held on for <see cref="StayOnFor"/> after the last), how many are in the newest frame checked, and when one was last
-/// seen; and it has a camera that shows each frame checked with what was found drawn on it as
-/// <see cref="BoxesOnTheCamera"/>, <see cref="FacePointsOnTheCamera"/> and <see cref="NamesOnTheCamera"/> say, its
-/// entities in the order its constructor gives. With <see cref="RecogniseFaces"/> on, it recognises the clear faces of
-/// each frame against the people list every People detector shares (<see cref="PeopleList"/>), says who is in frame
-/// (Recognised, held as seen is), groups the faces it does not know (<see cref="FaceGroups"/>), and learns new looks of
-/// the people it is sure of; its page lists the unknown faces to name or dismiss, the people to rename, merge and
-/// delete, and a person's samples to remove. With <see cref="KeepPictures"/> on too, it keeps the face of each arrival on
-/// Recognised, for a day, in Home Assistant's media folder, and Recognised names it.
+/// seen; and it has a camera that plays the camera watched at its own frame rate, with what the newest check found drawn
+/// on each frame as <see cref="BoxesOnTheCamera"/>, <see cref="FacePointsOnTheCamera"/> and
+/// <see cref="NamesOnTheCamera"/> say, its entities in the order its constructor gives. With
+/// <see cref="RecogniseFaces"/> on, it recognises the clear faces of each frame against the people list every People
+/// detector shares (<see cref="PeopleList"/>), says who is in frame (Recognised, held as seen is), groups the faces it
+/// does not know (<see cref="FaceGroups"/>), and learns new looks of the people it is sure of; its page lists the unknown
+/// faces to name or dismiss, the people to rename, merge and delete, and a person's samples to remove. With
+/// <see cref="KeepPictures"/> on too, it keeps the face of each arrival on Recognised, for a day, in Home Assistant's
+/// media folder, and Recognised names it.
 /// </para>
 /// <para>
 /// Drop it in an entity definition as a node of its own and give it a camera; or derive a C# device node's class from
@@ -77,7 +78,13 @@ public class PeopleDetector : SharpDevice
     // Recognised: who is in frame.
     readonly SharpSensor who;
     VisionDetector? detector;
+    // Two readers of the camera's one live feed, the checks' and the device's camera's, so that neither takes a frame from
+    // the other. The second is none before Start() and once stopped, when a frame may still be asked for, on another thread.
     SharpVideo? video;
+    volatile SharpVideo? played;
+    // What the newest check found, which the device's camera draws: set by the checks, read by its frames, which are made on
+    // other threads. None before the first check has ended, and after one that failed.
+    volatile Findings? findings;
     RecognitionRules rules = RecognitionRules.Default;
     string cameraId = "";
 
@@ -146,7 +153,7 @@ public class PeopleDetector : SharpDevice
     {
         Manufacturer = "HassSharp";
         Model = "People detector";
-        camera = Add(new PeopleDetectorCamera());
+        camera = Add(new PeopleDetectorCamera { OnFrame = Play });
         var faceSeen = Add(new SharpBinarySensor("face_seen", "Face seen") { DeviceClass = "occupancy", RestoreState = false });
         var personSeen = Add(new SharpBinarySensor("person_seen", "Person seen") { DeviceClass = "occupancy", RestoreState = false });
         var faceCount = Add(new SharpSensor("faces", "Faces") { StateClass = "measurement", Icon = "mdi:face-recognition", RestoreState = false });
@@ -162,7 +169,7 @@ public class PeopleDetector : SharpDevice
     [Setting("Camera")]
     public CameraEntity Camera { get; set; }
 
-    /// <summary>How many seconds pass between checks of the camera's newest frame, from 0.1 to 60.</summary>
+    /// <summary>How many seconds pass between checks of the camera's newest frame, from 0.1 to 60. It does not set the frame rate of the device's camera.</summary>
     [Setting("Check every", Minimum = 0.1, Maximum = 60)]
     public double CheckEvery { get; set; } = 0.5;
 
@@ -202,15 +209,15 @@ public class PeopleDetector : SharpDevice
     [Setting("Keep recognition pictures")]
     public bool KeepPictures { get; set; } = false;
 
-    /// <summary>Whether the camera picture shows a box around each face, and around each person when people are detected.</summary>
+    /// <summary>Whether the device's camera shows a box around each face, and around each person when people are detected, where the newest check found them.</summary>
     [Setting("Boxes on the camera")]
     public bool BoxesOnTheCamera { get; set; } = true;
 
-    /// <summary>Whether the camera picture shows the five points of each face: its eyes, its nose and its mouth corners.</summary>
+    /// <summary>Whether the device's camera shows the five points of each face, its eyes, its nose and its mouth corners, where the newest check found them.</summary>
     [Setting("Face points on the camera")]
     public bool FacePointsOnTheCamera { get; set; } = true;
 
-    /// <summary>Whether the camera picture shows a recognised face's name above its box, or where its box would be.</summary>
+    /// <summary>Whether the device's camera shows the name of a face the newest check recognised above its box, or where its box would be.</summary>
     [Setting("Names on the camera")]
     public bool NamesOnTheCamera { get; set; } = true;
 
@@ -235,8 +242,9 @@ public class PeopleDetector : SharpDevice
     protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
 
     /// <summary>
-    /// The faces of a frame that a check goes by: it counts and draws them, and recognises those clear enough. The faces
-    /// the detector found, the best first; a derived class may give others, as the tests do to place a face's landmarks.
+    /// The faces of a frame that a check goes by: it counts them, recognises those clear enough, and has the device's camera
+    /// draw them. The faces the detector found, the best first; a derived class may give others, as the tests do to place a
+    /// face's landmarks.
     /// </summary>
     /// <param name="found">The faces the detector found in the frame.</param>
     protected virtual IReadOnlyList<DetectedFace> FacesFound(IReadOnlyList<DetectedFace> found) => found;
@@ -250,17 +258,21 @@ public class PeopleDetector : SharpDevice
     }
 
     /// <summary>
-    /// Opens the camera's live feed and checks its newest frame every <see cref="CheckEvery"/> seconds. With
-    /// <see cref="RecogniseFaces"/> on, it opens the people list and the unknown groups first, and begins opening the
-    /// recogniser; Recognised has the last visit this detector kept, and is unavailable until a check finds the recogniser
-    /// open, then what that check found: Nobody, unless someone is in frame. With it off, Recognised is unavailable.
+    /// Opens the camera's live feed and checks its newest frame every <see cref="CheckEvery"/> seconds; the device's camera
+    /// plays the same feed. With <see cref="RecogniseFaces"/> on, it opens the people list and the unknown groups first, and
+    /// begins opening the recogniser; Recognised has the last visit this detector kept, and is unavailable until a check
+    /// finds the recogniser open, then what that check found: Nobody, unless someone is in frame. With it off, Recognised is
+    /// unavailable.
     /// With <see cref="KeepPictures"/> off, or with <see cref="RecogniseFaces"/> off, the recognition pictures kept before
     /// are deleted; with both on, those of people deleted or merged away meanwhile, those older than a day and those beyond
     /// the 20 newest are, and the last visit's picture comes back with it while its file is there.
     /// </summary>
     protected sealed override Task Start()
     {
-        video = SharpVideo.Open(Camera, new VideoOptions { MaxWidth = 1280 });
+        // Of one camera and size, so one ffmpeg gives both their frames.
+        var size = new VideoOptions { MaxWidth = 1280 };
+        video = SharpVideo.Open(Camera, size);
+        played = SharpVideo.Open(Camera, size);
         if (!DetectPeople) people.Off();
         if (!RecogniseFaces)
         {
@@ -301,6 +313,9 @@ public class PeopleDetector : SharpDevice
     protected sealed override async Task Stop()
     {
         if (video != null) await video.DisposeAsync();
+        var playing = played;
+        played = null;
+        if (playing != null) await playing.DisposeAsync();
         IFaceRecognizer? open;
         lock (recognition)
         {
@@ -396,9 +411,10 @@ public class PeopleDetector : SharpDevice
 
     // ---- A check ----
 
-    // One check: the next frame, its faces and people, the faces recognised, the camera, and the entities. The timer runs
-    // one at a time, and Stop() runs after the last, so nothing here is shared with another thread but the recogniser,
-    // the people list and the groups, which are safe to share.
+    // One check: the next frame, its faces and people, the faces recognised, what the camera draws of them, and the
+    // entities. The timer runs one at a time, and Stop() runs after the last, so nothing here is shared with another thread
+    // but the recogniser, the people list and the groups, which are safe to share, and the findings, which are replaced
+    // whole.
     async Task Check()
     {
         var hold = TimeSpan.FromSeconds(StayOnFor);
@@ -421,15 +437,15 @@ public class PeopleDetector : SharpDevice
             var now = Now;
             if (RecogniseFaces) before = People.People;
             var names = RecogniseFaces ? Recognise(frame, foundFaces, now, hold) : null;
-            // A copy, shown also when its settings draw nothing on it.
-            var drawing = BoxesOnTheCamera ? Vision.DrawPeople(frame.Copy(), foundPeople) : frame.Copy();
-            using (var drawn = Vision.DrawFaces(drawing, foundFaces, NamesOnTheCamera ? names : null, BoxesOnTheCamera, FacePointsOnTheCamera)) camera.Show(drawn);
+            findings = new(frame.Width, frame.Height, [.. foundFaces], foundPeople, names);
             faces.Checked(foundFaces.Count, now, hold);
             if (DetectPeople) people.Checked(foundPeople.Count, now, hold);
         }
         catch (Exception) when (!Stopping.IsCancellationRequested)
         {
-            // The counts are unknown now; each seen goes off once its hold has passed, so none is left on.
+            // The camera goes on with nothing drawn on it. The counts are unknown now; each seen goes off once its hold has
+            // passed, so none is left on.
+            findings = null;
             var now = Now;
             faces.Failed(now, hold);
             if (DetectPeople) people.Failed(now, hold);
@@ -438,6 +454,29 @@ public class PeopleDetector : SharpDevice
         }
         // After the entities, so that drawing the page cannot fail them.
         if (before != null) Redraw(before);
+    }
+
+    // What a check found: the size of the frame it checked, its faces and people, and each face's name, in the order of the
+    // faces (no list with Recognise faces off). Nothing of it changes once it is made.
+    sealed record Findings(int Width, int Height, IReadOnlyList<DetectedFace> Faces, IReadOnlyList<DetectedPerson> People, IReadOnlyList<string?>? Names);
+
+    // A frame of the device's camera, made while Home Assistant asks for one, one at a time: the camera's next that it has
+    // not shown, with what the newest check found drawn on it as the settings say. It is shown here and none is returned,
+    // as the host keeps a copy of a frame it is given and leaves the frame itself to the garbage collector: this one is
+    // given back once shown, also when that fails.
+    async Task<SharpImage?> Play()
+    {
+        if (played is not { } reader) return null;
+        using var frame = await reader.NextFrameAsync(Stopping);
+        if (frame == null) return null;
+        // The places found are in the pixels of the frame checked, so they are on none of another size.
+        if (findings is { } found && found.Width == frame.Width && found.Height == frame.Height)
+        {
+            if (BoxesOnTheCamera) Vision.DrawPeople(frame, found.People);
+            Vision.DrawFaces(frame, found.Faces, NamesOnTheCamera ? found.Names : null, BoxesOnTheCamera, FacePointsOnTheCamera);
+        }
+        camera.Show(frame);
+        return null;
     }
 
     // Recognises the usable faces of a frame, the largest first and at most MostEmbedded, and expires the unknown groups

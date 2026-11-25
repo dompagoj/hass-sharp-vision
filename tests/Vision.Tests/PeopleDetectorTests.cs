@@ -90,6 +90,14 @@ static class PeopleDetectorTests
                 (nameof(ATurnedFaceHasWiderLimitsThanAFrontalOne), ATurnedFaceHasWiderLimitsThanAFrontalOne),
                 (nameof(TheCameraShowsTheRecognisedName), TheCameraShowsTheRecognisedName),
                 (nameof(TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked), TheCameraDrawsTheBoxesAndThePointsOnlyWhenAsked),
+                (nameof(TheCameraPlaysTheSourceBetweenChecks), TheCameraPlaysTheSourceBetweenChecks),
+                (nameof(TheDrawingsStayUntilTheNextCheck), TheDrawingsStayUntilTheNextCheck),
+                (nameof(NothingIsDrawnBeforeTheFirstCheck), NothingIsDrawnBeforeTheFirstCheck),
+                (nameof(AFailedCheckClearsTheDrawings), AFailedCheckClearsTheDrawings),
+                (nameof(ACheckThatFailsLateClearsTheDrawings), ACheckThatFailsLateClearsTheDrawings),
+                (nameof(AFrameOfAnotherSizeIsNotDrawnOn), AFrameOfAnotherSizeIsNotDrawnOn),
+                (nameof(NoFrameIsMadeWhenNobodyAsks), NoFrameIsMadeWhenNobodyAsks),
+                (nameof(StoppingWhileAFrameIsAwaitedEndsCleanly), StoppingWhileAFrameIsAwaitedEndsCleanly),
                 (nameof(ANewLookIsLearnedOnceAndOnlyWhenAllowed), ANewLookIsLearnedOnceAndOnlyWhenAllowed),
                 (nameof(ARemovedLearnedSampleIsNotLearnedAgainAtOnce), ARemovedLearnedSampleIsNotLearnedAgainAtOnce),
                 (nameof(APersonIsGivenToOneFaceOfACheck), APersonIsGivenToOneFaceOfACheck),
@@ -203,6 +211,16 @@ static class PeopleDetectorTests
         /// <summary>The attributes sent with the state.</summary>
         public JsonObject Attributes => Snapshot["attributes"]!.AsObject();
         public override string ToString() => $"{At.TotalSeconds:0.000} s {Snapshot.ToJsonString()}";
+    }
+
+    /// <summary>
+    /// A frame a camera shows: its size, the luma of its first pixel when it is the video's own pixels (null for a JPEG),
+    /// which tells each grey frame of the fake from the one before it, and what is drawn on it, in order: each drawing's
+    /// kind (<c>Rectangle</c>, <c>Circle</c> or <c>Label</c>), a label's text, and its colour.
+    /// </summary>
+    sealed record Frame(int Width, int Height, int? Luma, (string Kind, string? Text, SharpColor Color)[] Drawn)
+    {
+        public override string ToString() => $"{Width} × {Height}, {(Luma is { } luma ? $"luma {luma}" : "a JPEG")}, {Drawn.Length} drawings";
     }
 
     /// <summary>
@@ -421,26 +439,38 @@ static class PeopleDetectorTests
             return camera!.AddedTo!;
         }
 
+        /// <summary>The camera of <paramref name="definition"/>, while it runs.</summary>
+        public SharpCamera Camera(string definition = "porch") =>
+            Scripts.Entities.TryGet($"{definition}:door:camera", out _, out var entity) && entity is SharpCamera camera ? camera : throw new Exception($"{definition}:door:camera is not a running camera");
+
         /// <summary>
-        /// What is drawn on the picture the camera of <paramref name="definition"/> shows now, in order: each drawing's kind
-        /// (<c>Rectangle</c>, <c>Circle</c> or <c>Label</c>), a label's text, and its colour; none before it shows a picture.
-        /// Read from a copy of the current frame, which has its drawings until a request makes its JPEG; nothing here asks
-        /// for one.
+        /// The camera of <paramref name="definition"/> makes a frame, as it does when Home Assistant asks for one, up to its
+        /// JPEG, which is not made, as its drawings are gone then: what it shows now. None before it shows a frame. It is
+        /// waited for here, at most 10 s, so that a condition and a message can read it.
         /// </summary>
-        public (string Kind, string? Text, SharpColor Color)[] Drawn(string definition = "porch")
+        public Frame? Frame(string definition = "porch")
         {
-            Check(Scripts.Entities.TryGet($"{definition}:door:camera", out _, out var entity) && entity is SharpCamera, $"{definition}:door:camera is a camera");
-            var handed = ((SharpCamera)entity!).Frames.Handed();
+            var camera = Camera(definition);
+            var making = Task.Run(camera.MakeFrame);
+            if (!making.Wait(TimeSpan.FromSeconds(10))) throw new Exception($"{definition}:door:camera made no frame within 10 s");
+            // As the host does with a frame it is given.
+            using (var made = making.Result)
+                if (made != null) camera.Show(made);
+            var handed = camera.Frames.Handed();
             handed.Good?.Image.Dispose();
-            // None before the first check has shown one.
-            if (handed.Current is not { } current) return [];
+            if (handed.Current is not { } current) return null;
             using var image = current.Image;
             Check(current.Jpeg == null, $"{definition}:door:camera's picture was not encoded yet, so it has its drawings");
             var drawings = (System.Collections.IEnumerable)typeof(SharpImage).GetField("drawings", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(image)!;
-            return [.. drawings.Cast<object>().Select(d => (d.GetType().Name, d.GetType().GetProperty("Text")?.GetValue(d) as string, (SharpColor)d.GetType().GetProperty("Color")!.GetValue(d)!))];
+            var video = (PixelFrame?)typeof(SharpImage).GetField("frame", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(image);
+            return new(image.Width, image.Height, video?.Data[0],
+                [.. drawings.Cast<object>().Select(d => (d.GetType().Name, d.GetType().GetProperty("Text")?.GetValue(d) as string, (SharpColor)d.GetType().GetProperty("Color")!.GetValue(d)!))]);
         }
 
-        /// <summary>The texts drawn on the picture the camera of <paramref name="definition"/> shows now.</summary>
+        /// <summary>What is drawn on a frame the camera of <paramref name="definition"/> makes now (<see cref="Frame"/>); nothing before it shows one.</summary>
+        public (string Kind, string? Text, SharpColor Color)[] Drawn(string definition = "porch") => Frame(definition)?.Drawn ?? [];
+
+        /// <summary>The texts drawn on a frame the camera of <paramref name="definition"/> makes now.</summary>
         public string[] Labels(string definition = "porch") => [.. Drawn(definition).Where(d => d.Kind == "Label").Select(d => d.Text!)];
 
         public async ValueTask DisposeAsync()
@@ -558,6 +588,9 @@ static class PeopleDetectorTests
                     var lines = new List<string> { string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{CheckEvery}|{StayOnFor}|{FaceScore}|{PersonScore}|{DetectPeople}|{RecogniseFaces}|{MatchScore}|{LearnNewLooks}|{KeepUnknownFacesFor}|{KeepPictures}|{BoxesOnTheCamera}|{FacePointsOnTheCamera}|{NamesOnTheCamera}|{Manufacturer}|{Model}") };
                     foreach (var e in Entities)
                         lines.Add($"{e.Key}|{e.Name}|{e.GetType().Name}|{e.DeviceClass}|{e.Icon}|{e.RestoreState}|{(e as SharpSensor)?.StateClass}");
+                    // A frame asked for before Start().
+                    var frame = Entities.OfType<PeopleDetectorCamera>().Single().OnFrame?.Invoke();
+                    lines.Add(frame == null ? "makes no frames" : frame.IsCompletedSuccessfully && frame.Result == null ? "no frame yet" : $"{frame.Status}");
                     AppContext.SetData("HassSharp.PeopleDetectorTests.Probe", string.Join("\n", lines));
                 }
             }
@@ -576,8 +609,9 @@ static class PeopleDetectorTests
             "last_face_seen|Last face seen|SharpSensor|timestamp||True|",
             "last_person_seen|Last person seen|SharpSensor|timestamp||True|",
             "recognised|Recognised|SharpSensor||mdi:account-eye|False|",
+            "no frame yet",
         ];
-        Check(seen.Split('\n').SequenceEqual(entities), "the defaults, the metadata and the entities in order:\n" + seen);
+        Check(seen.Split('\n').SequenceEqual(entities), "the defaults, the metadata, the entities in order, and a frame asked for before the start:\n" + seen);
         Console.WriteLine("PASS people detector: the libraries preview valid, the device's fourteen inputs have their bounds and defaults, a missing camera and a check every 0.05 s are refused, and it has its eight entities in order");
     }
 
@@ -1448,6 +1482,7 @@ static class PeopleDetectorTests
         await rig.Saved("points", rig.Definition("Points people", "Points", Arguments(more: [("LearnNewLooks", false), ("BoxesOnTheCamera", false), ("NamesOnTheCamera", false)]), Faking("Points")));
         await rig.Saved("bare", rig.Definition("Bare people", "Bare", Arguments(more: [("LearnNewLooks", false), ("BoxesOnTheCamera", false), ("FacePointsOnTheCamera", false)]), Faking("Bare")));
         await rig.Saved("blank", rig.Definition("Blank people", "Blank", Arguments(more: [("RecogniseFaces", false), ("BoxesOnTheCamera", false), ("FacePointsOnTheCamera", false)])));
+        await rig.Saved("off", rig.Definition("Off people", "Off", Arguments(more: [("LearnNewLooks", false), ("BoxesOnTheCamera", false), ("FacePointsOnTheCamera", false), ("NamesOnTheCamera", false)]), Faking("Off")));
 
         // What each camera draws: its faces' boxes, its people's, its dots, its scores and its names.
         var cyan = SharpColor.FromRgb(0, 200, 255);
@@ -1468,12 +1503,14 @@ static class PeopleDetectorTests
         };
         string All() => string.Join(" | ", expected.Keys.Select(definition => $"{definition}: {Summary(definition)}"));
         await Until(() => expected.All(pair => Summary(pair.Key) == pair.Value), "each camera draws what its options say: " + All(), 20);
-        // Read before a request below makes a picture's JPEG, after which its drawings are gone.
         var summaries = All();
 
         // Both off and no name: the frame itself is shown, with nothing drawn on it.
         await Until(() => rig.Latest("faces", "blank")?.Number == 8, "the blank detector checks the group photo: " + rig.Shown("faces", definition: "blank"), 10);
-        Check(rig.Drawn("blank").Length == 0, "the blank camera draws nothing: " + Summary("blank"));
+        Check(rig.Frame("blank") is { Luma: not null, Drawn.Length: 0 }, "the blank camera shows the video's own frame with nothing drawn on it: " + Summary("blank"));
+        // All three off: not even the name of the face it recognises.
+        await Until(() => fake.Embedded("Off").Length >= 2 * 4 && rig.Latest("faces", "off")?.Number == 8, "the detector with all three off recognises the group photo's faces", 10);
+        Check(rig.Frame("off") is { Luma: not null, Drawn.Length: 0 }, "with all three off, the camera shows the video's own frame with nothing drawn on it: " + Summary("off"));
         var frame = SharpImage.FromPixels(640, 426, SharpPixelFormat.Yuv420, Group).ToPixels();
         int[] edges = [.. spots.SelectMany(spot =>
         {
@@ -1493,7 +1530,266 @@ static class PeopleDetectorTests
         var boxed = await CameraPixels("boxes");
         var boxedGreen = edges.Count(at => VisionTests.Greenish(boxed, at));
         Check(boxedGreen * 2 >= edges.Length, $"the boxes camera has its faces' top edges green: {boxedGreen} of {edges.Length}");
-        Console.WriteLine($"PASS people detector: the camera draws boxes and face points by default, each only with its option on, a name in every way, and with both off and no name shows the frame as it is ({summaries})");
+        Console.WriteLine($"PASS people detector: the camera draws boxes and face points by default, each only with its option on, a name in every way, and with both off and no name, or all three off, shows the frame as it is ({summaries})");
+    }
+
+    // ---- The camera's frames ----
+
+    /// <summary>
+    /// The faces the detectors of <see cref="Faking"/> find, through the hook <see cref="Fake"/> places them with, for a test
+    /// without one: as found, but a check waits with its first face while they are held, and fails while they fail.
+    /// </summary>
+    sealed class Finding : IDisposable
+    {
+        const string Hook = "HassSharp.PeopleDetectorTests.Faces";
+        readonly ManualResetEventSlim open = new(true);
+        volatile bool failing, held;
+
+        public Finding() => AppContext.SetData(Hook, (Func<string, float[], float[]>)Find);
+
+        /// <summary>The next check waits until <see cref="Release"/>, or for 30 seconds at most.</summary>
+        public void Hold() => open.Reset();
+
+        /// <summary>Whether a check waits now.</summary>
+        public bool Held => held;
+
+        /// <summary>Lets the check that waits go on.</summary>
+        public void Release() => open.Set();
+
+        /// <summary>Whether the checks of a frame with a face fail.</summary>
+        public bool Fails { set => failing = value; }
+
+        float[] Find(string type, float[] face)
+        {
+            if (!open.IsSet)
+            {
+                held = true;
+                try { open.Wait(TimeSpan.FromSeconds(30)); }
+                finally { held = false; }
+            }
+            return failing ? throw new InvalidOperationException("The faces are not found") : face;
+        }
+
+        public void Dispose()
+        {
+            Release();
+            AppContext.SetData(Hook, null);
+        }
+    }
+
+    // What is drawn of the group photo without names: 8 faces' boxes, scores and 40 dots, and 7 people's boxes and scores.
+    const int DrawnOfTheGroup = 70;
+
+    /// <summary>Waits until the frames the camera of <paramref name="rig"/> makes are the fake's grey ones, each of its own luma, after <see cref="Hide"/>.</summary>
+    static Task Grey(Rig rig) => Until(() => rig.Frame()?.Luma is { } one && rig.Frame()?.Luma is { } other && one != other, () => "the camera's frames are the source's grey ones, each newer than the last: " + rig.Frame());
+
+    /// <summary>Makes <paramref name="count"/> frames of the camera of <paramref name="rig"/>, the source showing grey ones: each is newer than the last, with <paramref name="drawn"/> drawings.</summary>
+    static void GreyFrames(Rig rig, int count, int drawn, string what)
+    {
+        int? last = null;
+        for (var i = 0; i < count; i++)
+        {
+            var frame = rig.Frame();
+            Check(frame is { Luma: not null } && frame.Luma != last, $"{what}: frame {i} is a newer one of the source, of another luma than {last}: {frame}");
+            Check(frame!.Drawn.Length == drawn, $"{what}: frame {i} has {drawn} drawings, not {frame.Drawn.Length}");
+            last = frame.Luma;
+        }
+    }
+
+    // With a check a minute, there is one, at the start: each frame Home Assistant asks for after it is a newer one of the
+    // source, with that check's drawings on it, and one ffmpeg gives them all.
+    static async Task TheCameraPlaysTheSourceBetweenChecks()
+    {
+        var spot = (await Spots())[0];
+        using var clock = new Clock();
+        Show();
+        await using var rig = await Rig.Start("plays");
+        // Without recognition, the clock is read by the checks alone, once each.
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("RecogniseFaces", false), ("CheckEvery", 60)]), Faking("Porch")));
+        await Until(() => rig.Latest("faces")?.Number == 8 && rig.Latest("people")?.Number == 7, () => "the check finds the group photo's faces and people: " + rig.Shown("faces") + " | " + rig.Shown("people"), 10);
+        Hide();
+        await Grey(rig);
+        GreyFrames(rig, 20, DrawnOfTheGroup, "after the check");
+
+        // As Home Assistant gets them.
+        var pictures = new List<byte[]>();
+        var asking = Stopwatch.StartNew();
+        while (pictures.Count < 10)
+        {
+            Check(asking.Elapsed < TimeSpan.FromSeconds(10), $"Home Assistant gets 10 pictures, each unlike the others, within 10 s: {pictures.Count}");
+            var picture = await rig.Api.CameraImage("porch:door:camera");
+            if (!pictures.Any(p => p.SequenceEqual(picture))) pictures.Add(picture);
+        }
+        int row = Math.Clamp((int)MathF.Round(spot.Y) + 1, 0, 425), left = Math.Max(0, (int)MathF.Round(spot.X) + 2), right = Math.Min(640, (int)MathF.Round(spot.X + spot.Width) - 2);
+        foreach (var picture in pictures)
+        {
+            var rgb = SharpImage.Load(picture).ToPixels();
+            var green = Enumerable.Range(left, right - left).Count(column => VisionTests.Greenish(rgb, (row * 640 + column) * 3));
+            Check(rgb.Length == 640 * 426 * 3 && green * 2 >= right - left, $"each has the first face's top edge green: {green} of {right - left} pixels");
+        }
+        Check(clock.Reads("Porch") == 1, $"one check was run meanwhile: {clock.Reads("Porch")}");
+        Check(CameraFeeds.All is [{ EntityId: "camera.porch", Started: 1 }], "one feed, whose ffmpeg was started once, gives the checks and the camera their frames: " + string.Join(", ", CameraFeeds.All.Select(f => $"{f.EntityId} {f.Started}")));
+        Console.WriteLine("PASS people detector: with a check a minute, the camera shows the source's newest frames with the check's drawings, all of one ffmpeg");
+    }
+
+    // A check that takes long holds nothing up: the frames go on with the last check's drawings until it has ended, and
+    // then have its own.
+    static async Task TheDrawingsStayUntilTheNextCheck()
+    {
+        using var finding = new Finding();
+        Show();
+        await using var rig = await Rig.Start("drawings-stay");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("RecogniseFaces", false)), Faking("Porch")));
+        await Until(() => rig.Drawn().Length == DrawnOfTheGroup, () => "the group photo's faces and people are drawn: " + rig.Drawn().Length, 10);
+        finding.Hold();
+        await Until(() => finding.Held, "a check is held as it finds its faces", 10);
+        Hide();
+        await Grey(rig);
+        GreyFrames(rig, 10, DrawnOfTheGroup, "while a check is held");
+        Check(finding.Held, "the check is held still");
+        finding.Release();
+        await Until(() => rig.Drawn().Length == 0, () => "once a check has found no one, nothing is drawn: " + rig.Drawn().Length, 10);
+        GreyFrames(rig, 5, 0, "after a check that found no one");
+        Console.WriteLine("PASS people detector: while a check runs, the camera goes on with the drawings of the one before it, until it has ended");
+    }
+
+    static async Task NothingIsDrawnBeforeTheFirstCheck()
+    {
+        using var finding = new Finding();
+        finding.Hold();
+        Show();
+        await using var rig = await Rig.Start("before-a-check");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("RecogniseFaces", false)), Faking("Porch")));
+        await Until(() => finding.Held, "the first check is held as it finds its faces", 10);
+        Hide();
+        await Grey(rig);
+        GreyFrames(rig, 5, 0, "before the first check has ended");
+        var picture = SharpImage.Load(await rig.Api.CameraImage("porch:door:camera"));
+        Check((picture.Width, picture.Height) == (640, 426), $"Home Assistant gets the frame: {picture.Width} × {picture.Height}");
+        Check(finding.Held && rig.Of("faces").All(p => p.Value == null), "the first check is held still: " + rig.Shown("faces"));
+        Show();
+        finding.Release();
+        await Until(() => rig.Drawn().Length == DrawnOfTheGroup, () => "once it has ended, what it found is drawn: " + rig.Drawn().Length, 10);
+        Console.WriteLine("PASS people detector: before the first check has ended, the camera shows the source as it is");
+    }
+
+    static async Task AFailedCheckClearsTheDrawings()
+    {
+        using var finding = new Finding();
+        Show();
+        await using var rig = await Rig.Start("failed-clears");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("RecogniseFaces", false)), Faking("Porch")));
+        await Until(() => rig.Drawn().Length == DrawnOfTheGroup, () => "the group photo's faces and people are drawn: " + rig.Drawn().Length, 10);
+        finding.Fails = true;
+        await Until(() => rig.Home.Logs(PyLogLevel.Error).Length > 0, () => "a check fails: " + rig.Lines(), 10);
+        // Every check fails from now on, as the photo is still shown.
+        for (var i = 0; i < 10; i++)
+        {
+            var frame = rig.Frame();
+            Check(frame is { Luma: not null, Drawn.Length: 0 }, "after a failed check the camera shows the source's frame with nothing drawn on it: " + frame);
+        }
+        finding.Fails = false;
+        await Until(() => rig.Drawn().Length == DrawnOfTheGroup, () => "after the next that works, what it found is drawn: " + rig.Drawn().Length, 10);
+        Check(rig.Home.Logs(PyLogLevel.Error) is [var error] && error.EndsWith("The faces are not found", StringComparison.Ordinal), "the checks' failure is the one error: " + rig.Lines());
+        Console.WriteLine("PASS people detector: a check that fails clears the drawings, the frames go on, and the next check that works draws again");
+    }
+
+    // A check that fails after what it found was given to the camera, as it sets the entities, clears that too.
+    static async Task ACheckThatFailsLateClearsTheDrawings()
+    {
+        const string counted = "            faces.Checked(foundFaces.Count, now, hold);\n";
+        var source = Committed();
+        Check(source.Split(counted).Length == 2, "PeopleDetector.cs counts the faces of a check once");
+        using var clock = new Clock();
+        Show();
+        await using var rig = await Rig.Start("late-failure", people: source.Replace(counted, "            if (DetectPeople) throw new InvalidOperationException(\"The faces are not counted\");\n" + counted));
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("RecogniseFaces", false), ("CheckEvery", 60)]), Faking("Porch")));
+        await Until(() => rig.Home.Logs(PyLogLevel.Error).Any(l => l.EndsWith("The faces are not counted", StringComparison.Ordinal)), () => "the check fails: " + rig.Lines(), 10);
+        Hide();
+        await Grey(rig);
+        GreyFrames(rig, 5, 0, "after a check that failed late");
+        Console.WriteLine("PASS people detector: a check that fails as it sets the entities clears its drawings");
+    }
+
+    // The places of what a check found are in the pixels of the frame it checked, so a frame of another size has nothing
+    // drawn on it.
+    static async Task AFrameOfAnotherSizeIsNotDrawnOn()
+    {
+        // After its 100th frame, five seconds in, the fake gives frames of half the size.
+        Source("camera.porch", Porch("resize=100:320:214,"));
+        Show();
+        await using var rig = await Rig.Start("resized");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: [("RecogniseFaces", false), ("CheckEvery", 60)])));
+        await Until(() => rig.Drawn().Length == DrawnOfTheGroup, () => "what the check found is drawn: " + rig.Drawn().Length, 10);
+        Frame? frame = null;
+        await Until(() =>
+        {
+            frame = rig.Frame();
+            Check(frame?.Width == 320 || frame is { Width: 640, Drawn.Length: DrawnOfTheGroup }, "a frame of the size checked has the drawings: " + frame);
+            return frame?.Width == 320;
+        }, () => "the source gives frames of another size: " + frame, 15);
+        for (var i = 0; i < 5; i++, frame = rig.Frame()) Check(frame is { Width: 320, Height: 214, Luma: not null, Drawn.Length: 0 }, "a frame of another size than the one checked has nothing drawn on it: " + frame);
+        Console.WriteLine("PASS people detector: a frame of another size than the one checked is shown with nothing drawn on it");
+    }
+
+    static async Task NoFrameIsMadeWhenNobodyAsks()
+    {
+        using var clock = new Clock();
+        Show();
+        await using var rig = await Rig.Start("nobody-asks");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("RecogniseFaces", false)), Faking("Porch")));
+        await Until(() => rig.Latest("faces")?.Number == 8, () => "the checks run: " + rig.Shown("faces"), 10);
+        await Checks(clock, 5);
+        var frames = rig.Camera().Frames;
+        Check(frames.Begun == 0 && frames.Handed().Current == null, $"no frame was made or shown: {frames.Begun} made");
+
+        // Someone looks, and looks away again.
+        byte[] jpeg = [];
+        for (var i = 0; i < 3; i++) jpeg = await rig.Api.CameraImage("porch:door:camera");
+        var begun = frames.Begun;
+        await Checks(clock, 5);
+        Check(begun > 0 && frames.Begun == begun && ReferenceEquals(frames.Handed().Current?.Jpeg, jpeg), $"after the last request no frame was made or shown: {begun} made, then {frames.Begun}");
+        Console.WriteLine("PASS people detector: a frame of the camera is made only when Home Assistant asks for one; the checks run without");
+    }
+
+    static async Task StoppingWhileAFrameIsAwaitedEndsCleanly()
+    {
+        // The fake gives one frame and hangs, and is left to.
+        CameraFeeds.StallLimit = TimeSpan.FromSeconds(60);
+        Source("camera.porch", Porch("stall=1,"));
+        Show();
+        await using var rig = await Rig.Start("stop-awaited");
+        await rig.Saved("porch", rig.Definition("Porch people", "Porch", Arguments(more: ("RecogniseFaces", false))));
+        await Until(() => rig.Latest("faces")?.Number == 8, () => "the checks run: " + rig.Shown("faces"), 10);
+        var camera = rig.Camera();
+        // The frame the check took is the camera's too, which reads for itself; then there is none.
+        Check((await rig.Api.CameraImage("porch:door:camera").WaitAsync(TimeSpan.FromSeconds(5))).Length > 0, "the camera gives the frame that was checked");
+        var pending = rig.Api.CameraImage("porch:door:camera");
+        await Until(() =>
+        {
+            // A request that comes right after shares the frame before it: the next is asked for.
+            if (camera.Frames.Begun < 2 && pending.IsCompleted) pending = rig.Api.CameraImage("porch:door:camera");
+            return camera.Frames.Begun >= 2;
+        }, "a request makes a second frame", 10);
+        Check(camera.Frames.Busy && !pending.IsCompleted, "a request waits for the next frame of a source that gives none");
+        // The frame shown was given back by all but the feed, whose newest it still is, and this probe of it.
+        using (var newest = CameraFeeds.Newest("camera.porch", (1280, 0)) ?? throw new Exception("camera.porch has a newest frame"))
+        {
+            var held = (PixelFrame)typeof(SharpImage).GetField("frame", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(newest)!;
+            await Until(() => held.References == 2, () => $"the frame shown was given back: {held.References - 2} references left");
+        }
+
+        var stopping = Stopwatch.StartNew();
+        await rig.Ok(rig.Api.EntityRequest, new { operation = "set_enabled", id = "porch", enabled = false });
+        await Until(() => rig.Home.Logs(PyLogLevel.Debug).Contains("Porch people: People detector stopped"), () => "the device says it stopped: " + rig.Lines());
+        Check(stopping.Elapsed < TimeSpan.FromSeconds(2), $"it stops in under 2 s: {stopping.Elapsed.TotalSeconds:0.000} s");
+        // Overtaken by the stop, the request is answered with the last good frame.
+        Check((await pending.WaitAsync(TimeSpan.FromSeconds(5))).Length > 0, "the request that waited is answered");
+        await Until(() => CameraFeeds.All.All(f => f.EntityId != "camera.porch"), "the live feed of camera.porch closes");
+        Check(await camera.MakeFrame() == null, "a frame asked for after the stop is none");
+        var said = rig.Home.Logs(PyLogLevel.Error).Concat(rig.Home.Logs(PyLogLevel.Warn)).ToArray();
+        Check(said.Length == 0, "nothing is logged as a warning or an error: " + string.Join(" | ", said));
+        Console.WriteLine("PASS people detector: a stop while the camera waits for a frame ends at once, logs nothing, and leaves no frame held");
     }
 
     static async Task ANewLookIsLearnedOnceAndOnlyWhenAllowed()

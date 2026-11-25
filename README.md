@@ -80,7 +80,7 @@ It has fourteen settings:
 | Setting | Default | What it is |
 | --- | --- | --- |
 | Camera | none (required) | The Home Assistant camera to watch. |
-| Check every | 0.5 | Seconds between checks of the camera's newest frame, from 0.1 to 60. |
+| Check every | 0.5 | Seconds between checks of the camera's newest frame, from 0.1 to 60. It does not set the frame rate of [the device's camera](#the-devices-camera). |
 | Stay on for | 10 | Seconds that Face seen and Person seen stay on after the last frame with one, from 0 to 3600; Recognised holds a name as long. |
 | Face score | 0.7 | The lowest score a face counts with, from 0.1 to 1. Lower finds more, and more that are not faces. |
 | Person score | 0.45 | The lowest score a person counts with, from 0.1 to 1. Lower finds more, and more that are not people. |
@@ -90,15 +90,15 @@ It has fourteen settings:
 | Learn new looks | on | Whether a face recognised beyond doubt is kept as a further sample of its person. |
 | Keep unknown faces for | 7 | Whole days a face nobody has named is kept after it was last seen, from 1 to 365. |
 | Keep recognition pictures | off | Whether the face of each arrival on Recognised is kept for a day in Home Assistant's media folder, and named on Recognised (see [Recognition pictures](#recognition-pictures)). Every Home Assistant user can open the media folder, so it is off unless you turn it on. Off, no picture is kept, and those kept before are deleted at the next start. |
-| Boxes on the camera | on | Whether the camera picture shows a box around each face, and around each person when people are detected, with its score above it. Off, neither boxes nor scores are drawn. |
-| Face points on the camera | on | Whether the camera picture shows the five points of each face: its eyes, its nose and its mouth corners. |
-| Names on the camera | on | Whether the camera picture shows a recognised face's name above its box, or where its box would be with **Boxes on the camera** off. Off, every face with a box shows its score. |
+| Boxes on the camera | on | Whether the device's camera shows a box around each face, and around each person when people are detected, with its score above it, where the newest check found them. Off, neither boxes nor scores are drawn. |
+| Face points on the camera | on | Whether the device's camera shows the five points of each face, its eyes, its nose and its mouth corners, where the newest check found them. |
+| Names on the camera | on | Whether the device's camera shows the name of a face the newest check recognised above its box, or where its box would be with **Boxes on the camera** off. Off, every face with a box shows its score. |
 
 The device (manufacturer HassSharp, model People detector) has eight entities, in this order:
 
 | Entity | Key | What it shows |
 | --- | --- | --- |
-| Camera | `camera` | Each frame checked, with the faces and people found drawn on it as the three settings on the camera say; with all three off, the frame as it is. It has no name of its own, so Home Assistant shows the device's. |
+| Camera | `camera` | The camera watched, at its own frame rate, with the faces and people the newest check found drawn on each frame as the three settings on the camera say; with all three off, the frames as they are (see [The device's camera](#the-devices-camera)). It has no name of its own, so Home Assistant shows the device's. |
 | Face seen | `face_seen` | Binary sensor (occupancy): on while a face is seen. |
 | Person seen | `person_seen` | Binary sensor (occupancy): on while a person is seen. |
 | Faces | `faces` | Sensor (measurement): how many faces the newest frame checked has. |
@@ -116,11 +116,11 @@ unavailable ([below](#recognised)), and the others start unknown.
 
 The device opens the camera's live feed, at most 1280 pixels wide, when the definition starts, and checks it on its
 interval whether or not anyone watches the camera. Each check takes the newest frame, finds the faces at an input size
-of 640 and the people at 416, recognises the faces it can (below), shows the frame with what it found on the device's
-camera, and sets the entities. Measured in the Home Assistant container on one arm64 host, faces at 640 take about
-29 ms and people at 416 about 35 ms. Each face recognised adds about 45 ms there, measured under load: a check with
-four faces recognised took about 250 ms, with people detected too and a second detector running beside it. So with a
-short **Check every** and several faces in view the detector checks less often than set.
+of 640 and the people at 416, recognises the faces it can (below), gives what it found to the device's camera to draw,
+and sets the entities. Measured in the Home Assistant container on one arm64 host, faces at 640 take about 29 ms and
+people at 416 about 35 ms. Each face recognised adds about 45 ms there, measured under load: a check with four faces
+recognised took about 250 ms, with people detected too and a second detector running beside it. So with a short
+**Check every** and several faces in view the detector checks less often than set.
 
 The native library is downloaded once, the first time the definition starts, and loaded from the kept file after
 that. There are builds for Linux on arm64 and x64, with musl (the Home Assistant container) and with glibc:
@@ -132,11 +132,30 @@ failure for a reason is logged as an error, and each one after that at debug lev
 People are unavailable, and Face seen and Person seen go off once their hold has passed. A camera that has never
 given a frame leaves them unknown.
 
+### The device's camera
+
+**Check every** is how often faces and people are looked for; the device's camera plays the camera watched at that
+camera's own frame rate, at most 30 frames a second and 1280 pixels wide, with what the newest check found drawn on
+every frame.
+
+- Frames are made only while someone watches: when nobody asks Home Assistant for the camera's picture, no frame is
+  drawn on or encoded, and the checks go on as they do. The checks and the device's camera read the same live feed, so
+  watching it opens no second stream. Of a camera without a live feed, Home Assistant takes one picture after another
+  instead, for as long as someone watches.
+- The drawings stay where they are until the next check has ended, so the boxes trail someone who moves by up to
+  **Check every** and the time the check itself takes.
+- Nothing is drawn before the first check has ended, after a check that failed (until one works), or on a frame of
+  another size than the one checked.
+- When the camera gives no frames, the last good picture is kept for 30 seconds, as HassSharp does for every camera
+  that makes its frames; after that the device's camera gives none.
+- A `camera.snapshot` of the device's camera is the newest frame with the newest check's drawings on it, not exactly
+  the frame that was checked.
+
 ## Recognising faces
 
 With **Recognise faces** on, the People detector learns who people are from you. It shows the faces it does not know
 on its page, one card for each person it keeps seeing; you name each person once, and from then on every People
-detector of the installation recognises them and draws their name on its camera picture.
+detector of the installation recognises them and draws their name on its camera.
 
 A person has a first name and, if you give one, a last name, each at most 64 characters. Their full name, the first
 name and the last name, is what the page shows, and no two people may have the same full name, whatever its case: a
@@ -147,9 +166,9 @@ of 1.1.0, which had one name a person, keeps each name whole as the person's fir
 **Save** on their card if you like.
 
 It tells automations who is there with its **Recognised** sensor ([below](#recognised)). It does not follow a face from
-frame to frame: the camera picture names only the faces of the frame it shows, while Recognised holds a name for **Stay
-on for**. It does not recognise anyone by their body, clothes or gait. People cannot be imported, exported or named from
-uploaded photos. It is not a lock (see [Trust and privacy](#trust-and-privacy)).
+frame to frame: the device's camera names only the faces the newest check recognised, where they were then, while
+Recognised holds a name for **Stay on for**. It does not recognise anyone by their body, clothes or gait. People cannot
+be imported, exported or named from uploaded photos. It is not a lock (see [Trust and privacy](#trust-and-privacy)).
 
 ### Which faces are used
 
