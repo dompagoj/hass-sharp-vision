@@ -2,9 +2,10 @@
 # Builds libhs_vision.so, the hs_vision C library, for every Linux runtime Home Assistant runs on:
 # linux-musl-arm64 and linux-musl-x64 (the Home Assistant container, Alpine) and linux-arm64 and linux-x64
 # (glibc 2.31 or later, built on Debian bullseye). Each build runs in Docker from the pinned toolchain, is checked
-# (musl: it needs only libc.musl and libgcc_s; glibc: no symbol newer than GLIBC_2.31) and is loaded once
-# through ctypes: a musl build in the Home Assistant image it runs in, a glibc build in Debian bullseye. Loaded, it
-# must return the ABI version of src/lib.rs's ABI_VERSION, open a detector and export the recogniser's functions.
+# (musl: it needs only libc.musl and libgcc_s and exports only the C ABI; glibc: no symbol newer than GLIBC_2.31) and
+# is loaded once through ctypes: a musl build in the Home Assistant image it runs in, a glibc build in Debian bullseye.
+# Loaded, it must return the ABI version of src/lib.rs's ABI_VERSION, open a detector and export the recogniser's
+# functions, and a musl build, whose allocator is mimalloc, must detect without faulting its buffers in again.
 #
 #   native/build.sh [--out DIR] [RID ...]   builds the RIDs given, or all four, into DIR (default native/dist),
 #                                           as DIR/libhs_vision-<rid>.so with DIR/SHA256SUMS for them
@@ -107,6 +108,9 @@ apk add --no-cache musl-dev binutils >/dev/null
 mkdir /src
 tar -xf - -C /src
 cd /src
+# mimalloc names the date and time it was compiled at, which gcc takes from SOURCE_DATE_EPOCH: the same build gives the
+# same bytes, so that a release has the checksums Vision.cs was given before it.
+export SOURCE_DATE_EPOCH=0
 RUSTFLAGS="-C target-feature=-crt-static" cargo build --release --locked --lib
 so=target/release/libhs_vision.so
 needed=$(readelf -d "$so" | sed -n "s/.*(NEEDED).*\[\(.*\)\]/\1/p")
@@ -117,6 +121,16 @@ for lib in $needed; do
   case $lib in
     libc.musl-*.so.1 | libgcc_s.so.1) ;;
     *) echo "unexpected NEEDED $lib: a musl build may need only libc.musl-*.so.1 and libgcc_s.so.1"; exit 1 ;;
+  esac
+done
+# CPython has a mimalloc of its own in the process: were the mi_ functions of either exported, one could be used for
+# the other. Nothing but the C ABI is.
+exports=$(nm -D --defined-only "$so" | awk "{ print \$NF }")
+[ -n "$exports" ] || { echo "nm found no exports in $so, so they cannot be checked"; exit 1; }
+for name in $exports; do
+  case $name in
+    hs_vision_*) ;;
+    *) echo "unexpected export $name: a musl build may export only hs_vision_*"; exit 1 ;;
   esac
 done
 cat "$so" >&3
@@ -169,8 +183,26 @@ l.hs_vision_close(ctypes.c_void_p(d))
 print(all(hasattr(l,n) for n in ("hs_vision_open_recognizer","hs_vision_embed","hs_vision_close_recognizer")))'
 SMOKE_EXPECTED=$(printf '%s\nTrue\nTrue' "$ABI_VERSION")
 
-# Loads a musl build in the Home Assistant image of its platform. Home Assistant publishes both platforms, so a
-# failed pull stops the script.
+# Prints how many MiB of pages a detection faults in once the detector is warm: the minor faults of 20 calls on a blank
+# picture, after 5 calls, by the kernel's count for the process.
+FAULTS='import ctypes,resource,sys
+l=ctypes.CDLL(sys.argv[1])
+l.hs_vision_open.restype=ctypes.c_void_p
+d=ctypes.c_void_p(l.hs_vision_open())
+rgb=bytes([128])*(1280*720*3)
+out=(ctypes.c_float*15)()
+def calls(n):
+  for _ in range(n):
+    if l.hs_vision_faces(d,rgb,1280,720,1280*3,640,ctypes.c_float(0.7),out,1)<0: sys.exit("hs_vision_faces failed")
+  return resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+before=calls(5)
+print((calls(20)-before)*resource.getpagesize()//20//1048576)'
+# The most a musl build may fault in. mimalloc keeps the memory it has and a detection faults in none; musl's own
+# allocator maps its buffers again each time, and 1.1.0, which used it, faulted in 60 MiB (arm64) and 64 (x64).
+FAULTS_MAX=16
+
+# Loads a musl build in the Home Assistant image of its platform, then bounds its page faults there. Home Assistant
+# publishes both platforms, so a failed pull stops the script.
 smoke_musl() {
   local platform=$1 so=$2 out
   docker pull -q --platform "$platform" "$HA_IMAGE" >/dev/null ||
@@ -179,6 +211,12 @@ smoke_musl() {
     -c 'cat > /tmp/libhs_vision.so && python3 -c "$SMOKE" /tmp/libhs_vision.so' <"$so")
   echo "smoke in $HA_IMAGE ($platform): $(echo "$out" | tr '\n' ' ')" >&2
   [ "$out" = "$SMOKE_EXPECTED" ] || die "smoke failed for $so: expected $(echo "$SMOKE_EXPECTED" | tr '\n' ' ')"
+  out=$(docker run -i --rm --platform "$platform" --entrypoint sh -e FAULTS="$FAULTS" "$HA_IMAGE" \
+    -c 'cat > /tmp/libhs_vision.so && python3 -c "$FAULTS" /tmp/libhs_vision.so' <"$so") ||
+    die "the page faults of $so could not be measured"
+  echo "page faults in $HA_IMAGE ($platform): $out MiB a detection" >&2
+  [ "$out" -le "$FAULTS_MAX" ] ||
+    die "$so faults in $out MiB a detection, more than $FAULTS_MAX: does it still allocate with mimalloc?"
 }
 
 build_rid() {

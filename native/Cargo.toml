@@ -1,6 +1,6 @@
 [package]
 name = "hs_vision"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 publish = false
 description = "Face detection and recognition and person detection for HassSharp: YuNet, SFace and YOLOX-nano on tract, behind a small C ABI"
@@ -11,6 +11,15 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Without its default transformers feature, which neither model needs: 0.4 to 0.8 MiB smaller.
 tract-onnx = { version = "=0.23.10", default-features = false }
+
+# The musl builds' allocator (src/lib.rs). musl's own gives every large buffer back to the kernel as it is freed, so
+# each inference maps its buffers again, page by page: a check with four embeddings took 192 ms on it and 135 ms on
+# mimalloc or on glibc's, which gains nothing. mimalloc keeps 75 to 110 MiB more between checks. Without
+# local_dynamic_tls, libmimalloc-sys compiles for the initial-exec TLS model, which is for code loaded with the program:
+# this library is loaded by dlopen. no_thp leaves out mimalloc's request for huge pages, which held up to 28 MiB more
+# between checks and made them no faster.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "=0.1.52", default-features = false, features = ["local_dynamic_tls", "no_thp"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg"] }

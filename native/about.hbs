@@ -6,8 +6,9 @@ and embeds two models. cargo-about made this list from Cargo.lock for the librar
 text is given once, followed by the crates and versions it covers; texts that differ only in their copyright lines
 stay apart, because those lines go with the binary. The list also names the procedural macros and the crates they
 use (such as serde_derive, syn and unicode-ident), which run while the library is built and are not linked into it;
-`cargo tree -e normal,no-proc-macro` in native/ lists only what is linked. The Rust standard library, which the
-library also links, follows the crates, and the models' licences come last.
+`cargo tree -e normal,no-proc-macro --target <target>` in native/ lists only what is linked. mimalloc and
+libmimalloc-sys, with the C library mimalloc that libmimalloc-sys bundles, are linked by the musl builds only. The
+Rust standard library, which the library also links, follows the crates, and the models' licences come last.
 
 {{#each licenses}}
 ================================================================================

@@ -22,6 +22,13 @@ pub use detector::Detector;
 use detector::Picture;
 pub use recognizer::Recognizer;
 
+/// In a musl build, mimalloc allocates everything this library's Rust code does (Cargo.toml says why); other builds use
+/// the system's allocator. It is the library's own and its `mi_` functions are not exported, so it and the mimalloc
+/// CPython has in the same process leave each other alone.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The version of the C ABI, which the caller checks before using anything else.
 pub const ABI_VERSION: u32 = 2;
 

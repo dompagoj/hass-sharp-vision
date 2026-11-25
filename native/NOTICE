@@ -41,13 +41,21 @@ Linked code
 
 The library statically links tract (https://github.com/sonos/tract), which is MIT OR Apache-2.0, and the crates it
 depends on. Each of them is available under the MIT or the Apache-2.0 licence (some also under others, such as the
-Unlicense), except foldhash, which is Zlib-licensed. The crates and their licences are listed by
+Unlicense), except foldhash, which is Zlib-licensed.
 
-  cargo tree -e normal --format '{p} {l}'
+The musl builds (linux-musl-arm64 and linux-musl-x64) also statically link mimalloc, their allocator:
+  mimalloc 3 (https://github.com/microsoft/mimalloc), Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen,
+  MIT License, bundled by the crate libmimalloc-sys; and the crates mimalloc and libmimalloc-sys
+  (https://github.com/purpleprotocol/mimalloc_rust), Copyright 2019 Octavian Oncescu, MIT License.
+The glibc builds use the system's allocator and do not link it.
+
+The crates and their licences are listed, for a musl build, by
+
+  cargo tree -e normal --target aarch64-unknown-linux-musl --format '{p} {l}'
 
 run in this directory. That list also shows the procedural macros (such as derive-new and zerocopy-derive) and what
 they use (such as unicode-ident, which is also under Unicode-3.0); those run while the library is built and are not
-linked into it. `cargo tree -e normal,no-proc-macro` lists only what is linked.
+linked into it. With `-e normal,no-proc-macro` it lists only what is linked.
 
 The library is built with Rust 1.99.1 and statically links Rust's standard library (std, core, alloc and the crates
 they bundle, such as hashbrown, compiler_builtins, gimli, addr2line and miniz_oxide), which is MIT OR Apache-2.0

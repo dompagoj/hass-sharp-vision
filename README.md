@@ -560,9 +560,14 @@ The RIDs are `linux-musl-arm64`, `linux-musl-x64`, `linux-arm64` and `linux-x64`
 
 The only prerequisites are bash and a Docker engine (on macOS, colima). Nothing is installed on the host: each build
 runs in a container with the pinned toolchain, Rust 1.99.1. A musl build is made in `rust:1.99.1-alpine`, checked to
-need only `libc.musl` and `libgcc_s`, and loaded in Home Assistant's image, `homeassistant/home-assistant:2026.11.1`;
-if that image cannot be pulled, the build fails. A glibc build is made in Debian bullseye, checked to use no symbol
-newer than `GLIBC_2.31`, and loaded there.
+need only `libc.musl` and `libgcc_s` and to export only the C ABI, and loaded in Home Assistant's image,
+`homeassistant/home-assistant:2026.11.1`; if that image cannot be pulled, the build fails. A glibc build is made in
+Debian bullseye, checked to use no symbol newer than `GLIBC_2.31`, and loaded there.
+
+The musl builds allocate with mimalloc, linked statically: musl's own allocator gives each large buffer back to the
+kernel as it is freed, and a detection then faults it in again, page by page. The build fails if a detection in Home
+Assistant's image faults in more than 16 MiB: with musl's allocator it was 60 to 64, with mimalloc it is none. The
+glibc builds use the system's allocator.
 
 A RID of another architecture than the Docker engine's needs emulation (colima: `colima start --vz-rosetta`, or
 install binfmt). Under QEMU a build runs one job at a time, so a full run on macOS takes about 2.5 hours. A build on

@@ -58,3 +58,16 @@ license = "MIT OR Apache-2.0"
 path = "LICENSE-MIT"
 license = "MIT"
 checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+
+# libmimalloc-sys bundles the C library mimalloc, whose licence has a copyright of its own beside the crate's. Both
+# files are named here so that neither can go missing; mimalloc 3 is the one built, and the bundled mimalloc 2 is not.
+[libmimalloc-sys.clarify]
+license = "MIT"
+
+[[libmimalloc-sys.clarify.files]]
+path = "LICENSE.txt"
+checksum = "a08554fab028af3af047e8588d32d019662c1b1bf07959a195a2f75fe340726b"
+
+[[libmimalloc-sys.clarify.files]]
+path = "c_src/mimalloc/v3/LICENSE"
+checksum = "82ade5d7d9b029044b5fbbc326207fc47c2d44ee4dd71e8a559c36d728217de9"
