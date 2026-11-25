@@ -1,6 +1,6 @@
 [package]
 name = "hs_vision"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 publish = false
 description = "Face detection and recognition and person detection for HassSharp: YuNet, SFace and YOLOX-nano on tract, behind a small C ABI"

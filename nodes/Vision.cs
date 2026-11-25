@@ -1,4 +1,4 @@
-// hass-sharp-vision 1.1.1, from https://github.com/dompagoj/hass-sharp-vision
+// hass-sharp-vision 1.1.2, from https://github.com/dompagoj/hass-sharp-vision
 using System.Buffers;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -278,16 +278,16 @@ public sealed unsafe class VisionRecognizer : IFaceRecognizer
 public static class Vision
 {
     // Not an unsafe class: OpenAsync awaits, which an unsafe context may not. Its native parts are unsafe each.
-    const string Source = "https://github.com/dompagoj/hass-sharp-vision/releases/download/v1.1.1/";
+    const string Source = "https://github.com/dompagoj/hass-sharp-vision/releases/download/v1.1.2/";
 
     // The release's native/SHA256SUMS, by runtime identifier.
     static readonly Dictionary<string, string> Sha256 = new(StringComparer.Ordinal)
     {
         // pinned:begin
-        ["linux-arm64"] = "50aedc6a93135ebeabf6331b022bf1438253ef900ea2c22d4d087e812157a3ee",
-        ["linux-musl-arm64"] = "21472eaded6200babdad5508750b0f7ffc3317595f76274af80ca28e070901bf",
-        ["linux-musl-x64"] = "dd59fd7c0905f79eec7f9b5fbd2636ba80d0e0d562c5a185e052a708ff112fa6",
-        ["linux-x64"] = "99dc259a475ea7a2f7b7b2fd487ba318b79ad92e8fc3bc00d7d3edf752be8615",
+        ["linux-arm64"] = "488bbb6f4762ea27d9951b1b12e500e1776d8585a3ec4adb6f33935cd1fb985d",
+        ["linux-musl-arm64"] = "05decd6a977abd6c679fafae1eddd69def8f9a31439ef780476827c9e952bf79",
+        ["linux-musl-x64"] = "3b233b7db883a8df1ce7356dd1a3dc497e5ee3b4da4aee126e0f7983909ea493",
+        ["linux-x64"] = "9f7617fd4e838a04c38da91c0462ca34fe78e8c88d943c0a846995e3ba16035a",
         // pinned:end
     };
 
